@@ -26,7 +26,7 @@ Use your phone to voice-control your PC through AI. Speak into your phone's brow
 ```
 
 1. **PC** opens `https://<local-ip>:8080/` — shares screen to the LiveKit room
-2. **Phone** opens `https://<local-ip>:8080/mobile` — joins the room, sends mic audio, sees PC screen
+2. **Phone** uses the Flutter app (or `https://<local-ip>:8080/mobile`) — joins the room, sends mic audio, sees PC screen
 3. **Agent** subscribes to the phone's audio, sends it to a Realtime AI model (Qwen, Gemini, or OpenAI), publishes TTS audio back to the room
 4. The AI model can call tools: open apps, press keys, type text, describe screen, or delegate complex tasks to a Claude Code backend
 
@@ -75,23 +75,53 @@ DASHSCOPE_API_KEY=sk-xxx
 ### 3. Start the services
 
 ```bash
-# Terminal 1 — Token server (port 7850)
-python3 src/livekit-token-server.py
+bash src/start-livekit.sh
+```
 
-# Terminal 2 — HTTPS web server (port 8080)
-python3 src/screen-publisher-server.py
+This starts all three services in the background:
+- **Token server** (port 7850) — JWT authentication
+- **Screen publisher server** (port 8080) — HTTPS web server + token proxy
+- **AI agent** — speech processing via Realtime AI model
 
-# Terminal 3 — AI agent
-python3 src/livekit-agent.py
+Logs are written to `logs/`. Stop all services with:
+
+```bash
+bash src/start-livekit.sh --stop
 ```
 
 ### 4. Connect
 
 1. On your **PC browser**, open `https://localhost:8080/` — click "Publish Screen" to share your screen
-2. On your **phone browser**, open `https://<pc-local-ip>:8080/mobile` — tap "Connect"
+2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:8080/mobile` in the browser — tap "Connect"
 3. Speak to your phone — the AI agent will respond and execute commands on your PC
 
 > Accept the self-signed certificate warning on both devices. HTTPS is required for WebRTC microphone access.
+
+## Mobile app (Flutter)
+
+Native iOS/Android app replacing the web-based mobile client. Provides better audio handling, automatic landscape fullscreen, and native controls.
+
+### Build & run
+
+```bash
+cd app
+flutter pub get
+flutter run          # connected device or emulator
+```
+
+### Tech stack
+
+- **State management**: GetX
+- **HTTP**: Dio (with self-signed cert support for LAN)
+- **WebRTC**: livekit_client
+
+### Features
+
+- Voice input (mic) to AI agent
+- Real-time PC screen viewing (remote video)
+- AI TTS audio playback
+- Mute / disconnect controls
+- Auto landscape fullscreen (immersive mode on rotation)
 
 ## Project structure
 
@@ -101,7 +131,15 @@ src/
 ├── livekit-token-server.py     # JWT token server for LiveKit room access (port 7850)
 ├── screen-publisher-server.py  # HTTPS server serving web clients + token proxy (port 8080)
 ├── screen-publisher.html       # PC client — captures and publishes screen to LiveKit room
-└── mobile-client.html          # Phone client — mic input, screen view, audio playback
+├── mobile-client.html          # Phone client (web fallback) — mic input, screen view, audio playback
+├── start-livekit.sh            # One-command launcher for all three services
+app/                            # Flutter mobile app (iOS + Android)
+├── lib/
+│   ├── main.dart               # App entry point, self-signed cert handling
+│   ├── controllers/            # GetX controllers (connect, room)
+│   ├── pages/                  # UI pages (connect, room with video layer)
+│   ├── services/               # Token service (Dio)
+│   └── config/                 # App constants
 requirements-livekit.txt        # Python dependencies
 voice-state.json                # Runtime state (connection status)
 ```
