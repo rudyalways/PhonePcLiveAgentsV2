@@ -1,0 +1,4 @@
+{
+  "_comment": "Managed by src/add-user.py. Secrets are SHA-256 hashed.",
+  "_example": "python3 src/add-user.py alice mysecret"
+}

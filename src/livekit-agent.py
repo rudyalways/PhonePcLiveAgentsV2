@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Sutando LiveKit Agent — replaces bodhi VoiceSession + voice-agent.ts.
+Sutando LiveKit Agent — multi-user worker mode.
 
-Connects to LiveKit Cloud, subscribes to the phone user's mic audio,
-processes speech via Gemini Live API, publishes TTS audio back to the Room,
-and bridges tasks to Claude Code via the existing tasks/results file IPC.
+Runs as a LiveKit Agents worker. LiveKit Cloud dispatches one agent job
+per active room. Each room maps to one user (sutando-{username}), so tasks
+and results are fully isolated in tasks/{username}/ and results/{username}/.
 
 Usage:
   pip install "livekit-agents[google]" livekit python-dotenv
@@ -15,7 +15,6 @@ Environment (.env):
   LIVEKIT_API_KEY       — from LiveKit Cloud dashboard
   LIVEKIT_API_SECRET    — from LiveKit Cloud dashboard
   GEMINI_API_KEY        — Google AI Studio key
-  LIVEKIT_ROOM          — room name (default: sutando-room)
 """
 
 import asyncio
@@ -37,6 +36,9 @@ from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
+    JobContext,
+    WorkerOptions,
+    cli,
     llm as lk_llm,
     function_tool,
     RunContext,
@@ -55,12 +57,9 @@ GEMINI_VOICE_API_KEY = os.environ.get("GEMINI_VOICE_API_KEY", GEMINI_API_KEY)
 VOICE_MODEL = os.environ.get("VOICE_MODEL", "gemini-2.5-flash")
 REALTIME_PROVIDER = os.environ.get("REALTIME_PROVIDER", "gemini").lower()
 
-ROOM_NAME = os.environ.get("LIVEKIT_ROOM", "sutando-room")
-
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
 STATE_DIR = REPO / "state"
-CONVERSATION_LOG = REPO / "conversation.log"
 TASKS_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_DIR.mkdir(exist_ok=True)
@@ -451,12 +450,12 @@ def write_owner_activity(channel: str, summary: str) -> None:
         logger.warning("owner-activity write failed: %s", e)
 
 
-def archive_file(src: Path, kind: str, task_id: str) -> None:
+def archive_file(src: Path, kind: str, task_id: str, username: str) -> None:
     try:
         if not src.exists():
             return
         ym = datetime.now().strftime("%Y-%m")
-        dest_dir = REPO / kind / "archive" / ym
+        dest_dir = REPO / kind / username / "archive" / ym
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest_dir / f"{task_id}.txt"))
     except Exception:
@@ -466,10 +465,12 @@ def archive_file(src: Path, kind: str, task_id: str) -> None:
             pass
 
 
-def log_conversation(role: str, text: str) -> None:
+def log_conversation(username: str, role: str, text: str) -> None:
+    log_file = REPO / "logs" / f"conversation-{username}.log"
+    log_file.parent.mkdir(exist_ok=True)
     line = f"{datetime.now(timezone.utc).isoformat()}|{role}|{text.replace(chr(10), ' ')[:200]}\n"
     try:
-        with open(CONVERSATION_LOG, "a") as f:
+        with open(log_file, "a") as f:
             f.write(line)
     except Exception:
         pass
@@ -494,7 +495,7 @@ def build_voice_context() -> str:
     return "\n\n".join(parts)
 
 
-def build_greeting() -> str:
+def build_greeting(username: str) -> str:
     """Generate the initial greeting instruction."""
     stand_name = ""
     sid = REPO / "stand-identity.json"
@@ -505,7 +506,8 @@ def build_greeting() -> str:
         except Exception:
             pass
 
-    has_history = CONVERSATION_LOG.exists()
+    conversation_log = REPO / "logs" / f"conversation-{username}.log"
+    has_history = conversation_log.exists()
     tutorial_hint = (
         ""
         if has_history
@@ -513,7 +515,7 @@ def build_greeting() -> str:
     )
 
     today = datetime.now().strftime("%Y-%m-%d")
-    briefing_file = RESULTS_DIR / f"briefing-{today}.txt"
+    briefing_file = RESULTS_DIR / username / f"briefing-{today}.txt"
     briefing_hint = (
         ' Mention: "I have your morning briefing ready if you want it."'
         if has_history and briefing_file.exists()
@@ -594,8 +596,13 @@ GOODBYE: When the user says goodbye, respond with a SHORT farewell that STARTS w
 
 
 class SutandoAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, username: str = "default") -> None:
         super().__init__(instructions=SYSTEM_INSTRUCTIONS)
+        self._username = username
+        self._tasks_dir = TASKS_DIR / username
+        self._results_dir = RESULTS_DIR / username
+        self._tasks_dir.mkdir(parents=True, exist_ok=True)
+        self._results_dir.mkdir(parents=True, exist_ok=True)
         self._pending_tasks: dict[str, float] = {}
 
     @function_tool()
@@ -611,30 +618,28 @@ class SutandoAgent(Agent):
             f"task: {task}\n"
             f"source: livekit-voice\n"
             f"channel_id: local-voice\n"
+            f"username: {self._username}\n"
             f"access_tier: owner\n"
         )
-        task_file = TASKS_DIR / f"{task_id}.txt"
+        task_file = self._tasks_dir / f"{task_id}.txt"
         task_file.write_text(content)
         self._pending_tasks[task_id] = time.time()
         write_owner_activity("voice", task)
-        log_conversation("user", task)
-        logger.info("Task %s: %s", task_id, task[:100])
+        log_conversation(self._username, "user", task)
+        logger.info("Task %s [%s]: %s", task_id, self._username, task[:100])
 
-        # Poll for result with a short initial wait, then go async
-        result_file = RESULTS_DIR / f"{task_id}.txt"
+        result_file = self._results_dir / f"{task_id}.txt"
         for _ in range(8):
             if result_file.exists():
                 result_text = result_file.read_text().strip()
-                archive_file(result_file, "results", task_id)
-                archive_file(task_file, "tasks", task_id)
+                archive_file(result_file, "results", task_id, self._username)
+                archive_file(task_file, "tasks", task_id, self._username)
                 self._pending_tasks.pop(task_id, None)
-                log_conversation("assistant", result_text[:200])
+                log_conversation(self._username, "assistant", result_text[:200])
                 logger.info("Result %s: %s", task_id, result_text[:100])
                 return result_text
             await asyncio.sleep(1)
 
-        # Return immediately so the model can speak an acknowledgment.
-        # Continue polling in background and push the result when ready.
         session = context.session
         asyncio.create_task(self._poll_and_speak(task_id, task_file, result_file, session))
         return f"好的，正在处理。"
@@ -647,10 +652,10 @@ class SutandoAgent(Agent):
             for _ in range(TASK_TIMEOUT_S - 8):
                 if result_file.exists():
                     result_text = result_file.read_text().strip()
-                    archive_file(result_file, "results", task_id)
-                    archive_file(task_file, "tasks", task_id)
+                    archive_file(result_file, "results", task_id, self._username)
+                    archive_file(task_file, "tasks", task_id, self._username)
                     self._pending_tasks.pop(task_id, None)
-                    log_conversation("assistant", result_text[:200])
+                    log_conversation(self._username, "assistant", result_text[:200])
                     logger.info("Result (async) %s: %s", task_id, result_text[:100])
                     try:
                         await session.generate_reply(
@@ -816,89 +821,50 @@ class SutandoAgent(Agent):
 
 
 # ---------------------------------------------------------------------------
-# Agent entrypoint (standalone mode — connects directly to ROOM_NAME)
+# Worker mode entrypoint — one job per room (= one job per user)
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    logger.info("Sutando agent starting — connecting to room: %s", ROOM_NAME)
-
-    livekit_url = os.environ.get("LIVEKIT_URL", "")
-    livekit_api_key = os.environ.get("LIVEKIT_API_KEY", "")
-    livekit_api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
-
-    if not livekit_url or not livekit_api_key or not livekit_api_secret:
-        logger.error("LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET must be set")
-        return
-
-    # Generate agent token
-    from livekit.api import AccessToken, VideoGrants
-    from datetime import timedelta
-
-    token = (
-        AccessToken(livekit_api_key, livekit_api_secret)
-        .with_identity("sutando-agent")
-        .with_name("Sutando Agent")
-        .with_ttl(timedelta(hours=24))
-        .with_grants(VideoGrants(
-            room_join=True,
-            room=ROOM_NAME,
-            can_publish=True,
-            can_subscribe=True,
-            can_publish_data=True,
-            agent=True,
-        ))
-    ).to_jwt()
-
-    # Connect to room
-    room = rtc.Room()
-
-    # --- Debug: log all room-level track events ---
-    @room.on("track_subscribed")
-    def _on_track_sub(track, pub, participant):
-        logger.info("[PIPELINE] track_subscribed: kind=%s source=%s from=%s sid=%s",
-                     track.kind, pub.source, participant.identity, track.sid)
-
-    @room.on("track_published")
-    def _on_track_pub(pub, participant):
-        logger.info("[PIPELINE] track_published: kind=%s source=%s from=%s",
-                     pub.kind, pub.source, participant.identity)
-
-    @room.on("track_unsubscribed")
-    def _on_track_unsub(track, pub, participant):
-        logger.info("[PIPELINE] track_unsubscribed: kind=%s from=%s", track.kind, participant.identity)
-
-    @room.on("participant_connected")
-    def _on_p_connect(participant):
-        logger.info("[PIPELINE] participant_connected: %s", participant.identity)
-
-    @room.on("participant_disconnected")
-    def _on_p_disconnect(participant):
-        logger.info("[PIPELINE] participant_disconnected: %s", participant.identity)
-
-    await room.connect(livekit_url, token)
-    logger.info("Connected to room: %s as sutando-agent", room.name)
-
-    # Log existing participants
-    for p in room.remote_participants.values():
-        logger.info("[PIPELINE] existing participant: %s, tracks: %d",
-                     p.identity, len(p.track_publications))
-
-    agent = SutandoAgent()
-    realtime_model = create_realtime_model()
-    logger.info("Realtime provider: %s, model: %s", REALTIME_PROVIDER, realtime_model)
-    session = AgentSession(
-        llm=realtime_model,
-    )
+async def entrypoint(ctx: JobContext):
+    # Room name convention: sutando-{username}
+    room_name = ctx.room.name
+    username = room_name.removeprefix("sutando-") if room_name.startswith("sutando-") else room_name
+    logger.info("Agent job started: room=%s username=%s", room_name, username)
 
     # Write heartbeat
     heartbeat = STATE_DIR / "livekit-agent.heartbeat"
     heartbeat.write_text(str(int(time.time())))
 
-    greeting = build_greeting()
+    # Debug: log room-level track events
+    @ctx.room.on("track_subscribed")
+    def _on_track_sub(track, pub, participant):
+        logger.info("[PIPELINE] track_subscribed: kind=%s source=%s from=%s sid=%s",
+                    track.kind, pub.source, participant.identity, track.sid)
+
+    @ctx.room.on("track_published")
+    def _on_track_pub(pub, participant):
+        logger.info("[PIPELINE] track_published: kind=%s source=%s from=%s",
+                    pub.kind, pub.source, participant.identity)
+
+    @ctx.room.on("participant_connected")
+    def _on_p_connect(participant):
+        logger.info("[PIPELINE] participant_connected: %s", participant.identity)
+
+    @ctx.room.on("participant_disconnected")
+    def _on_p_disconnect(participant):
+        logger.info("[PIPELINE] participant_disconnected: %s", participant.identity)
+
+    await ctx.connect()
+
+    agent = SutandoAgent(username=username)
+    realtime_model = create_realtime_model()
+    logger.info("Realtime provider: %s username: %s", REALTIME_PROVIDER, username)
+
+    session = AgentSession(llm=realtime_model)
+    greeting = build_greeting(username)
 
     await session.start(
-        room=room,
+        room=ctx.room,
         agent=agent,
         room_input_options=RoomInputOptions(
             text_enabled=True,
@@ -907,17 +873,6 @@ async def main():
             participant_identity="phone-user",
         ),
     )
-
-    # Log agent's published tracks
-    async def _log_local_tracks():
-        await asyncio.sleep(5)
-        lp = room.local_participant
-        logger.info("[PIPELINE] local participant: %s, published tracks: %d",
-                     lp.identity, len(lp.track_publications))
-        for sid, pub in lp.track_publications.items():
-            logger.info("[PIPELINE]   track: sid=%s kind=%s source=%s name=%s",
-                         sid, pub.kind, pub.source, pub.name)
-    asyncio.create_task(_log_local_tracks())
 
     # Greeting: skip for Qwen — the generate_reply timeout corrupts Qwen's
     # session state and suppresses VAD from detecting subsequent user speech.
@@ -932,18 +887,7 @@ async def main():
     else:
         logger.info("Skipping greeting for %s provider", REALTIME_PROVIDER)
 
-    logger.info("Sutando agent ready — listening for voice commands")
-
-    # Keep running until interrupted
-    try:
-        while True:
-            await asyncio.sleep(60)
-            heartbeat.write_text(str(int(time.time())))
-    except asyncio.CancelledError:
-        pass
-    finally:
-        await room.disconnect()
-        logger.info("Agent disconnected")
+    logger.info("Sutando agent ready — room=%s username=%s", room_name, username)
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +896,4 @@ async def main():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nSutando agent stopped.")
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

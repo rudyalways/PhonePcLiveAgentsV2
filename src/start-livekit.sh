@@ -1,7 +1,8 @@
 #!/bin/bash
-# Start all LiveKit services (token server, screen publisher, AI agent).
+# Start all LiveKit services (token server, screen publisher, AI agent worker).
 # Usage: bash src/start-livekit.sh
 # Stop:  bash src/start-livekit.sh --stop
+# Add user: python3 src/add-user.py <username> <secret>
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -15,6 +16,21 @@ if [ "$1" = "--stop" ]; then
 fi
 
 set -a; [ -f .env ] && source .env; set +a
+mkdir -p logs
+
+# Check users are configured
+USER_COUNT=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('src/users.json'))
+    print(sum(1 for k in d if not k.startswith('_')))
+except: print(0)
+" 2>/dev/null)
+if [ "${USER_COUNT:-0}" = "0" ]; then
+  echo "  ⚠ No users configured. Add one first:"
+  echo "    python3 src/add-user.py <username> <secret>"
+  echo ""
+fi
 
 echo "Starting LiveKit services..."
 
@@ -34,9 +50,15 @@ fi
 
 sleep 1
 
+# Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
+# Credentials passed via CLI flags (values from .env loaded above).
 if ! pgrep -f "livekit-agent" > /dev/null 2>&1; then
-  python3 src/livekit-agent.py > logs/livekit-agent.log 2>&1 &
-  echo "  ✓ AI agent"
+  python3 src/livekit-agent.py \
+    --url "${LIVEKIT_URL}" \
+    --api-key "${LIVEKIT_API_KEY}" \
+    --api-secret "${LIVEKIT_API_SECRET}" \
+    > logs/livekit-agent.log 2>&1 &
+  echo "  ✓ AI agent (worker mode)"
 else
   echo "  ✓ AI agent (already running)"
 fi

@@ -20,10 +20,21 @@
   .status.connected { border-color: #2a6e2a; color: #6fbf6f; }
   .status.publishing { border-color: #2a6e6e; color: #6fbfbf; }
   .status.error { border-color: #6e2a2a; color: #bf6f6f; }
+  .login-form {
+    display: flex; flex-direction: column; gap: 12px; width: 280px;
+  }
+  input {
+    padding: 10px 14px; font-size: 14px; border-radius: 8px;
+    background: #1a1a2e; border: 1px solid #2a2a4e; color: #e0e0f0;
+    outline: none;
+  }
+  input:focus { border-color: #2563eb; }
   button {
     padding: 12px 32px; font-size: 16px; border: none; border-radius: 8px;
     cursor: pointer; font-weight: 500; transition: all 0.2s;
   }
+  #login-btn { background: #2563eb; color: white; width: 100%; }
+  #login-btn:hover { background: #1d4ed8; }
   #share-btn { background: #2563eb; color: white; }
   #share-btn:hover { background: #1d4ed8; }
   #share-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
@@ -34,20 +45,31 @@
     border: 1px solid #2a2a4e; display: none;
   }
   .info { font-size: 12px; color: #666; max-width: 400px; text-align: center; }
+  #main-ui { display: none; flex-direction: column; align-items: center; gap: 24px; }
 </style>
 </head>
 <body>
 
 <h1>Sutando Screen Publisher</h1>
-<div id="status" class="status">Disconnected</div>
-<div>
-  <button id="share-btn">Share Screen</button>
-  <button id="stop-btn">Stop Sharing</button>
+
+<div class="login-form" id="login-form">
+  <input id="username-input" type="text" placeholder="Username" autocomplete="username" />
+  <input id="secret-input" type="password" placeholder="Password" autocomplete="current-password" />
+  <button id="login-btn">Connect</button>
+  <div id="login-error" style="color:#bf6f6f;font-size:13px;text-align:center;display:none"></div>
 </div>
-<video id="preview" class="preview" autoplay muted></video>
-<div class="info">
-  Captures your full desktop and publishes to LiveKit Cloud.
-  The mobile app subscribes to see your screen in real time.
+
+<div id="main-ui">
+  <div id="status" class="status">Disconnected</div>
+  <div>
+    <button id="share-btn">Share Screen</button>
+    <button id="stop-btn">Stop Sharing</button>
+  </div>
+  <video id="preview" class="preview" autoplay muted></video>
+  <div class="info">
+    Captures your full desktop and publishes to LiveKit Cloud.
+    The mobile app subscribes to see your screen in real time.
+  </div>
 </div>
 
 <script type="module">
@@ -62,6 +84,12 @@
     ? 'http://localhost:7850'
     : `http://${window.location.hostname}:7850`;
 
+  const loginForm = document.getElementById('login-form');
+  const mainUi = document.getElementById('main-ui');
+  const loginBtn = document.getElementById('login-btn');
+  const loginError = document.getElementById('login-error');
+  const usernameInput = document.getElementById('username-input');
+  const secretInput = document.getElementById('secret-input');
   const statusEl = document.getElementById('status');
   const shareBtn = document.getElementById('share-btn');
   const stopBtn = document.getElementById('stop-btn');
@@ -75,37 +103,58 @@
     statusEl.className = `status ${cls}`;
   }
 
-  async function connect() {
-    try {
-      setStatus('Fetching token...', '');
-      const resp = await fetch(`${TOKEN_SERVER}/token?identity=screen-publisher&name=PC+Screen`);
-      if (!resp.ok) throw new Error(`Token server error: ${resp.status}`);
-      const { jwt, url } = await resp.json();
-      if (!url) throw new Error('LIVEKIT_URL not set on token server');
-
-      setStatus('Connecting to LiveKit...', '');
-      room = new Room({ adaptiveStream: false, dynacast: false });
-
-      room.on(RoomEvent.Connected, () => {
-        setStatus('Connected — click Share Screen', 'connected');
-        shareBtn.disabled = false;
-      });
-      room.on(RoomEvent.Disconnected, () => {
-        setStatus('Disconnected', '');
-        cleanup();
-      });
-      room.on(RoomEvent.ParticipantConnected, (p) =>
-        console.log(`[LiveKit] Participant joined: ${p.identity}`)
-      );
-      room.on(RoomEvent.ParticipantDisconnected, (p) =>
-        console.log(`[LiveKit] Participant left: ${p.identity}`)
-      );
-
-      await room.connect(url, jwt);
-    } catch (err) {
-      console.error('Connection failed:', err);
-      setStatus(`Error: ${err.message}`, 'error');
+  async function login() {
+    const username = usernameInput.value.trim();
+    const secret = secretInput.value;
+    if (!username || !secret) {
+      loginError.textContent = 'Enter username and password';
+      loginError.style.display = 'block';
+      return;
     }
+    loginBtn.disabled = true;
+    loginError.style.display = 'none';
+    try {
+      await connect(username, secret);
+      loginForm.style.display = 'none';
+      mainUi.style.display = 'flex';
+    } catch (err) {
+      loginError.textContent = err.message;
+      loginError.style.display = 'block';
+      loginBtn.disabled = false;
+    }
+  }
+
+  async function connect(username, secret) {
+    setStatus('Fetching token...', '');
+    const resp = await fetch(
+      `${TOKEN_SERVER}/token?user=${encodeURIComponent(username)}&secret=${encodeURIComponent(secret)}&identity=screen-publisher&name=PC+Screen`
+    );
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.error || `Token error ${resp.status}`);
+    }
+    const { jwt, url } = await resp.json();
+    if (!url) throw new Error('LIVEKIT_URL not set on token server');
+
+    setStatus('Connecting to LiveKit...', '');
+    room = new Room({ adaptiveStream: false, dynacast: false });
+
+    room.on(RoomEvent.Connected, () => {
+      setStatus('Connected — click Share Screen', 'connected');
+      shareBtn.disabled = false;
+    });
+    room.on(RoomEvent.Disconnected, () => {
+      setStatus('Disconnected', '');
+      cleanup();
+    });
+    room.on(RoomEvent.ParticipantConnected, (p) =>
+      console.log(`[LiveKit] Participant joined: ${p.identity}`)
+    );
+    room.on(RoomEvent.ParticipantDisconnected, (p) =>
+      console.log(`[LiveKit] Participant left: ${p.identity}`)
+    );
+
+    await room.connect(url, jwt);
   }
 
   async function startSharing() {
@@ -167,8 +216,9 @@
 
   shareBtn.onclick = startSharing;
   stopBtn.onclick = stopSharing;
+  loginBtn.onclick = login;
+  secretInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
   shareBtn.disabled = true;
-  connect();
 </script>
 
 </body>

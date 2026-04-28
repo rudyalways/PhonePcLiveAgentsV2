@@ -5,6 +5,29 @@ import '../controllers/connect_controller.dart';
 class ConnectPage extends GetView<ConnectController> {
   const ConnectPage({super.key});
 
+  InputDecoration _inputDecoration(String label, String hint) {
+    return InputDecoration(
+      hintText: hint,
+      hintStyle: TextStyle(color: Colors.grey[600]),
+      labelText: label,
+      labelStyle: const TextStyle(color: Color(0xFFC0C0D0)),
+      filled: true,
+      fillColor: const Color(0xFF1A1A2E),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: const BorderSide(color: Color(0xFF2A2A4E)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: const BorderSide(color: Color(0xFF2A2A4E)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: const BorderSide(color: Color(0xFF2563EB)),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -26,27 +49,26 @@ class ConnectPage extends GetView<ConnectController> {
               TextField(
                 controller: controller.serverUrlController,
                 style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  hintText: '192.168.1.100:8080',
-                  hintStyle: TextStyle(color: Colors.grey[600]),
-                  labelText: 'Server Address',
-                  labelStyle: const TextStyle(color: Color(0xFFC0C0D0)),
-                  filled: true,
-                  fillColor: const Color(0xFF1A1A2E),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: Color(0xFF2A2A4E)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: Color(0xFF2A2A4E)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: Color(0xFF2563EB)),
-                  ),
-                ),
+                decoration: _inputDecoration('Server Address', '192.168.1.100:8080'),
                 keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.next,
+                autocorrect: false,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller.usernameController,
+                style: const TextStyle(color: Colors.white),
+                decoration: _inputDecoration('Username', 'alice'),
+                keyboardType: TextInputType.text,
+                textInputAction: TextInputAction.next,
+                autocorrect: false,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller.secretController,
+                style: const TextStyle(color: Colors.white),
+                decoration: _inputDecoration('Password', '••••••'),
+                obscureText: true,
                 textInputAction: TextInputAction.go,
                 onSubmitted: (_) => controller.connect(),
               ),
@@ -57,7 +79,8 @@ class ConnectPage extends GetView<ConnectController> {
                     padding: const EdgeInsets.only(bottom: 16),
                     child: Text(
                       controller.errorMessage.value,
-                      style: const TextStyle(color: Color(0xFFBF6F6F), fontSize: 13),
+                      style: const TextStyle(
+                          color: Color(0xFFBF6F6F), fontSize: 13),
                       textAlign: TextAlign.center,
                     ),
                   );
@@ -68,32 +91,34 @@ class ConnectPage extends GetView<ConnectController> {
                 width: double.infinity,
                 height: 50,
                 child: Obx(() => ElevatedButton(
-                  onPressed: controller.isConnecting.value ? null : controller.connect,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF2563EB),
-                    disabledBackgroundColor: const Color(0xFF333333),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  child: controller.isConnecting.value
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text(
-                          'Connect',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.white,
-                          ),
+                      onPressed: controller.isConnecting.value
+                          ? null
+                          : controller.connect,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF2563EB),
+                        disabledBackgroundColor: const Color(0xFF333333),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
                         ),
-                )),
+                      ),
+                      child: controller.isConnecting.value
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text(
+                              'Connect',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white,
+                              ),
+                            ),
+                    )),
               ),
               const SizedBox(height: 24),
               Text(

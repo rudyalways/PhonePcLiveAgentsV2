@@ -6,6 +6,8 @@ import '../app/routes.dart';
 
 class ConnectController extends GetxController {
   final serverUrlController = TextEditingController();
+  final usernameController = TextEditingController();
+  final secretController = TextEditingController();
   final isConnecting = false.obs;
   final errorMessage = ''.obs;
 
@@ -14,20 +16,25 @@ class ConnectController extends GetxController {
   @override
   void onInit() {
     super.onInit();
-    _loadSavedUrl();
+    _loadSaved();
   }
 
-  Future<void> _loadSavedUrl() async {
+  Future<void> _loadSaved() async {
     final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString('server_url');
-    if (saved != null && saved.isNotEmpty) {
-      serverUrlController.text = saved;
+    final savedUrl = prefs.getString('server_url');
+    final savedUser = prefs.getString('username');
+    if (savedUrl != null && savedUrl.isNotEmpty) {
+      serverUrlController.text = savedUrl;
+    }
+    if (savedUser != null && savedUser.isNotEmpty) {
+      usernameController.text = savedUser;
     }
   }
 
-  Future<void> _saveUrl(String url) async {
+  Future<void> _saveCreds(String url, String username) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('server_url', url);
+    await prefs.setString('username', username);
   }
 
   String _normalizeUrl(String input) {
@@ -44,8 +51,15 @@ class ConnectController extends GetxController {
 
   Future<void> connect() async {
     final url = _normalizeUrl(serverUrlController.text);
+    final username = usernameController.text.trim();
+    final secret = secretController.text;
+
     if (url.isEmpty) {
       errorMessage.value = 'Please enter server address';
+      return;
+    }
+    if (username.isEmpty || secret.isEmpty) {
+      errorMessage.value = 'Please enter username and password';
       return;
     }
 
@@ -53,11 +67,15 @@ class ConnectController extends GetxController {
     errorMessage.value = '';
 
     try {
-      final tokenResp = await _tokenService.fetchToken(url);
+      final tokenResp = await _tokenService.fetchToken(
+        url,
+        username: username,
+        secret: secret,
+      );
       if (tokenResp.url.isEmpty) {
         throw Exception('LIVEKIT_URL not configured on server');
       }
-      await _saveUrl(serverUrlController.text.trim());
+      await _saveCreds(serverUrlController.text.trim(), username);
       Get.toNamed(AppRoutes.room, arguments: {
         'jwt': tokenResp.jwt,
         'livekitUrl': tokenResp.url,
@@ -73,6 +91,8 @@ class ConnectController extends GetxController {
   @override
   void onClose() {
     serverUrlController.dispose();
+    usernameController.dispose();
+    secretController.dispose();
     super.onClose();
   }
 }

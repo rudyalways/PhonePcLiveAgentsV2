@@ -26,13 +26,19 @@ class TokenService {
     return dio;
   }
 
-  Future<TokenResponse> fetchToken(String serverUrl) async {
+  Future<TokenResponse> fetchToken(
+    String serverUrl, {
+    required String username,
+    required String secret,
+  }) async {
     final dio = _createDio();
     final resp = await dio.get(
       '$serverUrl${AppConfig.tokenPath}',
       queryParameters: {
-        'identity': AppConfig.identity,
-        'name': AppConfig.displayName,
+        'user': username,
+        'secret': secret,
+        'identity': AppConfig.phoneIdentity,
+        'name': AppConfig.phoneDisplayName,
       },
     );
     return TokenResponse.fromJson(resp.data as Map<String, dynamic>);

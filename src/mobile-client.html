@@ -34,28 +34,38 @@
     background: #111; border-radius: 8px; border: 1px solid #2a2a4e;
     display: none; object-fit: contain;
   }
-  .controls { display: flex; gap: 8px; width: 100%; max-width: 300px; }
-  .controls button { flex: 1; }
-  .info { font-size: 11px; color: #555; text-align: center; }
-  .participants { font-size: 12px; color: #888; }
+  .login-form {
+    display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 300px;
+  }
+  input {
+    padding: 12px 14px; font-size: 15px; border-radius: 10px;
+    background: #1a1a2e; border: 1px solid #2a2a4e; color: #e0e0f0;
+    outline: none; width: 100%;
+  }
+  input:focus { border-color: #2563eb; }
+  #login-error { color: #bf6f6f; font-size: 13px; text-align: center; display: none; }
+  #main-ui { display: none; flex-direction: column; align-items: center; width: 100%; gap: 12px; }
 </style>
 </head>
 <body>
 
 <h1>Sutando Mobile</h1>
-<div id="status" class="status">Disconnected</div>
-<video id="screen-view" autoplay playsinline></video>
-<div id="participants" class="participants"></div>
 
-<button id="connect-btn">Connect</button>
-<div class="controls">
-  <button id="mute-btn">Mute</button>
-  <button id="disconnect-btn">Disconnect</button>
+<div class="login-form" id="login-form">
+  <input id="username-input" type="text" placeholder="Username" autocomplete="username" />
+  <input id="secret-input" type="password" placeholder="Password" autocomplete="current-password" />
+  <button id="connect-btn">Connect</button>
+  <div id="login-error"></div>
 </div>
 
-<div class="info" id="info">
-  Enter your PC's local IP address to connect.<br>
-  PC and phone must be on the same WiFi.
+<div id="main-ui">
+  <div id="status" class="status">Connecting...</div>
+  <video id="screen-view" autoplay playsinline></video>
+  <div id="participants" class="participants"></div>
+  <div class="controls">
+    <button id="mute-btn">Mute</button>
+    <button id="disconnect-btn">Disconnect</button>
+  </div>
 </div>
 
 <script type="module">
@@ -69,13 +79,17 @@
   // Token endpoint: same origin (proxied by screen-publisher-server)
   const TOKEN_SERVER = `${window.location.origin}`;
 
-  const statusEl = document.getElementById('status');
+  const loginForm = document.getElementById('login-form');
+  const mainUi = document.getElementById('main-ui');
   const connectBtn = document.getElementById('connect-btn');
   const disconnectBtn = document.getElementById('disconnect-btn');
   const muteBtn = document.getElementById('mute-btn');
   const screenView = document.getElementById('screen-view');
   const participantsEl = document.getElementById('participants');
-  const infoEl = document.getElementById('info');
+  const statusEl = document.getElementById('status');
+  const loginError = document.getElementById('login-error');
+  const usernameInput = document.getElementById('username-input');
+  const secretInput = document.getElementById('secret-input');
 
   let room = null;
   let micTrack = null;
@@ -96,30 +110,38 @@
   }
 
   async function connect() {
-    try {
-      connectBtn.disabled = true;
-      setStatus('Fetching token...', '');
+    const username = usernameInput.value.trim();
+    const secret = secretInput.value;
+    if (!username || !secret) {
+      loginError.textContent = 'Enter username and password';
+      loginError.style.display = 'block';
+      return;
+    }
 
+    connectBtn.disabled = true;
+    loginError.style.display = 'none';
+
+    try {
       // Unlock Web Audio on iOS — must happen in user-gesture context
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === 'suspended') await audioCtx.resume();
-      console.log('[LiveKit] AudioContext state:', audioCtx.state);
 
-      const resp = await fetch(`${TOKEN_SERVER}/token?identity=phone-user&name=Phone`);
+      const resp = await fetch(
+        `${TOKEN_SERVER}/token?user=${encodeURIComponent(username)}&secret=${encodeURIComponent(secret)}&identity=phone-user&name=Phone`
+      );
       if (!resp.ok) {
-        const err = await resp.text();
-        throw new Error(`Token error ${resp.status}: ${err}`);
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || `Token error ${resp.status}`);
       }
       const { jwt, url } = await resp.json();
       if (!url) throw new Error('LIVEKIT_URL not configured on server');
 
+      loginForm.style.display = 'none';
+      mainUi.style.display = 'flex';
       setStatus('Connecting...', '');
-      room = new Room({
-        adaptiveStream: true,
-        dynacast: true,
-      });
 
-      // Subscribe to screen video track from PC
+      room = new Room({ adaptiveStream: true, dynacast: true });
+
       room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
         console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
         if (track.kind === Track.Kind.Video) {
@@ -127,31 +149,24 @@
           screenView.style.display = 'block';
         }
         if (track.kind === Track.Kind.Audio) {
-          // TTS audio from agent — play through speaker
           const el = track.attach();
           el.setAttribute('autoplay', '');
           el.setAttribute('playsinline', '');
           el.volume = 1.0;
           document.body.appendChild(el);
-          // iOS requires explicit play() after user gesture
           el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
-          console.log(`[LiveKit] Audio element attached, paused=${el.paused}, src=${el.srcObject ? 'set' : 'none'}`);
         }
       });
 
       room.on(RoomEvent.TrackUnsubscribed, (track) => {
         track.detach().forEach((el) => el.remove());
-        if (track.kind === Track.Kind.Video) {
-          screenView.style.display = 'none';
-        }
+        if (track.kind === Track.Kind.Video) screenView.style.display = 'none';
       });
 
       room.on(RoomEvent.Connected, () => {
         setStatus('Connected', 'connected');
         disconnectBtn.style.display = 'block';
         muteBtn.style.display = 'block';
-        connectBtn.style.display = 'none';
-        infoEl.style.display = 'none';
         updateParticipants();
       });
 
@@ -165,7 +180,6 @@
 
       await room.connect(url, jwt);
 
-      // Publish mic audio
       const tracks = await createLocalTracks({ audio: true, video: false });
       micTrack = tracks[0];
       await room.localParticipant.publishTrack(micTrack, {
@@ -176,7 +190,10 @@
 
     } catch (err) {
       console.error('Connect failed:', err);
-      setStatus(`Error: ${err.message}`, 'error');
+      loginForm.style.display = 'flex';
+      mainUi.style.display = 'none';
+      loginError.textContent = err.message;
+      loginError.style.display = 'block';
       connectBtn.disabled = false;
     }
   }
@@ -190,34 +207,28 @@
   }
 
   async function disconnect() {
-    if (room) {
-      await room.disconnect();
-    }
+    if (room) await room.disconnect();
     cleanup();
   }
 
   function cleanup() {
-    if (micTrack) {
-      micTrack.stop();
-      micTrack = null;
-    }
+    if (micTrack) { micTrack.stop(); micTrack = null; }
     room = null;
     muted = false;
     screenView.style.display = 'none';
     screenView.srcObject = null;
-    connectBtn.style.display = 'block';
+    mainUi.style.display = 'none';
+    loginForm.style.display = 'flex';
     connectBtn.disabled = false;
-    disconnectBtn.style.display = 'none';
-    muteBtn.style.display = 'none';
     muteBtn.textContent = 'Mute';
     muteBtn.classList.remove('muted');
-    infoEl.style.display = 'block';
     participantsEl.textContent = '';
   }
 
   connectBtn.onclick = connect;
   disconnectBtn.onclick = disconnect;
   muteBtn.onclick = toggleMute;
+  secretInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
 </script>
 
 </body>
