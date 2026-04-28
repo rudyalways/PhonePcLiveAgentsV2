@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Sutando — Mobile</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a12; color: #c0c0d0;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; min-height: 100dvh;
+    padding: 16px; gap: 12px;
+  }
+  h1 { font-size: 18px; font-weight: 500; color: #e0e0f0; }
+  .status {
+    font-size: 13px; padding: 6px 14px; border-radius: 16px;
+    background: #1a1a2e; border: 1px solid #2a2a4e;
+  }
+  .status.connected { border-color: #2a6e2a; color: #6fbf6f; }
+  .status.error { border-color: #6e2a2a; color: #bf6f6f; }
+  button {
+    padding: 14px 32px; font-size: 16px; border: none; border-radius: 10px;
+    cursor: pointer; font-weight: 600; width: 100%; max-width: 300px;
+  }
+  #connect-btn { background: #2563eb; color: white; }
+  #connect-btn:disabled { background: #333; color: #666; }
+  #disconnect-btn { background: #dc2626; color: white; display: none; }
+  #mute-btn { background: #444; color: white; display: none; }
+  #mute-btn.muted { background: #b91c1c; }
+  #screen-view {
+    width: 100%; max-width: 100vw; aspect-ratio: 16/9;
+    background: #111; border-radius: 8px; border: 1px solid #2a2a4e;
+    display: none; object-fit: contain;
+  }
+  .controls { display: flex; gap: 8px; width: 100%; max-width: 300px; }
+  .controls button { flex: 1; }
+  .info { font-size: 11px; color: #555; text-align: center; }
+  .participants { font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+
+<h1>Sutando Mobile</h1>
+<div id="status" class="status">Disconnected</div>
+<video id="screen-view" autoplay playsinline></video>
+<div id="participants" class="participants"></div>
+
+<button id="connect-btn">Connect</button>
+<div class="controls">
+  <button id="mute-btn">Mute</button>
+  <button id="disconnect-btn">Disconnect</button>
+</div>
+
+<div class="info" id="info">
+  Enter your PC's local IP address to connect.<br>
+  PC and phone must be on the same WiFi.
+</div>
+
+<script type="module">
+  import {
+    Room,
+    RoomEvent,
+    Track,
+    createLocalTracks,
+  } from 'https://esm.sh/livekit-client@2.9.7';
+
+  // Token endpoint: same origin (proxied by screen-publisher-server)
+  const TOKEN_SERVER = `${window.location.origin}`;
+
+  const statusEl = document.getElementById('status');
+  const connectBtn = document.getElementById('connect-btn');
+  const disconnectBtn = document.getElementById('disconnect-btn');
+  const muteBtn = document.getElementById('mute-btn');
+  const screenView = document.getElementById('screen-view');
+  const participantsEl = document.getElementById('participants');
+  const infoEl = document.getElementById('info');
+
+  let room = null;
+  let micTrack = null;
+  let muted = false;
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = `status ${cls || ''}`;
+  }
+
+  function updateParticipants() {
+    if (!room) return;
+    const names = [];
+    room.remoteParticipants.forEach((p) => names.push(p.identity));
+    participantsEl.textContent = names.length
+      ? `In room: ${names.join(', ')}`
+      : 'Waiting for other participants...';
+  }
+
+  async function connect() {
+    try {
+      connectBtn.disabled = true;
+      setStatus('Fetching token...', '');
+
+      // Unlock Web Audio on iOS — must happen in user-gesture context
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      console.log('[LiveKit] AudioContext state:', audioCtx.state);
+
+      const resp = await fetch(`${TOKEN_SERVER}/token?identity=phone-user&name=Phone`);
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(`Token error ${resp.status}: ${err}`);
+      }
+      const { jwt, url } = await resp.json();
+      if (!url) throw new Error('LIVEKIT_URL not configured on server');
+
+      setStatus('Connecting...', '');
+      room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+      });
+
+      // Subscribe to screen video track from PC
+      room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+        console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
+        if (track.kind === Track.Kind.Video) {
+          track.attach(screenView);
+          screenView.style.display = 'block';
+        }
+        if (track.kind === Track.Kind.Audio) {
+          // TTS audio from agent — play through speaker
+          const el = track.attach();
+          el.setAttribute('autoplay', '');
+          el.setAttribute('playsinline', '');
+          el.volume = 1.0;
+          document.body.appendChild(el);
+          // iOS requires explicit play() after user gesture
+          el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
+          console.log(`[LiveKit] Audio element attached, paused=${el.paused}, src=${el.srcObject ? 'set' : 'none'}`);
+        }
+      });
+
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach((el) => el.remove());
+        if (track.kind === Track.Kind.Video) {
+          screenView.style.display = 'none';
+        }
+      });
+
+      room.on(RoomEvent.Connected, () => {
+        setStatus('Connected', 'connected');
+        disconnectBtn.style.display = 'block';
+        muteBtn.style.display = 'block';
+        connectBtn.style.display = 'none';
+        infoEl.style.display = 'none';
+        updateParticipants();
+      });
+
+      room.on(RoomEvent.Disconnected, () => {
+        setStatus('Disconnected', '');
+        cleanup();
+      });
+
+      room.on(RoomEvent.ParticipantConnected, () => updateParticipants());
+      room.on(RoomEvent.ParticipantDisconnected, () => updateParticipants());
+
+      await room.connect(url, jwt);
+
+      // Publish mic audio
+      const tracks = await createLocalTracks({ audio: true, video: false });
+      micTrack = tracks[0];
+      await room.localParticipant.publishTrack(micTrack, {
+        name: 'mic',
+        source: Track.Source.Microphone,
+      });
+      console.log('[LiveKit] Mic published');
+
+    } catch (err) {
+      console.error('Connect failed:', err);
+      setStatus(`Error: ${err.message}`, 'error');
+      connectBtn.disabled = false;
+    }
+  }
+
+  function toggleMute() {
+    if (!micTrack) return;
+    muted = !muted;
+    micTrack.mediaStreamTrack.enabled = !muted;
+    muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+    muteBtn.classList.toggle('muted', muted);
+  }
+
+  async function disconnect() {
+    if (room) {
+      await room.disconnect();
+    }
+    cleanup();
+  }
+
+  function cleanup() {
+    if (micTrack) {
+      micTrack.stop();
+      micTrack = null;
+    }
+    room = null;
+    muted = false;
+    screenView.style.display = 'none';
+    screenView.srcObject = null;
+    connectBtn.style.display = 'block';
+    connectBtn.disabled = false;
+    disconnectBtn.style.display = 'none';
+    muteBtn.style.display = 'none';
+    muteBtn.textContent = 'Mute';
+    muteBtn.classList.remove('muted');
+    infoEl.style.display = 'block';
+    participantsEl.textContent = '';
+  }
+
+  connectBtn.onclick = connect;
+  disconnectBtn.onclick = disconnect;
+  muteBtn.onclick = toggleMute;
+</script>
+
+</body>
+</html>

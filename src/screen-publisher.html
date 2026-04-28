@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sutando — Screen Publisher</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a12; color: #c0c0d0;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; gap: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 500; color: #e0e0f0; }
+  .status {
+    font-size: 14px; padding: 8px 16px; border-radius: 20px;
+    background: #1a1a2e; border: 1px solid #2a2a4e;
+  }
+  .status.connected { border-color: #2a6e2a; color: #6fbf6f; }
+  .status.publishing { border-color: #2a6e6e; color: #6fbfbf; }
+  .status.error { border-color: #6e2a2a; color: #bf6f6f; }
+  button {
+    padding: 12px 32px; font-size: 16px; border: none; border-radius: 8px;
+    cursor: pointer; font-weight: 500; transition: all 0.2s;
+  }
+  #share-btn { background: #2563eb; color: white; }
+  #share-btn:hover { background: #1d4ed8; }
+  #share-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  #stop-btn { background: #dc2626; color: white; display: none; }
+  #stop-btn:hover { background: #b91c1c; }
+  .preview {
+    max-width: 640px; max-height: 360px; border-radius: 8px;
+    border: 1px solid #2a2a4e; display: none;
+  }
+  .info { font-size: 12px; color: #666; max-width: 400px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Sutando Screen Publisher</h1>
+<div id="status" class="status">Disconnected</div>
+<div>
+  <button id="share-btn">Share Screen</button>
+  <button id="stop-btn">Stop Sharing</button>
+</div>
+<video id="preview" class="preview" autoplay muted></video>
+<div class="info">
+  Captures your full desktop and publishes to LiveKit Cloud.
+  The mobile app subscribes to see your screen in real time.
+</div>
+
+<script type="module">
+  import {
+    Room,
+    RoomEvent,
+    Track,
+    createLocalScreenTracks,
+  } from 'https://esm.sh/livekit-client@2.9.7';
+
+  const TOKEN_SERVER = window.location.hostname === 'localhost'
+    ? 'http://localhost:7850'
+    : `http://${window.location.hostname}:7850`;
+
+  const statusEl = document.getElementById('status');
+  const shareBtn = document.getElementById('share-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  const preview = document.getElementById('preview');
+
+  let room = null;
+  let screenTrack = null;
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = `status ${cls}`;
+  }
+
+  async function connect() {
+    try {
+      setStatus('Fetching token...', '');
+      const resp = await fetch(`${TOKEN_SERVER}/token?identity=screen-publisher&name=PC+Screen`);
+      if (!resp.ok) throw new Error(`Token server error: ${resp.status}`);
+      const { jwt, url } = await resp.json();
+      if (!url) throw new Error('LIVEKIT_URL not set on token server');
+
+      setStatus('Connecting to LiveKit...', '');
+      room = new Room({ adaptiveStream: false, dynacast: false });
+
+      room.on(RoomEvent.Connected, () => {
+        setStatus('Connected — click Share Screen', 'connected');
+        shareBtn.disabled = false;
+      });
+      room.on(RoomEvent.Disconnected, () => {
+        setStatus('Disconnected', '');
+        cleanup();
+      });
+      room.on(RoomEvent.ParticipantConnected, (p) =>
+        console.log(`[LiveKit] Participant joined: ${p.identity}`)
+      );
+      room.on(RoomEvent.ParticipantDisconnected, (p) =>
+        console.log(`[LiveKit] Participant left: ${p.identity}`)
+      );
+
+      await room.connect(url, jwt);
+    } catch (err) {
+      console.error('Connection failed:', err);
+      setStatus(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  async function startSharing() {
+    try {
+      const tracks = await createLocalScreenTracks({
+        resolution: { width: 1920, height: 1080, frameRate: 15 },
+        audio: false,
+      });
+      screenTrack = tracks[0];
+
+      preview.srcObject = new MediaStream([screenTrack.mediaStreamTrack]);
+      preview.style.display = 'block';
+
+      await room.localParticipant.publishTrack(screenTrack, {
+        name: 'screen',
+        source: Track.Source.ScreenShare,
+        videoEncoding: { maxBitrate: 3_000_000, maxFramerate: 15 },
+        screenShareEncoding: { maxBitrate: 3_000_000, maxFramerate: 15 },
+      });
+
+      setStatus('Publishing screen', 'publishing');
+      shareBtn.style.display = 'none';
+      stopBtn.style.display = 'inline-block';
+
+      screenTrack.mediaStreamTrack.onended = () => stopSharing();
+    } catch (err) {
+      console.error('Screen share failed:', err);
+      setStatus(
+        err.name === 'NotAllowedError'
+          ? 'Screen sharing denied — try again'
+          : `Error: ${err.message}`,
+        'error'
+      );
+    }
+  }
+
+  async function stopSharing() {
+    if (screenTrack) {
+      await room.localParticipant.unpublishTrack(screenTrack);
+      screenTrack.stop();
+      screenTrack = null;
+    }
+    preview.style.display = 'none';
+    preview.srcObject = null;
+    shareBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+    setStatus('Connected — click Share Screen', 'connected');
+  }
+
+  function cleanup() {
+    screenTrack?.stop();
+    screenTrack = null;
+    preview.style.display = 'none';
+    preview.srcObject = null;
+    shareBtn.disabled = true;
+    shareBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+  }
+
+  shareBtn.onclick = startSharing;
+  stopBtn.onclick = stopSharing;
+  shareBtn.disabled = true;
+  connect();
+</script>
+
+</body>
+</html>
