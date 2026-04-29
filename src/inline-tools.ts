@@ -21,6 +21,10 @@ import { describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool,
 export { summonTool, dismissTool, joinZoomTool, joinGmeetTool, lookupMeetingIdTool, callContactTool } from './meeting-tools.js';
 import { summonTool, dismissTool, joinZoomTool, joinGmeetTool, lookupMeetingIdTool, callContactTool } from './meeting-tools.js';
 
+// Re-export cancelTask from task-bridge (the authoritative implementation)
+export { cancelTask as cancelTaskTool } from './task-bridge.js';
+import { cancelTask as cancelTaskTool } from './task-bridge.js';
+
 // --- Keyboard tool ---
 
 export const pressKeyTool: ToolDefinition = {
@@ -316,30 +320,6 @@ export const clipboardTool: ToolDefinition = {
 	},
 };
 
-export const cancelTaskTool: ToolDefinition = {
-	name: 'cancel_task',
-	description: 'Cancel the most recent pending task. Use when someone says "cancel", "nevermind", "stop that".',
-	parameters: z.object({}),
-	execution: 'inline',
-	async execute() {
-		try {
-			const tasksDir = join(process.cwd(), 'tasks');
-			const resultsDir = join(process.cwd(), 'results');
-			const files = readdirSync(tasksDir).filter(f => f.endsWith('.txt')).sort();
-			if (files.length === 0) return { status: 'nothing_to_cancel' };
-			const mostRecent = files[files.length - 1];
-			const taskId = mostRecent.replace('.txt', '');
-			// Write a cancelled result so the web UI shows it with the cancelled icon
-			writeFileSync(join(resultsDir, mostRecent), 'Cancelled.');
-			unlinkSync(join(tasksDir, mostRecent));
-			console.log(`${ts()} [CancelTask] cancelled: ${taskId}`);
-			return { status: 'cancelled', taskId };
-		} catch (err) {
-			return { error: `Cancel failed: ${err instanceof Error ? err.message : err}` };
-		}
-	},
-};
-
 export const toggleTasksTool: ToolDefinition = {
 	name: 'toggle_tasks',
 	description:
@@ -378,7 +358,7 @@ export const getCurrentTimeTool: ToolDefinition = {
 	parameters: z.object({}),
 	execution: 'inline',
 	async execute() {
-		return { time: new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'long' }) };
+		return { time: new Date().toISOString() };
 	},
 };
 
