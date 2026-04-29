@@ -47,6 +47,12 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Voice control requires microphone access</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Required to connect to the Sutando server on your local network</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_livekit._tcp</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

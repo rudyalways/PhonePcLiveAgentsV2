@@ -7,6 +7,7 @@ Usage: python3 src/livekit-token-server.py
 Requires: pip install livekit-api python-dotenv
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -22,10 +23,18 @@ try:
 except ImportError:
     pass
 
-from livekit.api import AccessToken, VideoGrants
+from livekit.api import (
+    AccessToken,
+    VideoGrants,
+    LiveKitAPI,
+    CreateAgentDispatchRequest,
+    DeleteAgentDispatchRequest,
+    ListParticipantsRequest,
+)
 
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
 PORT = int(os.environ.get("TOKEN_SERVER_PORT", "7850"))
 
 USERS_FILE = Path(__file__).resolve().parent / "users.json"
@@ -72,6 +81,45 @@ def create_token(identity: str, name: str, room: str) -> str:
     return token.to_jwt()
 
 
+async def _ensure_agent_dispatched(room: str) -> None:
+    """Dispatch the sutando agent if no agent participant is currently active in the room."""
+    if not LIVEKIT_URL:
+        return
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lkapi:
+        # Check for a live agent participant (kind=4) — stale dispatch records don't count
+        try:
+            parts = await lkapi.room.list_participants(ListParticipantsRequest(room=room))
+            for p in parts.participants:
+                if p.kind == 4:  # ParticipantInfo.Kind.AGENT
+                    print(f"[TokenServer] Agent already in room {room}", flush=True)
+                    return
+        except Exception:
+            pass  # Room doesn't exist yet — proceed to dispatch
+
+        # Clean up stale dispatches before creating a fresh one
+        dispatches = await lkapi.agent_dispatch.list_dispatch(room)
+        for d in dispatches:
+            if d.agent_name == "sutando":
+                try:
+                    await lkapi.agent_dispatch.delete_dispatch(
+                        DeleteAgentDispatchRequest(dispatch_id=d.id, room=room)
+                    )
+                except Exception:
+                    pass
+
+        await lkapi.agent_dispatch.create_dispatch(
+            CreateAgentDispatchRequest(room=room, agent_name="sutando")
+        )
+        print(f"[TokenServer] Dispatched agent to {room}", flush=True)
+
+
+def ensure_agent_dispatched(room: str) -> None:
+    try:
+        asyncio.run(_ensure_agent_dispatched(room))
+    except Exception as e:
+        print(f"[TokenServer] Agent dispatch error: {e}", flush=True)
+
+
 class TokenHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -99,10 +147,15 @@ class TokenHandler(BaseHTTPRequestHandler):
 
         try:
             jwt = create_token(identity, name, room)
+
+            # Only dispatch agent for the phone user, not screen-publisher or other identities
+            if identity == "phone-user":
+                ensure_agent_dispatched(room)
+
             body = json.dumps({
                 "jwt": jwt,
                 "room": room,
-                "url": os.environ.get("LIVEKIT_URL", ""),
+                "url": LIVEKIT_URL,
                 "identity": identity,
                 "username": username,
             }).encode()
@@ -143,7 +196,7 @@ def main():
     users = load_users()
 
     print(f"LiveKit Token Server running on http://0.0.0.0:{PORT}", flush=True)
-    print(f"  LiveKit URL: {os.environ.get('LIVEKIT_URL', '(not set)')}", flush=True)
+    print(f"  LiveKit URL: {LIVEKIT_URL or '(not set)'}", flush=True)
     print(f"  Users loaded: {len(users)} ({', '.join(users.keys()) or 'none'})", flush=True)
     if not users:
         print("  ⚠ No users configured. Run: python3 src/add-user.py <username> <secret>", flush=True)

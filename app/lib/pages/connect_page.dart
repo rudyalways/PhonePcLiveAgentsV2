@@ -30,103 +30,112 @@ class ConnectPage extends GetView<ConnectController> {
 
   @override
   Widget build(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    final availableHeight = mq.size.height - mq.padding.top - mq.padding.bottom;
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Text(
-                'Sutando Remote',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFFE0E0F0),
-                ),
-              ),
-              const SizedBox(height: 40),
-              TextField(
-                controller: controller.serverUrlController,
-                style: const TextStyle(color: Colors.white),
-                decoration: _inputDecoration('Server Address', '192.168.1.100:8080'),
-                keyboardType: TextInputType.url,
-                textInputAction: TextInputAction.next,
-                autocorrect: false,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: controller.usernameController,
-                style: const TextStyle(color: Colors.white),
-                decoration: _inputDecoration('Username', 'alice'),
-                keyboardType: TextInputType.text,
-                textInputAction: TextInputAction.next,
-                autocorrect: false,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: controller.secretController,
-                style: const TextStyle(color: Colors.white),
-                decoration: _inputDecoration('Password', '••••••'),
-                obscureText: true,
-                textInputAction: TextInputAction.go,
-                onSubmitted: (_) => controller.connect(),
-              ),
-              const SizedBox(height: 16),
-              Obx(() {
-                if (controller.errorMessage.value.isNotEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Text(
-                      controller.errorMessage.value,
-                      style: const TextStyle(
-                          color: Color(0xFFBF6F6F), fontSize: 13),
-                      textAlign: TextAlign.center,
-                    ),
-                  );
-                }
-                return const SizedBox.shrink();
-              }),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: Obx(() => ElevatedButton(
-                      onPressed: controller.isConnecting.value
-                          ? null
-                          : controller.connect,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF2563EB),
-                        disabledBackgroundColor: const Color(0xFF333333),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: availableHeight),
+            child: IntrinsicHeight(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text(
+                      'Sutando Remote',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFE0E0F0),
                       ),
-                      child: controller.isConnecting.value
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text(
-                              'Connect',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white,
+                    ),
+                    const SizedBox(height: 40),
+                    TextField(
+                      controller: controller.serverUrlController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: _inputDecoration('Server Address', '192.168.1.100:8080'),
+                      keyboardType: TextInputType.url,
+                      textInputAction: TextInputAction.next,
+                      autocorrect: false,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: controller.usernameController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: _inputDecoration('Username', 'alice'),
+                      keyboardType: TextInputType.text,
+                      textInputAction: TextInputAction.next,
+                      autocorrect: false,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: controller.secretController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: _inputDecoration('Password', '••••••'),
+                      obscureText: true,
+                      textInputAction: TextInputAction.go,
+                      onSubmitted: (_) => controller.connect(),
+                    ),
+                    const SizedBox(height: 16),
+                    Obx(() {
+                      if (controller.errorMessage.value.isNotEmpty) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: Text(
+                            controller.errorMessage.value,
+                            style: const TextStyle(
+                                color: Color(0xFFBF6F6F), fontSize: 13),
+                            textAlign: TextAlign.center,
+                          ),
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    }),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: Obx(() => ElevatedButton(
+                            onPressed: controller.isConnecting.value
+                                ? null
+                                : controller.connect,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF2563EB),
+                              disabledBackgroundColor: const Color(0xFF333333),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
                               ),
                             ),
-                    )),
+                            child: controller.isConnecting.value
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : const Text(
+                                    'Connect',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                          )),
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'PC and phone must be on the same WiFi.',
+                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: 24),
-              Text(
-                'PC and phone must be on the same WiFi.',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                textAlign: TextAlign.center,
-              ),
-            ],
+            ),
           ),
         ),
       ),

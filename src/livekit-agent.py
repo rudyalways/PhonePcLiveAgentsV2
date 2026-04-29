@@ -229,7 +229,7 @@ def _patch_qwen_compat():
                         if self._current_generation is None:
                             logger.info("[QWEN-PATCH] nudging Qwen with response.create after tool output")
                             self.send_event({"type": "response.create", "response": {}})
-                    asyncio.get_event_loop().call_later(2.0, _nudge_response)
+                    asyncio.get_event_loop().call_later(0.5, _nudge_response)
 
             key = f"out:{evt_type}"
             _event_counts[key] = _event_counts.get(key, 0) + 1
@@ -599,11 +599,60 @@ class SutandoAgent(Agent):
     def __init__(self, username: str = "default") -> None:
         super().__init__(instructions=SYSTEM_INSTRUCTIONS)
         self._username = username
-        self._tasks_dir = TASKS_DIR / username
-        self._results_dir = RESULTS_DIR / username
+        self._tasks_dir = TASKS_DIR
+        self._results_dir = RESULTS_DIR
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._pending_tasks: dict[str, float] = {}
+
+    def _is_session_healthy(self) -> bool:
+        """Return True if sutando-core updated core-status.json within the last 5 minutes."""
+        try:
+            status_file = REPO / "core-status.json"
+            if not status_file.exists():
+                return False
+            data = json.loads(status_file.read_text())
+            return (time.time() - data.get("ts", 0)) < 300
+        except Exception:
+            return False
+
+    async def _execute_directly(self, task: str, task_id: str) -> str:
+        """Fallback: direct Anthropic SDK call when sutando-core is unhealthy.
+        Falls back to claude -p subprocess if SDK is unavailable."""
+        logger.warning("sutando-core unhealthy — direct SDK execution for %s", task_id)
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic()
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1024,
+                    tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                    messages=[{"role": "user", "content": task}],
+                    system="你是Sutando，用户的个人AI助手。简洁回答，用中文。",
+                ),
+                timeout=30,
+            )
+            texts = [b.text for b in response.content if hasattr(b, "text")]
+            return "\n".join(texts) if texts else "任务完成，无输出。"
+        except Exception as e:
+            logger.warning("SDK execution failed (%s), falling back to claude -p", e)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p", task,
+                "--dangerously-skip-permissions",
+                "--add-dir", str(Path.home()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(REPO),
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+            result = stdout.decode().strip()
+            return result if result else "任务完成。"
+        except asyncio.TimeoutError:
+            return "任务执行超时（2分钟）。"
+        except Exception as e:
+            return f"直接执行失败: {e}"
 
     @function_tool()
     async def work(self, context: RunContext, task: str) -> str:
@@ -628,6 +677,14 @@ class SutandoAgent(Agent):
         log_conversation(self._username, "user", task)
         logger.info("Task %s [%s]: %s", task_id, self._username, task[:100])
 
+        # Upfront health check — skip the 8s poll if session is already known dead
+        if not self._is_session_healthy():
+            task_file.unlink(missing_ok=True)
+            result_text = await self._execute_directly(task, task_id)
+            self._pending_tasks.pop(task_id, None)
+            log_conversation(self._username, "assistant", result_text[:200])
+            return result_text
+
         result_file = self._results_dir / f"{task_id}.txt"
         for _ in range(8):
             if result_file.exists():
@@ -639,6 +696,14 @@ class SutandoAgent(Agent):
                 logger.info("Result %s: %s", task_id, result_text[:100])
                 return result_text
             await asyncio.sleep(1)
+
+        # Session was healthy at start but result not ready — check again then background poll
+        if not self._is_session_healthy():
+            task_file.unlink(missing_ok=True)
+            result_text = await self._execute_directly(task, task_id)
+            self._pending_tasks.pop(task_id, None)
+            log_conversation(self._username, "assistant", result_text[:200])
+            return result_text
 
         session = context.session
         asyncio.create_task(self._poll_and_speak(task_id, task_file, result_file, session))
@@ -856,6 +921,11 @@ async def entrypoint(ctx: JobContext):
 
     await ctx.connect()
 
+    logger.info("[DISPATCH] job received: room=%s username=%s", ctx.room.name, username)
+    for p in ctx.room.remote_participants.values():
+        logger.info("[DISPATCH] existing participant: identity=%s tracks=%d",
+                    p.identity, len(p.track_publications))
+
     agent = SutandoAgent(username=username)
     realtime_model = create_realtime_model()
     logger.info("Realtime provider: %s username: %s", REALTIME_PROVIDER, username)
@@ -896,4 +966,4 @@ async def entrypoint(ctx: JobContext):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="sutando"))

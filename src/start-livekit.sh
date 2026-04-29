@@ -53,10 +53,7 @@ sleep 1
 # Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
 # Credentials passed via CLI flags (values from .env loaded above).
 if ! pgrep -f "livekit-agent" > /dev/null 2>&1; then
-  python3 src/livekit-agent.py \
-    --url "${LIVEKIT_URL}" \
-    --api-key "${LIVEKIT_API_KEY}" \
-    --api-secret "${LIVEKIT_API_SECRET}" \
+  python3 src/livekit-agent.py start \
     > logs/livekit-agent.log 2>&1 &
   echo "  ✓ AI agent (worker mode)"
 else

@@ -295,6 +295,13 @@ done
 echo ""
 open "http://localhost:8080"
 
+# Start session guardian if not already running (survives exec below)
+if ! pgrep -qf "session-guardian.sh" 2>/dev/null; then
+  nohup bash "$REPO/src/session-guardian.sh" >> "$REPO/logs/session-guardian.log" 2>&1 &
+  disown $!
+  echo "Session guardian started."
+fi
+
 # Check if a sutando-core session is already running
 if pgrep -f "claude.*--name.*sutando-core" > /dev/null 2>&1; then
   echo "Claude Code (sutando-core) is already running."

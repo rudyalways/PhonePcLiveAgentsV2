@@ -1,4 +1,8 @@
 {
   "_comment": "Managed by src/add-user.py. Secrets are SHA-256 hashed.",
-  "_example": "python3 src/add-user.py alice mysecret"
+  "_example": "python3 src/add-user.py alice mysecret",
+  "zqy": {
+    "secret_sha256": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a",
+    "room": "sutando-zqy"
+  }
 }
