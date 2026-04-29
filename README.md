@@ -66,7 +66,23 @@ DASHSCOPE_API_KEY=sk-xxx
 # OPENAI_API_KEY=sk-xxx
 ```
 
-### 2. Start the services
+### 2. Add a user
+
+Each connecting client must authenticate with a username and secret. Add at least one user before starting:
+
+```bash
+python3 src/add-user.py <username> <secret>
+```
+
+Manage users:
+
+```bash
+python3 src/add-user.py --list                    # list all users
+python3 src/add-user.py <username> <secret> --update  # change secret
+python3 src/add-user.py <username> --delete        # remove user
+```
+
+### 3. Start the services
 
 ```bash
 bash src/start-livekit.sh
@@ -85,7 +101,7 @@ Logs are written to `logs/`. Stop all services with:
 bash src/start-livekit.sh --stop
 ```
 
-### 3. Connect
+### 4. Connect
 
 1. On your **PC browser**, open `https://localhost:8080/` — click "Publish Screen" to share your screen
 2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:8080/mobile` in the browser — tap "Connect"
