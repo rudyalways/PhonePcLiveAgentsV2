@@ -47,6 +47,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Voice control requires microphone access</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is required by the video call framework</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Required to connect to the Sutando server on your local network</string>
 	<key>NSBonjourServices</key>
