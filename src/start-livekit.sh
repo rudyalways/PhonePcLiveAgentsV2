@@ -7,6 +7,18 @@
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+VENV="$REPO/.venv-livekit"
+PYTHON="$VENV/bin/python3"
+
+# Auto-create venv + install deps if missing
+if [ ! -f "$PYTHON" ]; then
+  echo "Creating LiveKit venv..."
+  python3 -m venv "$VENV"
+  "$PYTHON" -m pip install --upgrade pip -q
+  "$PYTHON" -m pip install -r requirements-livekit.txt -q
+  echo "  ✓ venv ready"
+fi
+
 if [ "$1" = "--stop" ]; then
   pkill -f "livekit-token-server" 2>/dev/null
   pkill -f "screen-publisher-server" 2>/dev/null
@@ -35,14 +47,14 @@ fi
 echo "Starting LiveKit services..."
 
 if ! lsof -i :7850 > /dev/null 2>&1; then
-  python3 src/livekit-token-server.py > logs/livekit-token-server.log 2>&1 &
+  "$PYTHON" src/livekit-token-server.py > logs/livekit-token-server.log 2>&1 &
   echo "  ✓ token server (port 7850)"
 else
   echo "  ✓ token server (already running)"
 fi
 
 if ! lsof -i :8080 > /dev/null 2>&1; then
-  python3 src/screen-publisher-server.py > logs/screen-publisher-server.log 2>&1 &
+  "$PYTHON" src/screen-publisher-server.py > logs/screen-publisher-server.log 2>&1 &
   echo "  ✓ screen publisher server (port 8080)"
 else
   echo "  ✓ screen publisher server (already running)"
@@ -53,7 +65,7 @@ sleep 1
 # Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
 # Credentials passed via CLI flags (values from .env loaded above).
 if ! pgrep -f "livekit-agent" > /dev/null 2>&1; then
-  python3 src/livekit-agent.py start \
+  "$PYTHON" src/livekit-agent.py start \
     > logs/livekit-agent.log 2>&1 &
   echo "  ✓ AI agent (worker mode)"
 else

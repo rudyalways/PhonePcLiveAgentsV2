@@ -39,13 +39,7 @@ Use your phone to voice-control your PC through AI. Speak into your phone's brow
 - An AI model API key (one of: DashScope for Qwen, Google AI for Gemini, or OpenAI)
 - PC and phone on the same WiFi network
 
-### 1. Install dependencies
-
-```bash
-pip install -r requirements-livekit.txt
-```
-
-### 2. Configure `.env`
+### 1. Configure `.env`
 
 ```bash
 cp .env.example .env
@@ -72,11 +66,13 @@ DASHSCOPE_API_KEY=sk-xxx
 # OPENAI_API_KEY=sk-xxx
 ```
 
-### 3. Start the services
+### 2. Start the services
 
 ```bash
 bash src/start-livekit.sh
 ```
+
+On first run, this automatically creates a Python virtual environment (`.venv-livekit/`) and installs dependencies from `requirements-livekit.txt`. Subsequent runs reuse the existing venv.
 
 This starts all three services in the background:
 - **Token server** (port 7850) — JWT authentication
@@ -89,7 +85,7 @@ Logs are written to `logs/`. Stop all services with:
 bash src/start-livekit.sh --stop
 ```
 
-### 4. Connect
+### 3. Connect
 
 1. On your **PC browser**, open `https://localhost:8080/` — click "Publish Screen" to share your screen
 2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:8080/mobile` in the browser — tap "Connect"

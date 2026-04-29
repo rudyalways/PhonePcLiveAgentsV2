@@ -64,3 +64,4 @@ contextual-chips.json
 .massgen/
 .env.bak
 .last-pq-notify
+.venv-livekit/
