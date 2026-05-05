@@ -35,7 +35,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _proxy_token(self):
         url = f"http://127.0.0.1:{TOKEN_PORT}{self.path}"
         try:
-            resp = urlopen(Request(url), timeout=5)
+            resp = urlopen(Request(url), timeout=15)
             body = resp.read()
             self.send_response(resp.status)
             self.send_header("Content-Type", "application/json")
@@ -43,7 +43,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        except URLError as e:
+        except Exception as e:
             err = f'{{"error":"token server unreachable: {e}"}}'.encode()
             self.send_response(502)
             self.send_header("Content-Type", "application/json")

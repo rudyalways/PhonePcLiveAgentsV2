@@ -80,6 +80,8 @@ class ConnectController extends GetxController {
         'jwt': tokenResp.jwt,
         'livekitUrl': tokenResp.url,
         'serverUrl': url,
+        'username': username,
+        'secret': secret,
       });
     } catch (e) {
       errorMessage.value = e.toString().replaceFirst('Exception: ', '');

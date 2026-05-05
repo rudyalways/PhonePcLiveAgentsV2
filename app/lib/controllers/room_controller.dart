@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:livekit_client/livekit_client.dart';
+import '../config/app_config.dart';
+import '../services/input_control_service.dart';
 
 class RoomController extends GetxController with WidgetsBindingObserver {
   late Room room;
@@ -14,6 +16,16 @@ class RoomController extends GetxController with WidgetsBindingObserver {
   final statusText = 'Connecting...'.obs;
   final participants = <String>[].obs;
   final remoteVideoTrack = Rxn<VideoTrack>();
+
+  // Input control
+  InputControlService? inputControl;
+  final isInputReady = false.obs;
+  final showKeyboard = false.obs;
+  final showQuickActions = false.obs;
+  final volumeLevel = 50.obs;
+  final brightnessLevel = 50.obs;
+  final inputMode = 'touch'.obs; // 'touch' or 'trackpad'
+  final showControlBar = true.obs;
 
   @override
   void onInit() {
@@ -28,6 +40,163 @@ class RoomController extends GetxController with WidgetsBindingObserver {
     _checkOrientation();
     final args = Get.arguments as Map<String, dynamic>;
     _initRoom(args['jwt'] as String, args['livekitUrl'] as String);
+    _initInputControl(args);
+  }
+
+  void _initInputControl(Map<String, dynamic> args) {
+    final serverUrl = args['serverUrl'] as String? ?? '';
+    final username = args['username'] as String? ?? '';
+    final secret = args['secret'] as String? ?? '';
+
+    if (serverUrl.isEmpty || username.isEmpty || secret.isEmpty) {
+      debugPrint('[SUTANDO] Input control: missing credentials');
+      return;
+    }
+
+    // Extract host from serverUrl (e.g. "https://192.168.1.100:8080" → "192.168.1.100")
+    final uri = Uri.tryParse(serverUrl);
+    if (uri == null || uri.host.isEmpty) {
+      debugPrint('[SUTANDO] Input control: invalid serverUrl=$serverUrl');
+      return;
+    }
+
+    inputControl = InputControlService(
+      host: uri.host,
+      port: AppConfig.mobileControlPort,
+      username: username,
+      secret: secret,
+    );
+
+    // Fetch screen info in background
+    inputControl!.fetchScreenInfo().then((ok) {
+      isInputReady.value = ok;
+      debugPrint('[SUTANDO] Input control ready=$ok');
+    });
+  }
+
+  /// Convert touch position on the video widget to PC screen coordinates.
+  /// The video uses VideoViewFit.contain, so we need to account for letterboxing.
+  Offset? mapToScreenCoords(
+      Offset touchPos, Size viewSize) {
+    final svc = inputControl;
+    if (svc == null || svc.screenWidth == null || svc.screenHeight == null) {
+      return null;
+    }
+
+    final screenW = svc.screenWidth!.toDouble();
+    final screenH = svc.screenHeight!.toDouble();
+
+    // Compute the actual video rect within the view (contain fit)
+    final viewAspect = viewSize.width / viewSize.height;
+    final screenAspect = screenW / screenH;
+
+    double videoW, videoH, offsetX, offsetY;
+    if (viewAspect > screenAspect) {
+      // View is wider than video → pillarboxing (black bars on left/right)
+      videoH = viewSize.height;
+      videoW = videoH * screenAspect;
+      offsetX = (viewSize.width - videoW) / 2;
+      offsetY = 0;
+    } else {
+      // View is taller than video → letterboxing (black bars on top/bottom)
+      videoW = viewSize.width;
+      videoH = videoW / screenAspect;
+      offsetX = 0;
+      offsetY = (viewSize.height - videoH) / 2;
+    }
+
+    // Check if touch is within the video area
+    final relX = touchPos.dx - offsetX;
+    final relY = touchPos.dy - offsetY;
+    if (relX < 0 || relX > videoW || relY < 0 || relY > videoH) {
+      return null; // Touch is on the black bars
+    }
+
+    // Map to screen coordinates
+    final pcX = (relX / videoW) * screenW;
+    final pcY = (relY / videoH) * screenH;
+
+    return Offset(pcX, pcY);
+  }
+
+  void onVideoTap(Offset touchPos, Size viewSize) {
+    final coords = mapToScreenCoords(touchPos, viewSize);
+    if (coords == null || inputControl == null) return;
+    inputControl!.click(coords.dx.round(), coords.dy.round());
+  }
+
+  void onVideoDoubleTap(Offset touchPos, Size viewSize) {
+    final coords = mapToScreenCoords(touchPos, viewSize);
+    if (coords == null || inputControl == null) return;
+    inputControl!
+        .click(coords.dx.round(), coords.dy.round(), doubleClick: true);
+  }
+
+  void onVideoLongPress(Offset touchPos, Size viewSize) {
+    final coords = mapToScreenCoords(touchPos, viewSize);
+    if (coords == null || inputControl == null) return;
+    inputControl!
+        .click(coords.dx.round(), coords.dy.round(), button: 'right');
+  }
+
+  void onScroll(double deltaY) {
+    if (inputControl == null) return;
+    inputControl!.scroll(deltaY: deltaY > 0 ? -3 : 3);
+  }
+
+  void sendKey(String key, {List<String>? modifiers}) {
+    if (inputControl == null) return;
+    inputControl!.key(key, modifiers: modifiers);
+  }
+
+  void sendText(String text) {
+    if (inputControl == null || text.isEmpty) return;
+    inputControl!.type(text);
+  }
+
+  void setVolume(int level) {
+    if (inputControl == null) return;
+    volumeLevel.value = level;
+    inputControl!.volume(level: level);
+  }
+
+  void toggleMuteVolume() {
+    if (inputControl == null) return;
+    inputControl!.volume(mute: true);
+  }
+
+  void unmuteVolume() {
+    if (inputControl == null) return;
+    inputControl!.volume(mute: false);
+  }
+
+  void setBrightness(int level) {
+    if (inputControl == null) return;
+    brightnessLevel.value = level;
+    inputControl!.brightness(level);
+  }
+
+  void toggleKeyboard() {
+    showKeyboard.value = !showKeyboard.value;
+    if (showKeyboard.value) {
+      showQuickActions.value = false;
+    }
+  }
+
+  void toggleQuickActions() {
+    showQuickActions.value = !showQuickActions.value;
+    if (showQuickActions.value) {
+      showKeyboard.value = false;
+    }
+  }
+
+  void toggleControlBar() {
+    showControlBar.value = !showControlBar.value;
+    // Close keyboard/quick actions when hiding control bar
+    if (!showControlBar.value) {
+      showKeyboard.value = false;
+      showQuickActions.value = false;
+    }
   }
 
   void _checkOrientation() {
@@ -36,7 +205,9 @@ class RoomController extends GetxController with WidgetsBindingObserver {
     final landscape = size.width > size.height;
     if (isLandscape.value != landscape) {
       isLandscape.value = landscape;
-      showOverlay.value = !landscape;
+      // Keep overlay visible in both orientations
+      // In landscape, user can tap backdrop to hide; in portrait, always show
+      showOverlay.value = true;
       if (landscape) {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       } else {
@@ -124,7 +295,9 @@ class RoomController extends GetxController with WidgetsBindingObserver {
 
   void toggleOverlay() {
     if (isLandscape.value) {
-      showOverlay.value = !showOverlay.value;
+      // In landscape, toggle control bar instead of entire overlay
+      // This keeps the hint button visible so user can always restore controls
+      toggleControlBar();
     }
   }
 

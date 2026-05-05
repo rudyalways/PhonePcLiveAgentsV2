@@ -10,19 +10,23 @@ cd "$REPO"
 VENV="$REPO/.venv-livekit"
 PYTHON="$VENV/bin/python3"
 
-# Auto-create venv + install deps if missing
+# Auto-create venv if missing
 if [ ! -f "$PYTHON" ]; then
   echo "Creating LiveKit venv..."
   python3 -m venv "$VENV"
   "$PYTHON" -m pip install --upgrade pip -q
-  "$PYTHON" -m pip install -r requirements-livekit.txt -q
-  echo "  ✓ venv ready"
 fi
+
+# Check and install dependencies every time
+echo "Checking Python dependencies..."
+"$PYTHON" -m pip install -r requirements-livekit.txt -q
+echo "  ✓ Dependencies ready"
 
 if [ "$1" = "--stop" ]; then
   pkill -f "livekit-token-server" 2>/dev/null
   pkill -f "screen-publisher-server" 2>/dev/null
   pkill -f "livekit-agent" 2>/dev/null
+  pkill -f "mobile-control-server" 2>/dev/null
   echo "All LiveKit services stopped."
   exit 0
 fi
@@ -46,18 +50,25 @@ fi
 
 echo "Starting LiveKit services..."
 
-if ! lsof -i :7850 > /dev/null 2>&1; then
+if ! lsof -i :7850 -sTCP:LISTEN > /dev/null 2>&1; then
   "$PYTHON" src/livekit-token-server.py > logs/livekit-token-server.log 2>&1 &
   echo "  ✓ token server (port 7850)"
 else
   echo "  ✓ token server (already running)"
 fi
 
-if ! lsof -i :8080 > /dev/null 2>&1; then
+if ! lsof -i :8080 -sTCP:LISTEN > /dev/null 2>&1; then
   "$PYTHON" src/screen-publisher-server.py > logs/screen-publisher-server.log 2>&1 &
   echo "  ✓ screen publisher server (port 8080)"
 else
   echo "  ✓ screen publisher server (already running)"
+fi
+
+if ! lsof -i :7847 -sTCP:LISTEN > /dev/null 2>&1; then
+  "$PYTHON" src/mobile-control-server.py > logs/mobile-control.log 2>&1 &
+  echo "  ✓ mobile control server (port 7847)"
+else
+  echo "  ✓ mobile control server (already running)"
 fi
 
 sleep 1

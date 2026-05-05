@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 import time
 from datetime import timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -148,10 +149,6 @@ class TokenHandler(BaseHTTPRequestHandler):
         try:
             jwt = create_token(identity, name, room)
 
-            # Only dispatch agent for the phone user, not screen-publisher or other identities
-            if identity == "phone-user":
-                ensure_agent_dispatched(room)
-
             body = json.dumps({
                 "jwt": jwt,
                 "room": room,
@@ -168,6 +165,14 @@ class TokenHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+            # Dispatch agent in background so the response is sent immediately
+            if identity == "phone-user":
+                threading.Thread(
+                    target=ensure_agent_dispatched,
+                    args=(room,),
+                    daemon=True,
+                ).start()
         except Exception as e:
             self._error(500, str(e))
 

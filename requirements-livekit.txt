@@ -6,3 +6,5 @@ livekit-plugins-openai>=1.5.0
 livekit-api>=1.0.0
 livekit>=1.0.0
 python-dotenv>=1.0.0
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-Cocoa>=10.0

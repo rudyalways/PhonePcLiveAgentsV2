@@ -154,6 +154,15 @@ else
   echo "  ✓ screen capture (already running)"
 fi
 
+# 5a. Mobile control server (port 7847)
+if ! lsof -i :7847 > /dev/null 2>&1; then
+  echo "  Starting mobile control (port 7847)..."
+  python3 src/mobile-control-server.py > logs/mobile-control.log 2>&1 &
+  echo "  ✓ mobile control"
+else
+  echo "  ✓ mobile control (already running)"
+fi
+
 # 5b. Sutando context drop app (global hotkey ⌃C)
 SUT_SRC="$REPO/src/Sutando/main.swift"
 SUT_BIN="$REPO/src/Sutando/Sutando"
@@ -279,7 +288,7 @@ echo ""
 # Verify services actually started (wait a moment, then check ports)
 sleep 3
 echo "Verifying services..."
-VERIFY_PORTS="9900:voice-agent 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+VERIFY_PORTS="9900:voice-agent 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture 7847:mobile-control"
 if [ "${SKIP_PHONE:-}" != "1" ] && grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
   VERIFY_PORTS="$VERIFY_PORTS 3100:conversation-server"
 fi
