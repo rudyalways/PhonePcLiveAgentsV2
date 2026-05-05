@@ -966,4 +966,4 @@ async def entrypoint(ctx: JobContext):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="sutando"))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="sutando", port=8082))

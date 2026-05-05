@@ -516,7 +516,6 @@ class _KeyboardPanel extends GetView<RoomController> {
                   onSubmitted: (text) {
                     if (text.isNotEmpty) {
                       controller.sendText(text);
-                      _textController.clear();
                     }
                     controller.sendKey('enter');
                   },

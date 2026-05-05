@@ -4,11 +4,37 @@
 # Stop:  bash src/start-livekit.sh --stop
 # Add user: python3 src/add-user.py <username> <secret>
 
+set -e  # Exit on error
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
 VENV="$REPO/.venv-livekit"
 PYTHON="$VENV/bin/python3"
+
+if [ "$1" = "--stop" ]; then
+  pkill -f "livekit-token-server" 2>/dev/null || true
+  pkill -f "screen-publisher-server" 2>/dev/null || true
+  pkill -f "livekit-agent" 2>/dev/null || true
+  pkill -f "mobile-control-server" 2>/dev/null || true
+  echo "All LiveKit services stopped."
+  exit 0
+fi
+
+# Check prerequisites
+echo "Checking prerequisites..."
+missing=0
+if ! command -v python3 > /dev/null 2>&1; then echo "  ✗ python3 not found"; missing=1; fi
+if ! command -v lsof > /dev/null 2>&1; then echo "  ✗ lsof not found"; missing=1; fi
+if ! command -v node > /dev/null 2>&1; then echo "  ✗ node not found — brew install node"; missing=1; fi
+if ! command -v npx > /dev/null 2>&1; then echo "  ✗ npx not found — comes with node"; missing=1; fi
+if ! command -v claude > /dev/null 2>&1; then
+  echo "  ✗ claude not found — see https://docs.anthropic.com/en/docs/claude-code/getting-started"
+  missing=1
+fi
+if [ $missing -eq 1 ]; then echo ""; echo "Fix the above and try again."; exit 1; fi
+echo "  ✓ All prerequisites found"
+echo ""
 
 # Auto-create venv if missing
 if [ ! -f "$PYTHON" ]; then
@@ -22,17 +48,27 @@ echo "Checking Python dependencies..."
 "$PYTHON" -m pip install -r requirements-livekit.txt -q
 echo "  ✓ Dependencies ready"
 
-if [ "$1" = "--stop" ]; then
-  pkill -f "livekit-token-server" 2>/dev/null
-  pkill -f "screen-publisher-server" 2>/dev/null
-  pkill -f "livekit-agent" 2>/dev/null
-  pkill -f "mobile-control-server" 2>/dev/null
-  echo "All LiveKit services stopped."
-  exit 0
+# Validate .env and required environment variables
+if [ ! -f .env ]; then
+  echo "  ✗ .env not found — cp .env.example .env and add your keys"
+  exit 1
 fi
 
 set -a; [ -f .env ] && source .env; set +a
-mkdir -p logs
+
+missing=0
+if [ -z "$LIVEKIT_URL" ]; then echo "  ✗ LIVEKIT_URL not set in .env"; missing=1; fi
+if [ -z "$LIVEKIT_API_KEY" ]; then echo "  ✗ LIVEKIT_API_KEY not set in .env"; missing=1; fi
+if [ -z "$LIVEKIT_API_SECRET" ]; then echo "  ✗ LIVEKIT_API_SECRET not set in .env"; missing=1; fi
+if [ -z "$GEMINI_API_KEY" ]; then echo "  ✗ GEMINI_API_KEY not set in .env"; missing=1; fi
+if [ $missing -eq 1 ]; then echo ""; echo "Add missing keys to .env and try again."; exit 1; fi
+echo "  ✓ Environment variables validated"
+echo ""
+
+# Create all necessary directories
+mkdir -p logs state tasks results data
+echo "  ✓ Directories created"
+echo ""
 
 # Check users are configured
 USER_COUNT=$(python3 -c "
@@ -48,6 +84,38 @@ if [ "${USER_COUNT:-0}" = "0" ]; then
   echo ""
 fi
 
+# Check macOS permissions
+echo "Checking macOS permissions..."
+if ! screencapture -x /tmp/livekit-permcheck.png 2>/dev/null; then
+  echo "  ⚠ Screen Recording not granted (needed for screen-publisher-server)"
+  echo "    → System Settings → Privacy & Security → Screen & System Audio Recording"
+  echo "    → Add 'python3'"
+else
+  rm -f /tmp/livekit-permcheck.png
+  echo "  ✓ Screen Recording"
+fi
+echo ""
+
+# Prevent display sleep (important for always-on operation)
+if ! pgrep -q caffeinate; then
+  caffeinate -d -i -s &
+  echo "  ✓ caffeinate started (prevents display sleep)"
+else
+  echo "  ✓ caffeinate already running"
+fi
+echo ""
+
+# Install Claude Code skills (needed by sutando-core)
+echo "Installing skills..."
+bash "$REPO/skills/install.sh" 2>/dev/null || true
+echo ""
+
+# Archive stale results (>24h) to prevent backlog
+python3 "$REPO/src/archive-stale-results.py" 2>/dev/null || true
+
+export CLIENT_PORT=8081  # Avoid conflict with startup.sh's web-client (port 8080)
+echo ""
+
 echo "Starting LiveKit services..."
 
 if ! lsof -i :7850 -sTCP:LISTEN > /dev/null 2>&1; then
@@ -57,9 +125,9 @@ else
   echo "  ✓ token server (already running)"
 fi
 
-if ! lsof -i :8080 -sTCP:LISTEN > /dev/null 2>&1; then
+if ! lsof -i :8081 -sTCP:LISTEN > /dev/null 2>&1; then
   "$PYTHON" src/screen-publisher-server.py > logs/screen-publisher-server.log 2>&1 &
-  echo "  ✓ screen publisher server (port 8080)"
+  echo "  ✓ screen publisher server (port 8081)"
 else
   echo "  ✓ screen publisher server (already running)"
 fi
@@ -83,4 +151,54 @@ else
   echo "  ✓ AI agent (already running)"
 fi
 
+sleep 3
+echo ""
+echo "Verifying services..."
+VERIFY_PORTS="7850:token-server 8081:screen-publisher 7847:mobile-control"
+all_ok=1
+for port_name in $VERIFY_PORTS; do
+  port="${port_name%%:*}"
+  name="${port_name##*:}"
+  if lsof -i :"$port" -sTCP:LISTEN > /dev/null 2>&1; then
+    echo "  ✓ $name (port $port)"
+  else
+    echo "  ✗ $name (port $port) — check logs/${name}.log"
+    all_ok=0
+  fi
+done
+
+# Check agent process (doesn't bind a port)
+if pgrep -f "livekit-agent" > /dev/null 2>&1; then
+  echo "  ✓ AI agent (worker mode)"
+else
+  echo "  ✗ AI agent — check logs/livekit-agent.log"
+  all_ok=0
+fi
+
+echo ""
+if [ $all_ok -eq 1 ]; then
+  echo "✓ All services running"
+else
+  echo "⚠ Some services failed to start — check logs/"
+fi
+
+echo ""
+echo "Checking sutando-core..."
+if tmux -S /tmp/sutando-tmux.sock has-session -t sutando-core 2>/dev/null; then
+  echo "  ✓ sutando-core is running"
+else
+  echo "  Starting sutando-core..."
+  if command -v tmux > /dev/null 2>&1; then
+    tmux -S /tmp/sutando-tmux.sock new-session -d -s sutando-core \
+      "cd '$REPO' && claude --name sutando-core --remote-control 'Sutando' --dangerously-skip-permissions --add-dir '$HOME' -- '/proactive-loop'"
+    echo "  ✓ sutando-core started in background"
+    echo "    Attach with: tmux -S /tmp/sutando-tmux.sock attach -t sutando-core"
+  else
+    echo "  ✗ tmux not found — install with: brew install tmux"
+    echo "    Or start manually: bash src/startup.sh"
+    exit 1
+  fi
+fi
+
+echo ""
 echo "Done. Logs in logs/. Stop with: bash src/start-livekit.sh --stop"

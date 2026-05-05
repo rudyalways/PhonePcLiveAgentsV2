@@ -90,21 +90,29 @@ bash src/start-livekit.sh
 
 On first run, this automatically creates a Python virtual environment (`.venv-livekit/`) and installs dependencies from `requirements-livekit.txt`. Subsequent runs reuse the existing venv.
 
-This starts all three services in the background:
+This starts all services in the background:
 - **Token server** (port 7850) — JWT authentication
-- **Screen publisher server** (port 8080) — HTTPS web server + token proxy
-- **AI agent** — speech processing via Realtime AI model
+- **Screen publisher server** (port 8081) — HTTPS web server + token proxy
+- **Mobile control server** (port 7847) — Remote control API
+- **AI agent** (port 8082) — Speech processing via Realtime AI model
+- **sutando-core** — Task processing engine (auto-starts if not running)
 
-Logs are written to `logs/`. Stop all services with:
+Logs are written to `logs/`. 
 
+**Stop all services:**
 ```bash
 bash src/start-livekit.sh --stop
 ```
 
+**Restart all services:**
+```bash
+bash src/restart-livekit.sh
+```
+
 ### 4. Connect
 
-1. On your **PC browser**, open `https://localhost:8080/` — click "Publish Screen" to share your screen
-2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:8080/mobile` in the browser — tap "Connect"
+1. On your **PC browser**, open `https://localhost:8081/` — click "Publish Screen" to share your screen
+2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:8081/mobile` in the browser — tap "Connect"
 3. Speak to your phone — the AI agent will respond and execute commands on your PC
 
 > Accept the self-signed certificate warning on both devices. HTTPS is required for WebRTC microphone access.
