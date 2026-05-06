@@ -11,7 +11,7 @@ Data sources:
 
 Usage:
   python3 skills/pipeline-trace/scripts/pipeline-trace.py
-  Open http://localhost:7848
+  Open http://localhost:7900
 """
 
 import http.server
@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 REPO_DIR = Path(__file__).resolve().parent.parent.parent.parent
-PORT = int(os.environ.get("PIPELINE_TRACE_PORT", "7848"))
+PORT = int(os.environ.get("PIPELINE_TRACE_PORT", "7900"))
 POLL_INTERVAL = 2.0
 MAX_TRACES = 100
 HEARTBEAT_INTERVAL = 15

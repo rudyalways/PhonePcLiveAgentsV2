@@ -93,7 +93,7 @@ On first run, this automatically creates a Python virtual environment (`.venv-li
 This starts all services in the background:
 - **Token server** (port 7850) — JWT authentication
 - **Screen publisher server** (port 8081) — HTTPS web server + token proxy
-- **Mobile control server** (port 7847) — Remote control API
+- **Mobile control server** (port 7851) — Remote control API
 - **AI agent** (port 8082) — Speech processing via Realtime AI model
 - **sutando-core** — Task processing engine (auto-starts if not running)
 

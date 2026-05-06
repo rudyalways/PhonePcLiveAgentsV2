@@ -6,7 +6,7 @@ Real-time visualization of user operation pipeline checkpoints.
 
 ```bash
 python3 skills/pipeline-trace/scripts/pipeline-trace.py
-# Open http://localhost:7848
+# Open http://localhost:7900
 ```
 
 ## What it shows
@@ -18,4 +18,4 @@ python3 skills/pipeline-trace/scripts/pipeline-trace.py
 
 ## Port
 
-7848 (override with `PIPELINE_TRACE_PORT` env var)
+7900 (override with `PIPELINE_TRACE_PORT` env var)

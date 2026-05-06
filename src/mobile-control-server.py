@@ -3,7 +3,7 @@
 Mobile Control Server for Sutando — receives input commands from the mobile app
 and executes them on macOS via AppleScript / Quartz CGEvents.
 
-Runs on port 7847, binds 0.0.0.0 for LAN access.
+Runs on port 7851, binds 0.0.0.0 for LAN access.
 Auth reuses users.json (same SHA-256 scheme as livekit-token-server.py).
 
 Usage: python3 src/mobile-control-server.py
@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 USERS_FILE = Path(__file__).resolve().parent / "users.json"
-PORT = int(os.environ.get("MOBILE_CONTROL_PORT", "7847"))
+PORT = int(os.environ.get("MOBILE_CONTROL_PORT", "7851"))
 
 # ---------------------------------------------------------------------------
 # Auth (mirrors livekit-token-server.py)
