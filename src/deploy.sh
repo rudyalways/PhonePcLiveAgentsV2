@@ -235,16 +235,16 @@ else
   echo "  ✓ screen publisher server (already running)"
 fi
 
-if ! lsof -i :7851 -sTCP:LISTEN > /dev/null 2>&1; then
+if ! lsof -i :7847 -sTCP:LISTEN > /dev/null 2>&1; then
   "$PYTHON" src/mobile-control-server.py > logs/mobile-control.log 2>&1 &
-  echo "  ✓ mobile control server (port 7851)"
+  echo "  ✓ mobile control server (port 7847)"
 else
   echo "  ✓ mobile control server (already running)"
 fi
 
-if ! lsof -i :7900 -sTCP:LISTEN > /dev/null 2>&1; then
+if ! lsof -i :7848 -sTCP:LISTEN > /dev/null 2>&1; then
   python3 skills/pipeline-trace/scripts/pipeline-trace.py > logs/pipeline-trace.log 2>&1 &
-  echo "  ✓ pipeline trace (port 7900)"
+  echo "  ✓ pipeline trace (port 7848)"
 else
   echo "  ✓ pipeline trace (already running)"
 fi
@@ -256,7 +256,7 @@ start_port_service "$CLIENT_PORT" "screen publisher server" "screen-publisher-se
   "Stop the conflicting process, or rerun with CLIENT_PORT=<free-port> bash src/deploy.sh." \
   "$PYTHON" src/screen-publisher-server.py
 
-start_port_service 7851 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" \
+start_port_service 7847 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" \
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/mobile-control-server.py
 
@@ -274,11 +274,11 @@ fi
 sleep 3
 echo ""
 echo "Verifying services..."
-VERIFY_PORTS="7850:token-server 8081:screen-publisher 7851:mobile-control 7900:pipeline-trace"
+VERIFY_PORTS="7850:token-server 8081:screen-publisher 7847:mobile-control 7848:pipeline-trace"
 all_ok=1
 verify_port_service 7850 "token-server" "livekit-token-server.py" "logs/livekit-token-server.log"
 verify_port_service "$CLIENT_PORT" "screen-publisher" "screen-publisher-server.py" "logs/screen-publisher-server.log"
-verify_port_service 7851 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
+verify_port_service 7847 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
 
 # Check agent process (doesn't bind a port)
 if pgrep -f "livekit-agent.py" > /dev/null 2>&1; then

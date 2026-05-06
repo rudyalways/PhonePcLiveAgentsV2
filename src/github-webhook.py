@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS_DIR = REPO / "tasks"
-PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7846
+PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7847
 
 # Events we care about and how to summarize them
 def format_event(event_type: str, payload: dict):
