@@ -6,7 +6,7 @@
   "scripts": {
     "start": "tsx src/voice-agent.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "node scripts/test-runner.mjs"
   },
   "dependencies": {
     "@ai-sdk/google": "^1.2.0",
@@ -18,7 +18,7 @@
     "dotenv": "^17.4.1",
     "playwright": "^1.58.2",
     "ws": "^8.20.0",
-    "zod": "^3.24.0"
+    "zod": "^3.25.76"
   },
   "optionalDependencies": {
     "@cartesia/cartesia-js": "^3.0.0"
