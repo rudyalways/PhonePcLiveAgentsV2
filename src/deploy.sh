@@ -29,6 +29,23 @@ if [ "$1" = "--stop" ]; then
   exit 0
 fi
 
+if [ "$1" = "--logs" ]; then
+  mkdir -p "$REPO/logs"
+  LOGS=(
+    "$REPO/logs/livekit-agent.log"
+    "$REPO/logs/livekit-token-server.log"
+    "$REPO/logs/screen-publisher-server.log"
+    "$REPO/logs/mobile-control.log"
+  )
+  # Create files if they don't exist yet so tail doesn't error
+  for f in "${LOGS[@]}"; do touch "$f"; done
+  echo "Following logs (Ctrl-C to exit):"
+  for f in "${LOGS[@]}"; do echo "  ${f##*/}"; done
+  echo ""
+  tail -f "${LOGS[@]}"
+  exit 0
+fi
+
 if [ "$1" = "--restart" ]; then
   echo "Restarting LiveKit services..."
   echo ""

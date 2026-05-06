@@ -109,6 +109,11 @@ bash src/deploy.sh --stop
 bash src/deploy.sh --restart
 ```
 
+**Follow live logs (for debugging):**
+```bash
+bash src/deploy.sh --logs
+```
+
 ### 4. Connect
 
 1. On your **PC browser**, open `https://localhost:8081/` — click "Publish Screen" to share your screen
