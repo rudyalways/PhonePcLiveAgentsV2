@@ -1,7 +1,9 @@
 #!/bin/bash
-# Start all LiveKit services (token server, screen publisher, AI agent worker).
-# Usage: bash src/start-livekit.sh
-# Stop:  bash src/start-livekit.sh --stop
+# Manage all LiveKit services (start / stop / restart).
+# Usage:
+#   bash src/deploy.sh            # start all services
+#   bash src/deploy.sh --stop     # stop all services
+#   bash src/deploy.sh --restart  # stop then start
 # Add user: python3 src/add-user.py <username> <secret>
 
 set -e  # Exit on error
@@ -12,14 +14,33 @@ cd "$REPO"
 VENV="$REPO/.venv-livekit"
 PYTHON="$VENV/bin/python3"
 
-if [ "$1" = "--stop" ]; then
+# ── Stop ──────────────────────────────────────────────────────────────────────
+
+do_stop() {
   pkill -f "livekit-token-server" 2>/dev/null || true
   pkill -f "screen-publisher-server" 2>/dev/null || true
   pkill -f "livekit-agent" 2>/dev/null || true
   pkill -f "mobile-control-server" 2>/dev/null || true
   echo "All LiveKit services stopped."
+}
+
+if [ "$1" = "--stop" ]; then
+  do_stop
   exit 0
 fi
+
+if [ "$1" = "--restart" ]; then
+  echo "Restarting LiveKit services..."
+  echo ""
+  echo "Stopping services..."
+  do_stop
+  sleep 2
+  echo ""
+  echo "Starting services..."
+  echo ""
+fi
+
+# ── Start ─────────────────────────────────────────────────────────────────────
 
 # Check prerequisites
 echo "Checking prerequisites..."
@@ -142,7 +163,6 @@ fi
 sleep 1
 
 # Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
-# Credentials passed via CLI flags (values from .env loaded above).
 if ! pgrep -f "livekit-agent" > /dev/null 2>&1; then
   "$PYTHON" src/livekit-agent.py start \
     > logs/livekit-agent.log 2>&1 &
@@ -195,10 +215,9 @@ else
     echo "    Attach with: tmux -S /tmp/sutando-tmux.sock attach -t sutando-core"
   else
     echo "  ✗ tmux not found — install with: brew install tmux"
-    echo "    Or start manually: bash src/startup.sh"
     exit 1
   fi
 fi
 
 echo ""
-echo "Done. Logs in logs/. Stop with: bash src/start-livekit.sh --stop"
+echo "Done. Logs in logs/. Stop with: bash src/deploy.sh --stop"

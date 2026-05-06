@@ -85,7 +85,7 @@ python3 src/add-user.py <username> --delete        # remove user
 ### 3. Start the services
 
 ```bash
-bash src/start-livekit.sh
+bash src/deploy.sh
 ```
 
 On first run, this automatically creates a Python virtual environment (`.venv-livekit/`) and installs dependencies from `requirements-livekit.txt`. Subsequent runs reuse the existing venv.
@@ -101,12 +101,12 @@ Logs are written to `logs/`.
 
 **Stop all services:**
 ```bash
-bash src/start-livekit.sh --stop
+bash src/deploy.sh --stop
 ```
 
 **Restart all services:**
 ```bash
-bash src/restart-livekit.sh
+bash src/deploy.sh --restart
 ```
 
 ### 4. Connect
