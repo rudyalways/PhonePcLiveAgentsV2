@@ -616,32 +616,13 @@ class SutandoAgent(Agent):
         except Exception:
             return False
 
-    async def _execute_directly(self, task: str, task_id: str) -> str:
-        """Fallback: direct Anthropic SDK call when sutando-core is unhealthy.
-        Falls back to claude -p subprocess if SDK is unavailable."""
-        logger.warning("sutando-core unhealthy — direct SDK execution for %s", task_id)
-        try:
-            import anthropic
-            client = anthropic.AsyncAnthropic()
-            response = await asyncio.wait_for(
-                client.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=1024,
-                    tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
-                    messages=[{"role": "user", "content": task}],
-                    system="你是Sutando，用户的个人AI助手。简洁回答，用中文。",
-                ),
-                timeout=30,
-            )
-            texts = [b.text for b in response.content if hasattr(b, "text")]
-            return "\n".join(texts) if texts else "任务完成，无输出。"
-        except Exception as e:
-            logger.warning("SDK execution failed (%s), falling back to claude -p", e)
+    async def _execute_via_claude(self, task: str, task_id: str) -> str:
+        """Execute task independently via claude -p subprocess."""
+        logger.info("Executing %s via claude -p", task_id)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "claude", "-p", task,
                 "--dangerously-skip-permissions",
-                "--add-dir", str(Path.home()),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(REPO),
@@ -652,7 +633,7 @@ class SutandoAgent(Agent):
         except asyncio.TimeoutError:
             return "任务执行超时（2分钟）。"
         except Exception as e:
-            return f"直接执行失败: {e}"
+            return f"执行失败: {e}"
 
     @function_tool()
     async def work(self, context: RunContext, task: str) -> str:
@@ -677,37 +658,26 @@ class SutandoAgent(Agent):
         log_conversation(self._username, "user", task)
         logger.info("Task %s [%s]: %s", task_id, self._username, task[:100])
 
-        # Upfront health check — skip the 8s poll if session is already known dead
-        if not self._is_session_healthy():
-            task_file.unlink(missing_ok=True)
-            result_text = await self._execute_directly(task, task_id)
-            self._pending_tasks.pop(task_id, None)
-            log_conversation(self._username, "assistant", result_text[:200])
-            return result_text
-
+        # Give sutando-core 10s to respond (if alive, it's faster + richer)
         result_file = self._results_dir / f"{task_id}.txt"
-        for _ in range(8):
+        for _ in range(10):
             if result_file.exists():
                 result_text = result_file.read_text().strip()
                 archive_file(result_file, "results", task_id, self._username)
                 archive_file(task_file, "tasks", task_id, self._username)
                 self._pending_tasks.pop(task_id, None)
                 log_conversation(self._username, "assistant", result_text[:200])
-                logger.info("Result %s: %s", task_id, result_text[:100])
+                logger.info("Result %s (core): %s", task_id, result_text[:100])
                 return result_text
             await asyncio.sleep(1)
 
-        # Session was healthy at start but result not ready — check again then background poll
-        if not self._is_session_healthy():
-            task_file.unlink(missing_ok=True)
-            result_text = await self._execute_directly(task, task_id)
-            self._pending_tasks.pop(task_id, None)
-            log_conversation(self._username, "assistant", result_text[:200])
-            return result_text
-
-        session = context.session
-        asyncio.create_task(self._poll_and_speak(task_id, task_file, result_file, session))
-        return f"好的，正在处理。"
+        # Core didn't respond — self-execute via claude -p (full tool access).
+        # Remove task file to prevent double-execution by core.
+        task_file.unlink(missing_ok=True)
+        result_text = await self._execute_via_claude(task, task_id)
+        self._pending_tasks.pop(task_id, None)
+        log_conversation(self._username, "assistant", result_text[:200])
+        return result_text
 
     async def _poll_and_speak(
         self, task_id: str, task_file: Path, result_file: Path, session: AgentSession

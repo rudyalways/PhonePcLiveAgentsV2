@@ -19,7 +19,7 @@ PYTHON="$VENV/bin/python3"
 do_stop() {
   pkill -f "livekit-token-server" 2>/dev/null || true
   pkill -f "screen-publisher-server" 2>/dev/null || true
-  pkill -f "livekit-agent" 2>/dev/null || true
+  pkill -f "livekit-agent.py" 2>/dev/null || true
   pkill -f "mobile-control-server" 2>/dev/null || true
   echo "All LiveKit services stopped."
 }
@@ -180,7 +180,7 @@ fi
 sleep 1
 
 # Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
-if ! pgrep -f "livekit-agent" > /dev/null 2>&1; then
+if ! pgrep -f "livekit-agent.py" > /dev/null 2>&1; then
   "$PYTHON" src/livekit-agent.py start \
     > logs/livekit-agent.log 2>&1 &
   echo "  ✓ AI agent (worker mode)"
@@ -205,7 +205,7 @@ for port_name in $VERIFY_PORTS; do
 done
 
 # Check agent process (doesn't bind a port)
-if pgrep -f "livekit-agent" > /dev/null 2>&1; then
+if pgrep -f "livekit-agent.py" > /dev/null 2>&1; then
   echo "  ✓ AI agent (worker mode)"
 else
   echo "  ✗ AI agent — check logs/livekit-agent.log"
