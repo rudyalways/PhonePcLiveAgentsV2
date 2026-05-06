@@ -65,3 +65,4 @@ contextual-chips.json
 .env.bak
 .last-pq-notify
 .venv-livekit/
+src/users.json

@@ -29,14 +29,16 @@ from livekit.api import (
     VideoGrants,
     LiveKitAPI,
     CreateAgentDispatchRequest,
-    DeleteAgentDispatchRequest,
     ListParticipantsRequest,
+    RoomParticipantIdentity,
 )
 
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
 PORT = int(os.environ.get("TOKEN_SERVER_PORT", "7850"))
+
+_SERVER_START_TIME = int(time.time())
 
 USERS_FILE = Path(__file__).resolve().parent / "users.json"
 
@@ -82,36 +84,81 @@ def create_token(identity: str, name: str, room: str) -> str:
     return token.to_jwt()
 
 
+HEARTBEAT_FILE = Path(__file__).resolve().parent.parent / "state" / "livekit-agent.heartbeat"
+
+
 async def _ensure_agent_dispatched(room: str) -> None:
-    """Dispatch the sutando agent if no agent participant is currently active in the room."""
+    """Dispatch the sutando agent if no live agent participant is in the room."""
     if not LIVEKIT_URL:
         return
     async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lkapi:
-        # Check for a live agent participant (kind=4) — stale dispatch records don't count
+        # Remove any stale agent participants from previous sessions
         try:
             parts = await lkapi.room.list_participants(ListParticipantsRequest(room=room))
             for p in parts.participants:
                 if p.kind == 4:  # ParticipantInfo.Kind.AGENT
-                    print(f"[TokenServer] Agent already in room {room}", flush=True)
-                    return
+                    if p.joined_at < _SERVER_START_TIME:
+                        print(f"[TokenServer] Removing stale agent {p.identity}", flush=True)
+                        try:
+                            await lkapi.room.remove_participant(
+                                RoomParticipantIdentity(room=room, identity=p.identity)
+                            )
+                        except Exception as e:
+                            print(f"[TokenServer] Failed to remove stale agent: {e}", flush=True)
+                    else:
+                        print(f"[TokenServer] Agent already in room {room}", flush=True)
+                        return
         except Exception:
             pass  # Room doesn't exist yet — proceed to dispatch
 
-        # Clean up stale dispatches before creating a fresh one
+        # Delete ALL existing dispatches (including empty-agent_name ones left by ghost workers)
         dispatches = await lkapi.agent_dispatch.list_dispatch(room)
         for d in dispatches:
-            if d.agent_name == "sutando":
-                try:
-                    await lkapi.agent_dispatch.delete_dispatch(
-                        DeleteAgentDispatchRequest(dispatch_id=d.id, room=room)
-                    )
-                except Exception:
-                    pass
+            try:
+                await lkapi.agent_dispatch.delete_dispatch(d.id, room)
+            except Exception:
+                pass
 
-        await lkapi.agent_dispatch.create_dispatch(
+        dispatch_time = int(time.time())
+        new_dispatch = await lkapi.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(room=room, agent_name="sutando")
         )
-        print(f"[TokenServer] Dispatched agent to {room}", flush=True)
+        print(f"[TokenServer] Dispatched agent to {room} (dispatch={new_dispatch.id})", flush=True)
+
+        # Poll up to 15s for our local worker to accept the job.
+        # We verify via the heartbeat file: our worker writes it on every entrypoint entry.
+        # A ghost worker would update the room participant list but NOT our heartbeat file.
+        for attempt in range(15):
+            await asyncio.sleep(1)
+            try:
+                parts2 = await lkapi.room.list_participants(ListParticipantsRequest(room=room))
+                for p in parts2.participants:
+                    if p.kind == 4 and p.joined_at >= dispatch_time:
+                        # Agent joined — check heartbeat to confirm it's our local worker
+                        try:
+                            hb = int(HEARTBEAT_FILE.read_text().strip())
+                            if hb >= dispatch_time:
+                                print(f"[TokenServer] Agent confirmed (local worker): {p.identity} t+{attempt+1}s", flush=True)
+                                return
+                        except Exception:
+                            pass
+                        # Agent joined but heartbeat not updated yet — wait a bit more
+                        if attempt >= 7:
+                            print(f"[TokenServer] Warning: agent {p.identity} joined but heartbeat not updated — possible ghost worker", flush=True)
+                            await lkapi.room.remove_participant(RoomParticipantIdentity(room=room, identity=p.identity))
+                            break  # Re-dispatch not implemented; log the warning
+            except Exception:
+                pass
+
+        # If we get here, agent either never joined or was a ghost worker
+        try:
+            hb = int(HEARTBEAT_FILE.read_text().strip())
+            if hb >= dispatch_time:
+                print(f"[TokenServer] Agent confirmed via heartbeat (late)", flush=True)
+                return
+        except Exception:
+            pass
+        print(f"[TokenServer] Warning: no confirmed local agent after 15s for {room}", flush=True)
 
 
 def ensure_agent_dispatched(room: str) -> None:
@@ -119,6 +166,47 @@ def ensure_agent_dispatched(room: str) -> None:
         asyncio.run(_ensure_agent_dispatched(room))
     except Exception as e:
         print(f"[TokenServer] Agent dispatch error: {e}", flush=True)
+
+
+async def _startup_cleanup() -> None:
+    """Remove stale agents and dispatches from all sutando rooms on server start."""
+    if not LIVEKIT_URL:
+        return
+    try:
+        from livekit.api import ListRoomsRequest
+        async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lkapi:
+            rooms = await lkapi.room.list_rooms(ListRoomsRequest())
+            for r in rooms.rooms:
+                if not r.name.startswith("sutando-"):
+                    continue
+                # Remove stale agent participants
+                parts = await lkapi.room.list_participants(ListParticipantsRequest(room=r.name))
+                for p in parts.participants:
+                    if p.kind == 4:  # AGENT
+                        print(f"[TokenServer] Startup: removing stale agent {p.identity} from {r.name}", flush=True)
+                        try:
+                            await lkapi.room.remove_participant(
+                                RoomParticipantIdentity(room=r.name, identity=p.identity)
+                            )
+                        except Exception as e:
+                            print(f"[TokenServer] Startup: failed to remove {p.identity}: {e}", flush=True)
+                # Delete all stale dispatches (any agent_name)
+                dispatches = await lkapi.agent_dispatch.list_dispatch(r.name)
+                for d in dispatches:
+                    print(f"[TokenServer] Startup: deleting stale dispatch {d.id} (agent={repr(d.agent_name)}) from {r.name}", flush=True)
+                    try:
+                        await lkapi.agent_dispatch.delete_dispatch(d.id, r.name)
+                    except Exception as e:
+                        print(f"[TokenServer] Startup: failed to delete dispatch {d.id}: {e}", flush=True)
+    except Exception as e:
+        print(f"[TokenServer] Startup cleanup error: {e}", flush=True)
+
+
+def startup_cleanup() -> None:
+    try:
+        asyncio.run(_startup_cleanup())
+    except Exception as e:
+        print(f"[TokenServer] Startup cleanup error: {e}", flush=True)
 
 
 class TokenHandler(BaseHTTPRequestHandler):
@@ -205,6 +293,9 @@ def main():
     print(f"  Users loaded: {len(users)} ({', '.join(users.keys()) or 'none'})", flush=True)
     if not users:
         print("  ⚠ No users configured. Run: python3 src/add-user.py <username> <secret>", flush=True)
+
+    # Clean up stale agent participants from previous sessions
+    startup_cleanup()
 
     state_dir = Path(__file__).resolve().parent.parent / "state"
     state_dir.mkdir(exist_ok=True)

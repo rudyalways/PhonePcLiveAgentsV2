@@ -604,6 +604,7 @@ class SutandoAgent(Agent):
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._pending_tasks: dict[str, float] = {}
+        self._last_transcript: str = ""  # Most recent user transcription (for inline tool logging)
 
     def _is_session_healthy(self) -> bool:
         """Return True if sutando-core updated core-status.json within the last 5 minutes."""
@@ -705,6 +706,13 @@ class SutandoAgent(Agent):
         except Exception as e:
             logger.exception("Background poll error for %s: %s", task_id, e)
 
+    def _log_inline_tool(self, result: str) -> None:
+        """Log an inline tool call (non-work) to the conversation log using last transcription."""
+        if self._last_transcript:
+            log_conversation(self._username, "user", self._last_transcript)
+            self._last_transcript = ""
+        log_conversation(self._username, "assistant", result)
+
     @function_tool()
     async def get_current_time(self, context: RunContext) -> str:
         """Get the current date and time."""
@@ -760,9 +768,11 @@ class SutandoAgent(Agent):
             subprocess.run(
                 ["osascript", "-e", script], timeout=3, capture_output=True
             )
-            return f"Pressed {'+'.join(modifiers + [key])}"
+            result = f"Pressed {'+'.join(modifiers + [key])}"
         except Exception as e:
-            return f"press_key failed: {e}"
+            result = f"press_key failed: {e}"
+        self._log_inline_tool(result)
+        return result
 
     @function_tool()
     async def type_text(self, context: RunContext, text: str) -> str:
@@ -782,9 +792,11 @@ class SutandoAgent(Agent):
                 timeout=3,
                 capture_output=True,
             )
-            return f"Typed {len(text)} characters"
+            result = f"Typed {len(text)} characters"
         except Exception as e:
-            return f"type_text failed: {e}"
+            result = f"type_text failed: {e}"
+        self._log_inline_tool(result)
+        return result
 
     @function_tool()
     async def open_url(self, context: RunContext, url: str) -> str:
@@ -799,9 +811,11 @@ class SutandoAgent(Agent):
                 timeout=5,
                 capture_output=True,
             )
-            return f"Opened {url}"
+            result = f"Opened {url}"
         except Exception as e:
-            return f"Failed to open {url}: {e}"
+            result = f"Failed to open {url}: {e}"
+        self._log_inline_tool(result)
+        return result
 
     @function_tool()
     async def switch_app(self, context: RunContext, app: str) -> str:
@@ -819,9 +833,11 @@ class SutandoAgent(Agent):
                 timeout=10,
                 capture_output=True,
             )
-            return f"Switched to {app_name}"
+            result = f"Switched to {app_name}"
         except Exception as e:
-            return f"Failed to switch to {app_name}: {e}"
+            result = f"Failed to switch to {app_name}: {e}"
+        self._log_inline_tool(result)
+        return result
 
     @function_tool()
     async def describe_screen(self, context: RunContext) -> str:
@@ -913,6 +929,25 @@ async def entrypoint(ctx: JobContext):
             participant_identity="phone-user",
         ),
     )
+
+    # Capture user transcriptions for inline tool logging (open_url, press_key, etc.)
+    # These tools don't go through work(), so we hook the realtime session events.
+    # NOTE: session.llm._sessions is a WeakSet; _session (no 's') is a class-level type annotation.
+    try:
+        realtime_sessions = list(getattr(session.llm, '_sessions', set()))
+        if realtime_sessions:
+            realtime_session = realtime_sessions[0]
+            def _capture_transcript(event: dict) -> None:
+                if event.get("type") == "conversation.item.input_audio_transcription.completed":
+                    transcript = event.get("transcript", "").strip()
+                    if transcript:
+                        agent._last_transcript = transcript
+            realtime_session.on("openai_server_event_received", _capture_transcript)
+            logger.info("Transcript capture hook attached to realtime session")
+        else:
+            logger.warning("No realtime sessions found after session.start() — transcript capture unavailable")
+    except Exception as e:
+        logger.warning("Could not attach transcription capture: %s", e)
 
     # Greeting: skip for Qwen — the generate_reply timeout corrupts Qwen's
     # session state and suppresses VAD from detecting subsequent user speech.
