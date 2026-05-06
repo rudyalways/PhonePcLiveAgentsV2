@@ -14,6 +14,66 @@ cd "$REPO"
 VENV="$REPO/.venv-livekit"
 PYTHON="$VENV/bin/python3"
 
+port_listener_pids() {
+  lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null || true
+}
+
+port_owned_by() {
+  local port="$1"
+  local pattern="$2"
+  local pid cmd
+  while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$cmd" == *"$pattern"* ]]; then
+      return 0
+    fi
+  done < <(port_listener_pids "$port")
+  return 1
+}
+
+describe_port_listener() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | sed 's/^/    /' || true
+}
+
+start_port_service() {
+  local port="$1"
+  local name="$2"
+  local pattern="$3"
+  local log="$4"
+  local conflict_hint="$5"
+  shift 5
+
+  if ! lsof -i :"$port" -sTCP:LISTEN > /dev/null 2>&1; then
+    "$@" > "$log" 2>&1 &
+    echo "  ✓ $name (port $port)"
+  elif port_owned_by "$port" "$pattern"; then
+    echo "  ✓ $name (already running on port $port)"
+  else
+    echo "  ✗ $name port $port is occupied by a different process:"
+    describe_port_listener "$port"
+    echo "    $conflict_hint"
+  fi
+}
+
+verify_port_service() {
+  local port="$1"
+  local name="$2"
+  local pattern="$3"
+  local log="$4"
+
+  if port_owned_by "$port" "$pattern"; then
+    echo "  ✓ $name (port $port)"
+  elif lsof -i :"$port" -sTCP:LISTEN > /dev/null 2>&1; then
+    echo "  ✗ $name (port $port) is occupied by a different process:"
+    describe_port_listener "$port"
+    all_ok=0
+  else
+    echo "  ✗ $name (port $port) — check $log"
+    all_ok=0
+  fi
+}
+
 # ── Stop ──────────────────────────────────────────────────────────────────────
 
 do_stop() {
@@ -89,12 +149,15 @@ echo "Checking Python dependencies..."
 echo "  ✓ Dependencies ready"
 
 # Validate .env and required environment variables
+REQUESTED_CLIENT_PORT="${CLIENT_PORT:-}"
+
 if [ ! -f .env ]; then
   echo "  ✗ .env not found — cp .env.example .env and add your keys"
   exit 1
 fi
 
 set -a; [ -f .env ] && source .env; set +a
+if [ -n "$REQUESTED_CLIENT_PORT" ]; then CLIENT_PORT="$REQUESTED_CLIENT_PORT"; fi
 
 missing=0
 if [ -z "$LIVEKIT_URL" ]; then echo "  ✗ LIVEKIT_URL not set in .env"; missing=1; fi
@@ -153,7 +216,7 @@ echo ""
 # Archive stale results (>24h) to prevent backlog
 python3 "$REPO/src/archive-stale-results.py" 2>/dev/null || true
 
-export CLIENT_PORT=8081  # Avoid conflict with startup.sh's web-client (port 8080)
+export CLIENT_PORT="${CLIENT_PORT:-8081}"  # Avoid conflict with startup.sh's web-client (port 8080)
 echo ""
 
 echo "Starting LiveKit services..."
@@ -185,6 +248,17 @@ if ! lsof -i :7848 -sTCP:LISTEN > /dev/null 2>&1; then
 else
   echo "  ✓ pipeline trace (already running)"
 fi
+start_port_service 7850 "token server" "livekit-token-server.py" "logs/livekit-token-server.log" \
+  "Stop the conflicting process, then rerun deploy." \
+  "$PYTHON" src/livekit-token-server.py
+
+start_port_service "$CLIENT_PORT" "screen publisher server" "screen-publisher-server.py" "logs/screen-publisher-server.log" \
+  "Stop the conflicting process, or rerun with CLIENT_PORT=<free-port> bash src/deploy.sh." \
+  "$PYTHON" src/screen-publisher-server.py
+
+start_port_service 7847 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" \
+  "Stop the conflicting process, then rerun deploy." \
+  "$PYTHON" src/mobile-control-server.py
 
 sleep 1
 
@@ -202,16 +276,9 @@ echo ""
 echo "Verifying services..."
 VERIFY_PORTS="7850:token-server 8081:screen-publisher 7847:mobile-control 7848:pipeline-trace"
 all_ok=1
-for port_name in $VERIFY_PORTS; do
-  port="${port_name%%:*}"
-  name="${port_name##*:}"
-  if lsof -i :"$port" -sTCP:LISTEN > /dev/null 2>&1; then
-    echo "  ✓ $name (port $port)"
-  else
-    echo "  ✗ $name (port $port) — check logs/${name}.log"
-    all_ok=0
-  fi
-done
+verify_port_service 7850 "token-server" "livekit-token-server.py" "logs/livekit-token-server.log"
+verify_port_service "$CLIENT_PORT" "screen-publisher" "screen-publisher-server.py" "logs/screen-publisher-server.log"
+verify_port_service 7847 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
 
 # Check agent process (doesn't bind a port)
 if pgrep -f "livekit-agent.py" > /dev/null 2>&1; then
@@ -224,6 +291,7 @@ fi
 echo ""
 if [ $all_ok -eq 1 ]; then
   echo "✓ All services running"
+  echo "Open screen publisher: https://localhost:$CLIENT_PORT/"
 else
   echo "⚠ Some services failed to start — check logs/"
 fi
