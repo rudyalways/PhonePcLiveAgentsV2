@@ -86,6 +86,27 @@ stop_process_strict() {
   exit 1
 }
 
+stop_sutando_core() {
+  local socket="/tmp/sutando-tmux.sock"
+  local had_session=0
+
+  if command -v tmux > /dev/null 2>&1 &&
+     tmux -S "$socket" has-session -t sutando-core 2>/dev/null; then
+    had_session=1
+    echo "  stopping sutando-core"
+    tmux -S "$socket" kill-session -t sutando-core 2>/dev/null || true
+  fi
+
+  stop_process_strict "sutando-core agent" "claude --name sutando-core"
+  stop_process_strict "macOS GUI control MCP" "mcp-server-macos-use"
+
+  if [ "$had_session" -eq 1 ] &&
+     [ -z "$(process_pids "claude --name sutando-core")" ] &&
+     [ -z "$(process_pids "mcp-server-macos-use")" ]; then
+    echo "  ✓ sutando-core stopped"
+  fi
+}
+
 wait_for_port_service() {
   local port="$1"
   local name="$2"
@@ -167,6 +188,7 @@ do_stop() {
   stop_process_strict "web client" "src/web-client.ts"
   stop_process_strict "watch-tasks stream" "watch-tasks-stream.sh"
   stop_process_strict "watch-tasks" "watch-tasks.sh"
+  stop_sutando_core
   echo "All Sutando services stopped."
 }
 

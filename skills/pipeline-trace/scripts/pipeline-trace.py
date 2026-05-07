@@ -34,6 +34,7 @@ PORT = int(os.environ.get("PIPELINE_TRACE_PORT", "7902"))
 POLL_INTERVAL = 2.0
 MAX_TRACES = 100
 HEARTBEAT_INTERVAL = 15
+STALE_ACTIVE_TRACE_AFTER = 15 * 60
 
 
 # --- Data structures ---
@@ -107,7 +108,6 @@ def broadcast(event_type: str, data: str):
 # --- Agent log parser ---
 
 _TASK_RE = re.compile(r'Task (task-\d+) \[(\w+)\]: (.+)')
-_EXEC_RE = re.compile(r'Executing (task-\d+) via claude -p')
 _RESULT_CORE_RE = re.compile(r'Result (task-\d+) \(core\): (.+)')
 _RESULT_ASYNC_RE = re.compile(r'Result \(async\) (task-\d+): (.+)')
 
@@ -132,7 +132,7 @@ def _detect_inline_tool(assistant_text: str) -> str:
 @dataclass
 class AgentEvent:
     timestamp: float
-    event_type: str  # task_created, self_execute, result_core, result_async
+    event_type: str  # task_created, result_core, result_async
     task_id: str
     username: str = ""
     text: str = ""
@@ -178,13 +178,6 @@ def parse_agent_log() -> list[AgentEvent]:
             events.append(AgentEvent(
                 timestamp=ts, event_type="task_created",
                 task_id=m.group(1), username=m.group(2), text=m.group(3)
-            ))
-            continue
-
-        m = _EXEC_RE.search(msg)
-        if m:
-            events.append(AgentEvent(
-                timestamp=ts, event_type="self_execute", task_id=m.group(1)
             ))
             continue
 
@@ -409,6 +402,75 @@ def _task_result_files_exist(task_id: str) -> tuple[bool, bool]:
     return tpath.exists(), rpath.exists()
 
 
+def _task_file_progress_ts(task_id: str) -> float:
+    """Latest filesystem progress timestamp for a live task/result pair."""
+    if not task_id:
+        return 0.0
+    latest = 0.0
+    for path in (
+        REPO_DIR / "tasks" / f"{task_id}.txt",
+        REPO_DIR / "results" / f"{task_id}.txt",
+    ):
+        try:
+            if path.exists():
+                latest = max(latest, path.stat().st_mtime)
+        except Exception:
+            pass
+    return latest
+
+
+def _latest_progress_ts(
+    *,
+    user_ts: float,
+    assistant_ts: float,
+    matched_task_id: str,
+    pipeline_events: list[dict],
+) -> float:
+    """Best-effort "real progress" clock used to retire stale active traces."""
+    candidates = [float(user_ts or 0)]
+    if assistant_ts > 0:
+        candidates.append(float(assistant_ts))
+    for ev in pipeline_events or []:
+        try:
+            candidates.append(float(ev.get("ts", 0) or 0))
+        except Exception:
+            pass
+    candidates.append(_task_file_progress_ts(matched_task_id))
+    return max(candidates)
+
+
+def _retire_stale_active_checkpoints(
+    checkpoints: list[Checkpoint],
+    *,
+    last_progress_ts: float,
+    now: float,
+) -> None:
+    """Move stuck traces out of Active after no progress for 15 minutes."""
+    if not any(c.status == "active" for c in checkpoints):
+        return
+    stale_for = now - float(last_progress_ts or 0)
+    if stale_for <= STALE_ACTIVE_TRACE_AFTER:
+        return
+
+    stale_min = int(STALE_ACTIVE_TRACE_AFTER / 60)
+    for cp in checkpoints:
+        if cp.status != "active":
+            continue
+        previous = cp.content
+        cp.status = "error"
+        cp.timestamp = last_progress_ts or cp.timestamp
+        cp.content = (
+            f"无进展超过 {stale_min} 分钟，已自动移出 Active。"
+            + (f" 上次状态：{previous}" if previous else "")
+        )
+        cp.meta = {
+            **(cp.meta or {}),
+            "failure_hint": "trace_no_progress",
+            "stale_after_s": STALE_ACTIVE_TRACE_AFTER,
+            "stale_for_s": round(stale_for, 1),
+        }
+
+
 def read_heartbeats() -> list[dict]:
     state_dir = REPO_DIR / "state"
     results = []
@@ -476,22 +538,15 @@ def build_traces() -> list[Trace]:
 
         # Determine execution path
         exec_path = ""
-        exec_ts = 0.0
-        has_self_exec = False
         has_core_result = False
         for ev in matched_events:
-            if ev.event_type == "self_execute":
-                has_self_exec = True
-                exec_ts = ev.timestamp
-            elif ev.event_type == "result_core":
+            if ev.event_type == "result_core":
                 has_core_result = True
             elif ev.event_type == "result_async":
                 has_core_result = True
 
         if matched_task_id:
-            if has_self_exec:
-                exec_path = "self-execute"
-            elif has_core_result:
+            if has_core_result:
                 exec_path = "core"
             elif assistant_ts > 0:
                 exec_path = "core"
@@ -512,6 +567,7 @@ def build_traces() -> list[Trace]:
         duration = (assistant_ts - user_ts) if assistant_ts > 0 else 0.0
 
         # Build checkpoints
+        task_pipeline_events = pipeline_by_task.get(matched_task_id, [])
         checkpoints = _build_checkpoints(
             user_ts=user_ts,
             user_text=user_text,
@@ -519,14 +575,24 @@ def build_traces() -> list[Trace]:
             assistant_text=assistant_text,
             matched_task_id=matched_task_id,
             exec_path=exec_path,
-            exec_ts=exec_ts,
             task_meta=task_meta,
             full_result=full_result,
             core_status=core_status,
             duration=duration,
             source=source,
             tier=tier,
-            pipeline_events=pipeline_by_task.get(matched_task_id, []),
+            pipeline_events=task_pipeline_events,
+        )
+        last_progress_ts = _latest_progress_ts(
+            user_ts=user_ts,
+            assistant_ts=assistant_ts,
+            matched_task_id=matched_task_id,
+            pipeline_events=task_pipeline_events,
+        )
+        _retire_stale_active_checkpoints(
+            checkpoints,
+            last_progress_ts=last_progress_ts,
+            now=time.time(),
         )
 
         trace = Trace(
@@ -635,19 +701,14 @@ def _build_executor_bridge(
     # --- 3. Core processing (+ proactive loop heartbeat) ---
     cs_stat = core_status.get("status", "idle")
     step = core_status.get("step", "")
-    sla_miss = _any_event_failed(evs, {"core_sla_miss"})
-    if sla_miss:
-        b3_ts = sla_miss.get("ts", 0) or user_ts
-        b3_status = "error"
-        b3_content = "失败/降级：" + (
-            sla_miss.get("detail")
-            or "LiveKit：10s 内无 results → 已从 tasks/ 摘除并改走 claude -p"
+    sync_wait_timeout = _any_event_failed(evs, {"livekit_sync_wait_timeout"})
+    if sync_wait_timeout and task_waiting:
+        b3_ts = sync_wait_timeout.get("ts", 0) or user_ts
+        b3_status = "active"
+        b3_content = (
+            sync_wait_timeout.get("detail")
+            or "LiveKit 同步等待超时；task 保留在 tasks/ 中等待 sutando-core"
         )
-        b3_meta = {"failure_hint": "livekit_core_timeout", "proactive_vs_livekit_note": True}
-    elif exec_path == "self-execute" and not sla_miss:
-        # Self-exec via other path — still informative
-        b3_ts = user_ts
-        b3_status, b3_content = "skipped", "自执行模式下由 claude -p 短进程处理（非会话内 proactive loop）"
         b3_meta = {}
     elif task_waiting and cs_stat == "running":
         elapsed = max(0.0, now - user_ts)
@@ -663,7 +724,7 @@ def _build_executor_bridge(
         b3_ts = apulse.get("ts", 0)
         b3_status, b3_content = "active", apulse.get("detail", "") or "LiveKit async 长线轮询 heartbeat"
         b3_meta = {}
-    elif assistant_ts > 0 and not sla_miss:
+    elif assistant_ts > 0:
         b3_ts = assistant_ts - 1
         b3_status, b3_content = "completed", "已进入回复阶段 — core 侧面视为成功"
         b3_meta = {}
@@ -693,7 +754,7 @@ def _build_executor_bridge(
         b3_meta = {}
 
     # --- 4. Core execute success (semantic) ---
-    done_ev = _latest_event(evs, "core_task_done") or _latest_event(evs, "self_execute_finished")
+    done_ev = _latest_event(evs, "core_task_done")
     timeout_ev = _any_event_failed(
         evs,
         {"livekit_async_wait_timeout", "task_bridge_timeout"},
@@ -704,24 +765,10 @@ def _build_executor_bridge(
         )
         b4_ts = timeout_ev.get("ts", 0)
         b4_meta = {"failure_hint": "bridge_timeout"}
-    elif exec_path == "self-execute":
-        se = _latest_event(evs, "self_execute_finished")
-        if se and se.get("ok") is False:
-            b4_status, b4_content = "error", se.get("detail") or "claude -p 失败"
-            b4_ts = se.get("ts", 0)
-            b4_meta = {"failure_hint": "self_exec_error"}
-        else:
-            b4_status = "completed"
-            b4_content = (
-                (se.get("detail")[:180] if se else "")
-                or "claude -p 自执行路径完成（非 sutando-core 会话内）"
-            )
-            b4_ts = (se or {}).get("ts", 0) or user_ts
-            b4_meta = {}
     elif done_ev:
         b4_ts, b4_status, b4_content = done_ev.get("ts", 0), "completed", done_ev.get("detail") or "core 报告 task 完成"
         b4_meta = {}
-    elif assistant_ts > 0 and not sla_miss:
+    elif assistant_ts > 0 and not sync_wait_timeout:
         b4_ts = assistant_ts - 0.5
         b4_status, b4_content = "completed", "已产生语音/文本回复 — 推断执行成功"
         b4_meta = {}
@@ -739,7 +786,7 @@ def _build_executor_bridge(
     if ro and ro.get("ok"):
         b5_ts, b5_status, b5_content = ro.get("ts", 0), "completed", ro.get("detail") or "results/*.txt 已读"
         b5_meta = {}
-    elif assistant_ts > 0:
+    elif assistant_ts > 0 and not sync_wait_timeout:
         b5_ts = assistant_ts - 0.4
         b5_status, b5_content = "completed", "结果已消费（可能已归档至 results/archive）"
         b5_meta = {}
@@ -747,13 +794,9 @@ def _build_executor_bridge(
         b5_ts = now
         b5_status, b5_content = "active", "results/*.txt 存在，等待 LiveKit/桥接读取"
         b5_meta = {}
-    elif task_waiting and task_txt and not sla_miss:
+    elif task_txt:
         b5_ts = user_ts
         b5_status, b5_content = "pending", "尚无 results/task.txt — sutando-core 尚未写回?"
-        b5_meta = {}
-    elif sla_miss:
-        b5_ts = sla_miss.get("ts", user_ts)
-        b5_status, b5_content = "skipped", "未走 sutando-core 结果文件路径（LiveKit SLA 超时）"
         b5_meta = {}
     else:
         b5_ts = user_ts
@@ -850,7 +893,7 @@ def _build_executor_bridge(
 
 
 def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
-                       matched_task_id, exec_path, exec_ts, task_meta,
+                       matched_task_id, exec_path, task_meta,
                        full_result, core_status, duration, source, tier,
                        pipeline_events) -> list[Checkpoint]:
     """Build detailed checkpoints including cross-service executor bridge."""
@@ -898,13 +941,7 @@ def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
     cps.append(cp3)
 
     # 4. Execution Path
-    if exec_path == "self-execute":
-        wait_time = (exec_ts - user_ts) if exec_ts > user_ts else 10.0
-        cp4 = Checkpoint(name="execution", label="执行方式", status="completed",
-                         timestamp=exec_ts or user_ts + 10,
-                         content=f"自执行 (claude -p) — core {wait_time:.0f}s 无响应",
-                         meta={"path": "self-execute"})
-    elif exec_path == "core":
+    if exec_path == "core":
         cp4 = Checkpoint(name="execution", label="执行方式", status="completed",
                          timestamp=user_ts,
                          content="Core 处理 — sutando-core 接手执行",
@@ -1096,6 +1133,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-
 .trace-status-icon{font-size:10px}
 .trace-status-icon.done{color:#4ecca3}
 .trace-status-icon.active{color:#4eccc3;animation:pulse-badge 1.2s infinite}
+.trace-status-icon.error{color:#e94560}
 
 /* Timeline detail */
 .trace-detail{padding:0 16px 16px;display:none}
@@ -1235,9 +1273,14 @@ function renderTimeline(checkpoints) {
 
 function renderTrace(t, forceExpand, isNew) {
   const isActive = t.checkpoints.some(c => c.status === 'active');
+  const hasError = t.checkpoints.some(c => c.status === 'error');
   const isExpanded = forceExpand || expandedIds.has(t.trace_id);
   const sourceClass = (t.source || 'voice').toLowerCase().replace(/[^a-z-]/g, '');
-  const statusIcon = isActive ? '<span class="trace-status-icon active">◐</span>' : '<span class="trace-status-icon done">✓</span>';
+  const statusIcon = isActive
+    ? '<span class="trace-status-icon active">◐</span>'
+    : hasError
+      ? '<span class="trace-status-icon error">!</span>'
+      : '<span class="trace-status-icon done">✓</span>';
   const durationStr = t.duration > 0 ? formatDuration(t.duration) : '';
 
   let cardClass = 'trace-card' + (isActive ? ' active-trace' : '') + (isNew ? ' new-trace' : '');

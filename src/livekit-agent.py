@@ -628,25 +628,6 @@ class SutandoAgent(Agent):
         except Exception:
             return False
 
-    async def _execute_via_claude(self, task: str, task_id: str) -> str:
-        """Execute task independently via claude -p subprocess."""
-        logger.info("Executing %s via claude -p", task_id)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "claude", "-p", task,
-                "--dangerously-skip-permissions",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(REPO),
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-            result = stdout.decode().strip()
-            return result if result else "任务完成。"
-        except asyncio.TimeoutError:
-            return "任务执行超时（2分钟）。"
-        except Exception as e:
-            return f"执行失败: {e}"
-
     @function_tool()
     async def work(self, context: RunContext, task: str) -> str:
         """Do the work. Call this for any non-trivial request — questions, actions,
@@ -719,36 +700,14 @@ class SutandoAgent(Agent):
                 )
             await asyncio.sleep(1)
 
-        # Core didn't respond — self-execute via claude -p (full tool access).
-        # Remove task file to prevent double-execution by core.
         _pipeline_emit(
-            phase="core_sla_miss",
+            phase="livekit_sync_wait_timeout",
             task_id=task_id,
             ok=False,
-            detail="10s no core result → remove task file, run claude -p",
+            detail="10s no core result; task remains queued for sutando-core",
             component="livekit-agent",
         )
-        task_file.unlink(missing_ok=True)
-        _pipeline_emit(
-            phase="self_execute_started",
-            task_id=task_id,
-            ok=True,
-            detail="claude -p subprocess",
-            component="livekit-agent",
-        )
-        result_text = await self._execute_via_claude(task, task_id)
-        self._pending_tasks.pop(task_id, None)
-        log_conversation(self._username, "assistant", result_text[:200])
-        _pipeline_emit(
-            phase="self_execute_finished",
-            task_id=task_id,
-            ok=True,
-            detail=result_text[:120].replace("\n", " ")
-            if result_text
-            else "empty",
-            component="livekit-agent",
-        )
-        return result_text
+        return "I sent that to the core agent and it is still processing."
 
     async def _poll_and_speak(
         self, task_id: str, task_file: Path, result_file: Path, session: AgentSession
