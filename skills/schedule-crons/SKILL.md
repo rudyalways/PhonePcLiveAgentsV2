@@ -25,7 +25,7 @@ Each entry has:
    - Skip if a job with matching prompt/name already exists
    - If `prompt_skill` is set, invoke it as `/skill-name`
    - Call CronCreate with the cron expression and prompt
-4. Start the task watcher if not running: `bash src/watch-tasks.sh` (run_in_background)
+4. Start the streaming task watcher if not running from the `sutando-core` Claude Code session: `bash src/watch-tasks-stream.sh` (persistent Monitor mode preferred; fall back to `bash src/watch-tasks.sh` with run_in_background)
 5. Confirm what was scheduled
 
 ## Adding New Crons

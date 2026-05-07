@@ -36,6 +36,7 @@ from livekit.api import (
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
+LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "sutando-local")
 PORT = int(os.environ.get("TOKEN_SERVER_PORT", "7850"))
 
 _SERVER_START_TIME = int(time.time())
@@ -88,7 +89,7 @@ HEARTBEAT_FILE = Path(__file__).resolve().parent.parent / "state" / "livekit-age
 
 
 async def _ensure_agent_dispatched(room: str) -> None:
-    """Dispatch the sutando agent if no live agent participant is in the room."""
+    """Dispatch the local Sutando agent if no live agent participant is in the room."""
     if not LIVEKIT_URL:
         return
     async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lkapi:
@@ -121,9 +122,13 @@ async def _ensure_agent_dispatched(room: str) -> None:
 
         dispatch_time = int(time.time())
         new_dispatch = await lkapi.agent_dispatch.create_dispatch(
-            CreateAgentDispatchRequest(room=room, agent_name="sutando")
+            CreateAgentDispatchRequest(room=room, agent_name=LIVEKIT_AGENT_NAME)
         )
-        print(f"[TokenServer] Dispatched agent to {room} (dispatch={new_dispatch.id})", flush=True)
+        print(
+            f"[TokenServer] Dispatched agent {LIVEKIT_AGENT_NAME!r} to {room} "
+            f"(dispatch={new_dispatch.id})",
+            flush=True,
+        )
 
         # Poll up to 15s for our local worker to accept the job.
         # We verify via the heartbeat file: our worker writes it on every entrypoint entry.

@@ -36,6 +36,18 @@ describe_port_listener() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | sed 's/^/    /' || true
 }
 
+wait_for_process_exit() {
+  local pattern="$1"
+  local name="$2"
+  for _ in $(seq 1 30); do
+    if ! pgrep -f "$pattern" > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "  ⚠ $name still exiting; continuing"
+}
+
 start_port_service() {
   local port="$1"
   local name="$2"
@@ -74,6 +86,9 @@ verify_port_service() {
   fi
 }
 
+# TODO: auto-detect macOS vs Linux and choose the native supervisor
+# (launchd/systemd) when deployment targets expand beyond this Mac runtime.
+
 # ── Stop ──────────────────────────────────────────────────────────────────────
 
 do_stop() {
@@ -83,7 +98,14 @@ do_stop() {
   pkill -f "mobile-control-server" 2>/dev/null || true
   pkill -f "pipeline-trace.py" 2>/dev/null || true
   pkill -f "screen-capture-server.py" 2>/dev/null || true
-  echo "All LiveKit services stopped."
+  pkill -f "src/voice-agent.ts" 2>/dev/null || true
+  pkill -f "src/web-client.ts" 2>/dev/null || true
+  pkill -f "watch-tasks-stream.sh" 2>/dev/null || true
+  pkill -f "watch-tasks.sh" 2>/dev/null || true
+  wait_for_process_exit "livekit-agent.py" "livekit-agent"
+  wait_for_process_exit "src/voice-agent.ts" "voice-agent"
+  wait_for_process_exit "src/web-client.ts" "web-client"
+  echo "All Sutando services stopped."
 }
 
 if [ "$1" = "--stop" ]; then
@@ -133,6 +155,19 @@ if ! command -v npx > /dev/null 2>&1; then echo "  ✗ npx not found — comes w
 if ! command -v claude > /dev/null 2>&1; then
   echo "  ✗ claude not found — see https://docs.anthropic.com/en/docs/claude-code/getting-started"
   missing=1
+fi
+if ! command -v fswatch > /dev/null 2>&1; then
+  if command -v brew > /dev/null 2>&1; then
+    echo "  ⚠ fswatch not found — installing via Homebrew..."
+    brew install fswatch
+    if command -v fswatch > /dev/null 2>&1; then
+      echo "  ✓ fswatch installed"
+    else
+      echo "  ✗ fswatch installation failed"; missing=1
+    fi
+  else
+    echo "  ✗ fswatch not found — brew install fswatch"; missing=1
+  fi
 fi
 if [ $missing -eq 1 ]; then echo ""; echo "Fix the above and try again."; exit 1; fi
 echo "  ✓ All prerequisites found"
@@ -218,38 +253,26 @@ echo ""
 # Archive stale results (>24h) to prevent backlog
 python3 "$REPO/src/archive-stale-results.py" 2>/dev/null || true
 
+echo "Starting voice services..."
+if ! lsof -i :9900 -sTCP:LISTEN > /dev/null 2>&1; then
+  PORT=9900 HOST=0.0.0.0 npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
+  echo "  ✓ voice agent / result watcher (port 9900)"
+else
+  echo "  ✓ voice agent / result watcher (already running)"
+fi
+
+if ! lsof -i :8080 -sTCP:LISTEN > /dev/null 2>&1; then
+  CLIENT_PORT=8080 PORT=9900 npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
+  echo "  ✓ web client (port 8080)"
+else
+  echo "  ✓ web client (already running)"
+fi
+
 export CLIENT_PORT="${CLIENT_PORT:-8081}"  # Avoid conflict with startup.sh's web-client (port 8080)
 echo ""
 
 echo "Starting LiveKit services..."
 
-if ! lsof -i :7850 -sTCP:LISTEN > /dev/null 2>&1; then
-  "$PYTHON" src/livekit-token-server.py > logs/livekit-token-server.log 2>&1 &
-  echo "  ✓ token server (port 7850)"
-else
-  echo "  ✓ token server (already running)"
-fi
-
-if ! lsof -i :8081 -sTCP:LISTEN > /dev/null 2>&1; then
-  "$PYTHON" src/screen-publisher-server.py > logs/screen-publisher-server.log 2>&1 &
-  echo "  ✓ screen publisher server (port 8081)"
-else
-  echo "  ✓ screen publisher server (already running)"
-fi
-
-if ! lsof -i :7901 -sTCP:LISTEN > /dev/null 2>&1; then
-  "$PYTHON" src/mobile-control-server.py > logs/mobile-control.log 2>&1 &
-  echo "  ✓ mobile control server (port 7901)"
-else
-  echo "  ✓ mobile control server (already running)"
-fi
-
-if ! lsof -i :7902 -sTCP:LISTEN > /dev/null 2>&1; then
-  python3 skills/pipeline-trace/scripts/pipeline-trace.py > logs/pipeline-trace.log 2>&1 &
-  echo "  ✓ pipeline trace (port 7902)"
-else
-  echo "  ✓ pipeline trace (already running)"
-fi
 start_port_service 7850 "token server" "livekit-token-server.py" "logs/livekit-token-server.log" \
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/livekit-token-server.py
@@ -266,10 +289,14 @@ start_port_service 7900 "screen capture server" "screen-capture-server.py" "logs
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/screen-capture-server.py
 
+start_port_service 7902 "pipeline trace" "pipeline-trace.py" "logs/pipeline-trace.log" \
+  "Stop the conflicting process, then rerun deploy." \
+  python3 skills/pipeline-trace/scripts/pipeline-trace.py
+
 sleep 1
 
 # Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
-if ! pgrep -f "livekit-agent.py" > /dev/null 2>&1; then
+if ! pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1; then
   "$PYTHON" src/livekit-agent.py start \
     > logs/livekit-agent.log 2>&1 &
   echo "  ✓ AI agent (worker mode)"
@@ -287,9 +314,11 @@ verify_port_service "$CLIENT_PORT" "screen-publisher" "screen-publisher-server.p
 verify_port_service 7901 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
 verify_port_service 7900 "screen-capture" "screen-capture-server.py" "logs/screen-capture.log"
 verify_port_service 7902 "pipeline-trace" "pipeline-trace.py" "logs/pipeline-trace.log"
+verify_port_service 9900 "voice-agent / result watcher" "voice-agent.ts" "logs/voice-agent.log"
+verify_port_service 8080 "web-client" "web-client.ts" "logs/web-client.log"
 
 # Check agent process (doesn't bind a port)
-if pgrep -f "livekit-agent.py" > /dev/null 2>&1; then
+if pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1; then
   echo "  ✓ AI agent (worker mode)"
 else
   echo "  ✗ AI agent — check logs/livekit-agent.log"

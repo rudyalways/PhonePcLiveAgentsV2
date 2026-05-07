@@ -66,6 +66,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_VOICE_API_KEY = os.environ.get("GEMINI_VOICE_API_KEY", GEMINI_API_KEY)
 VOICE_MODEL = os.environ.get("VOICE_MODEL", "gemini-2.5-flash")
 REALTIME_PROVIDER = os.environ.get("REALTIME_PROVIDER", "gemini").lower()
+LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "sutando-local")
 
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
@@ -1077,4 +1078,4 @@ async def entrypoint(ctx: JobContext):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="sutando", port=8082))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name=LIVEKIT_AGENT_NAME, port=8082))

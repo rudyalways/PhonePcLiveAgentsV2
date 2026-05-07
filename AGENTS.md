@@ -100,7 +100,7 @@ Tasks arrive from multiple channels via the same file bridge:
 - Proactive messages: write to `results/proactive-{ts}.txt` to speak to the user
 - To send files in replies, include `[file: /path/to/file]` in the result text
 
-**IMPORTANT:** On session start, check if the task watcher is running (`pgrep -f "watch-tasks"`). If not, start it with `bash src/watch-tasks.sh` using `run_in_background: true`. When notified, read the output — it lists ALL pending task files. Process every one, write results to `results/`, then restart the watcher. This is how voice commands reach you.
+**IMPORTANT:** On session start, check if the streaming task watcher is running (`pgrep -f "watch-tasks"`). If not, start it persistently from the `sutando-core` Claude Code session with `bash src/watch-tasks-stream.sh` (preferred Monitor/persistent background mode). When notified with `TASK_FILE: <basename>`, read the named file from `tasks/`, process all queued task files, and write results to `results/`. If persistent streaming is unavailable, fall back to `bash src/watch-tasks.sh` using `run_in_background: true`; when it fires, process every task, write results, then restart the watcher. This is how voice commands reach you. Cursor is only a development environment; deployment/runtime should not depend on Cursor.
 
 ## Tutorial
 

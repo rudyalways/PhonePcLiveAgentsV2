@@ -100,7 +100,7 @@ Tasks arrive from multiple channels via the same file bridge:
 - Proactive messages: write to `results/proactive-{ts}.txt` to speak to the user
 - To send files in replies, include `[file: /path/to/file]` in the result text
 
-**IMPORTANT:** On session start, check if the task watcher is running (`pgrep -f "watch-tasks"`). If not, start it with `bash src/watch-tasks.sh` using `run_in_background: true`. When notified, read the output — it lists ALL pending task files. Process every one, write results to `results/`, then restart the watcher. This is how voice commands reach you.
+**IMPORTANT:** On session start, check if the streaming task watcher is running (`pgrep -f "watch-tasks"`). If not, start it persistently from the `sutando-core` Claude Code session with `bash src/watch-tasks-stream.sh` (preferred Monitor/persistent background mode). When notified with `TASK_FILE: <basename>`, read the named file from `tasks/`, process all queued task files, and write results to `results/`. If persistent streaming is unavailable, fall back to `bash src/watch-tasks.sh` using `run_in_background: true`; when it fires, process every task, write results, then restart the watcher. This is how voice commands reach you. Cursor is only a development environment; deployment/runtime should not depend on Cursor.
 
 ## Tutorial
 
@@ -255,7 +255,7 @@ open "https://github.com"           # open URL in default browser
 - ⌃C — drop selected text, clipboard image, or Finder file to `tasks/`
 - ⌃V — toggle voice connection in the browser
 - ⌃M — toggle mute during voice
-Launches automatically via `startup.sh`. Check `tasks/` for dropped context.
+Launches as part of the Sutando app/deploy flow. Check `tasks/` for dropped context.
 
 **Learn from demonstration** — when the user says "learn this", "remember my preference", "I always do it this way", or demonstrates a pattern:
 
@@ -280,9 +280,9 @@ On each context compaction, `src/session-handoff.sh` saves a snapshot to `sessio
 
 To start everything:
 ```bash
-bash src/startup.sh
+bash src/deploy.sh
 ```
-This also starts the screen capture server (needs terminal for Screen Recording permission).
+This starts the LiveKit services, screen publisher, mobile control, pipeline trace, screen capture server, and sutando-core.
 
 ## Skills
 

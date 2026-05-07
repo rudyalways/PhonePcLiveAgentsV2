@@ -19,11 +19,9 @@ If an interval is provided in ARGUMENTS (e.g. "5m", "10m", "30m"), use it. Other
 ## On activation
 
 1. Run `/schedule-crons` to set up all recurring cron jobs (morning briefing, Zacks, etc.)
-2. Start the task watcher if not running:
-```
-bash src/watch-tasks.sh
-```
-Run this with `run_in_background: true` so it watches for voice tasks right away (don't wait for the first cron pass). When the watcher fires, read its output — it lists ALL pending task files.
+2. Start the streaming task watcher from this `sutando-core` Claude Code session via the `Monitor` tool — pass `command: 'bash src/watch-tasks-stream.sh'`, `persistent: true`, `description: 'Streaming task watcher'`. The script emits one `TASK_FILE: <basename>` line per new task file (initial sweep + each subsequent event). Read the named file via the Read tool when notifications arrive.
+
+If the environment does not provide a persistent Monitor tool, fall back to `bash src/watch-tasks.sh` with `run_in_background: true`; when it fires, process all queued tasks and restart it.
 
 ## Observability（Pipeline Trace ①–⑥）
 
@@ -102,7 +100,9 @@ Skip step 6 (end the pass early after step 3) if and only if one of these applie
 
 8. **If blocked, ask.** Write the question to `pending-questions.md`, send a macOS notification, and write to `results/question-{ts}.txt` if voice is connected. Don't stop — apply the Pivot-on-block rule and pick another menu item.
 
-9. **Ensure the watcher is running.** If no `fswatch` process on `tasks/`, start one with `bash src/watch-tasks.sh` (`run_in_background: true`). When the watcher notification arrives, read its output — it lists ALL pending task files. Process every one before restarting the watcher.
+9. **Ensure the streaming watcher is running.** If no `fswatch` process on `tasks/` (check via `pgrep -f watch-tasks`), restart it from this `sutando-core` Claude Code session with the `Monitor` tool: `command: 'bash src/watch-tasks-stream.sh'`, `persistent: true`. When notifications arrive (`TASK_FILE: <basename>`), Read the named file. Each event represents one new task — process all queued tasks before continuing.
+
+   If Monitor is unavailable, use the fallback one-shot watcher: `bash src/watch-tasks.sh` with `run_in_background: true`, then restart it after each `TASK_DETECTED` notification.
 
 10. **Monitor Discord.** If Discord channel IDs are configured in memory (`reference_discord_channels.md`), check those channels for new messages. Forward actionable items from public channels to the dev channel. Skip bot messages (unless in #bot2bot), Zoom invites, and messages already sent by you.
 
