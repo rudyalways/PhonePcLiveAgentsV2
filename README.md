@@ -194,6 +194,8 @@ The agent can execute these tools on your PC via voice:
 - **describe_screen** — capture and describe what's on screen
 - **get_current_time** — get current date and time
 
+Screen and browser preference: for "what's on my screen" or logged-in sites, use the user's existing Mac/browser session first (`describe_screen`, `/usr/sbin/screencapture`, or macOS Accessibility via `macos-use`). Do not switch to Playwright, Chromium, or another browser profile if that would require a separate login, lose cookies, or change session context; use browser automation only when explicitly requested or when no extra login/session setup is needed.
+
 ## Environment variables
 
 | Variable | Default | Description |

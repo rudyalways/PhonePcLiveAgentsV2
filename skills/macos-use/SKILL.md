@@ -15,12 +15,20 @@ Drive macOS applications from Claude Code via mediar-ai's [mcp-server-macos-use]
 - "Type this into the Discord message box"
 - "Scroll the frontmost window to the bottom"
 - Any task that currently falls back to AppleScript + Quartz mouse events in `src/inline-tools.ts`
+- Screen questions where structured UI is more useful than pixels, such as "what controls are visible in this app?"
 
 Prefer this skill over:
 - `bash src/screen-capture.sh` — that captures screenshots; `macos-use` actually *interacts*
 - AppleScript `tell application` blocks — more reliable, better error handling
 - `cliclick` — lower-level, no accessibility context
 - Claude's built-in `computer-use` — that mode requires interactive sessions and holds a lock that contends with Sutando's own loop
+
+For screen-reading only, use this order:
+1. `macos-use` MCP when the active app exposes useful accessibility controls or the task may require clicking/typing next.
+2. `/usr/sbin/screencapture` through the `macos-tools` screen capture script when the user asks to visually describe the screen, image, layout, or anything canvas-like.
+3. Host-provided "describe screen" context when available and enough for the question.
+4. For logged-in websites, keep using the user's existing visible browser session through `macos-use` or screenshots. Avoid Playwright/Chromium/browser MCP when it would require another login, a fresh profile, missing cookies, or session changes.
+5. Browser/Playwright/Chromium tooling only when the user explicitly asks for browser automation/debugging, or when the page can be inspected without additional login/session setup.
 
 ## Tools exposed
 

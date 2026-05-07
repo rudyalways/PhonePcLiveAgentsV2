@@ -129,6 +129,8 @@ curl -s http://localhost:7900/capture | python3 -c 'import json,sys; print(json.
 ```
 Then use the Read tool on the returned path to view the screenshot. Use this for any screen-related question: "what am I looking at", "help me with this", "what's on my screen", etc.
 
+Screen/browser preference: preserve the user's existing visible Mac/browser session by default. For visual questions, use `describe_screen` or `/usr/sbin/screencapture` through the screen-capture server/skill. For UI controls or interaction, use `macos-use` MCP when available. For logged-in websites like X, Gmail, or dashboards, do not switch to Playwright, Chromium, or another browser profile if that would require a separate login, lose cookies, or change session context.
+
 **Notes** — the user's second brain. Save and retrieve notes:
 - Save: write to `notes/{slug}.md` with a descriptive filename
 - Retrieve: search notes with `Glob("notes/**/*.md")` or `Grep` for content
@@ -205,11 +207,11 @@ Tools (after `bash skills/macos-use/scripts/build.sh && bash skills/macos-use/sc
 - `mcp__macos-use__scroll_and_traverse` — scroll in a direction
 - `mcp__macos-use__refresh_traversal` — re-read the a11y tree without acting
 
-Prefer this for any "open X and do Y" task in a native app (Zoom join, Mail compose, Finder navigation). For web pages, prefer Browser automation (below). Full doc in `skills/macos-use/SKILL.md`.
+Prefer this for any "open X and do Y" task in a native app (Zoom join, Mail compose, Finder navigation), and for logged-in websites where the user's existing browser session matters. Full doc in `skills/macos-use/SKILL.md`.
 
 **Browser automation** — navigate, read, fill forms, screenshot web pages:
 
-Preferred (interactive): Use **Playwright MCP tools** (`mcp__playwright__*`) or **Chrome plugin** (`mcp__claude-in-chrome__*`). These provide real browser control with live DOM access, screenshots, and form interaction.
+Use browser automation only when the user explicitly asks for browser debugging/automation, or when the page can run without extra login/session setup. Prefer `macos-use` or screenshots for logged-in pages already open in the user's browser.
 
 Fallback (non-interactive / headless): `src/browser.mjs` for scripted or background use:
 ```bash

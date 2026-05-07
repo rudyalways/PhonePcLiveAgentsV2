@@ -16,6 +16,16 @@ Native macOS integrations via AppleScript. No API keys needed — works on any M
 - **Email**: "Send an email to...", "draft a message to..."
 - **File search**: "Find my resume", "where's that PDF?"
 
+## Screen Tool Preference
+
+For screen-related requests, prefer local macOS visibility before browser automation:
+
+1. If the task is to inspect or describe what is visible on the Mac, use this skill's screen capture. It calls `/usr/sbin/screencapture` via `screen-capture.sh`, then reads the PNG with vision.
+2. If the task needs interacting with a native Mac app or reading structured UI controls, use the `macos-use` MCP accessibility tree.
+3. If a built-in "describe screen" or current-screen context is available in the host environment, use that for quick visual understanding.
+4. For logged-in websites, prefer the user's existing visible browser session via `macos-use` or screenshot/vision. Do not switch to Playwright, Chromium, or another browser profile if it would require a separate login, lose cookies, or change the user's session context.
+5. Use Playwright, Chromium, or browser MCP only when the user explicitly wants browser automation/debugging, or when the task can run without extra login/session setup.
+
 ## Tools
 
 ### Screen Capture
