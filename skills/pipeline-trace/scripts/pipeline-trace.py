@@ -1069,9 +1069,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-
 .section-label .count{color:#444}
 
 /* Trace card */
-.trace-card{background:#12121e;border:1px solid #1e1e30;border-radius:10px;margin-bottom:10px;transition:all .3s ease;animation:slide-in .3s ease;overflow:hidden}
+.trace-card{background:#12121e;border:1px solid #1e1e30;border-radius:10px;margin-bottom:10px;transition:border-color .2s ease,box-shadow .2s ease,background-color .2s ease;overflow:hidden}
+.trace-card.new-trace{animation:slide-in .25s ease}
 .trace-card.active-trace{border-color:#2a4a4a;box-shadow:0 0 20px rgba(78,204,163,.05)}
 @keyframes slide-in{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+@media (prefers-reduced-motion:reduce){
+  .trace-card,.trace-card.new-trace,.badge.running,.trace-status-icon.active,.tl-dot.active,.connected-indicator{animation:none}
+  .trace-card{transition:none}
+}
 
 .trace-summary{padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;user-select:none}
 .trace-summary:hover{background:#151520}
@@ -1164,6 +1169,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-
 let allTraces = [];
 let expandedIds = new Set();
 let currentFilter = '';
+let renderedTraceIds = new Set();
+let userFilterSignature = '';
+let hasRenderedTraces = false;
 
 function relativeTime(ts) {
   if (!ts) return '';
@@ -1225,14 +1233,15 @@ function renderTimeline(checkpoints) {
   return html;
 }
 
-function renderTrace(t, forceExpand) {
+function renderTrace(t, forceExpand, isNew) {
   const isActive = t.checkpoints.some(c => c.status === 'active');
   const isExpanded = forceExpand || expandedIds.has(t.trace_id);
   const sourceClass = (t.source || 'voice').toLowerCase().replace(/[^a-z-]/g, '');
   const statusIcon = isActive ? '<span class="trace-status-icon active">◐</span>' : '<span class="trace-status-icon done">✓</span>';
   const durationStr = t.duration > 0 ? formatDuration(t.duration) : '';
 
-  let html = '<div class="trace-card' + (isActive ? ' active-trace' : '') + '" data-id="' + t.trace_id + '">';
+  let cardClass = 'trace-card' + (isActive ? ' active-trace' : '') + (isNew ? ' new-trace' : '');
+  let html = '<div class="' + cardClass + '" data-id="' + t.trace_id + '">';
 
   // Summary row
   html += '<div class="trace-summary" onclick="toggleTrace(\'' + t.trace_id + '\')">';
@@ -1266,17 +1275,22 @@ function applyFilter() {
 function renderAll(traceData) {
   allTraces = traceData;
 
-  // Update user filter options
+  // Update user filter options only when the set changes. Rebuilding the
+  // select on every poll causes a visible twitch in some browsers.
   const users = [...new Set(traceData.map(t => t.user).filter(Boolean))].sort();
   const sel = document.getElementById('user-filter');
   const prev = sel.value;
-  while (sel.options.length > 1) sel.remove(1);
-  users.forEach(u => {
-    const opt = document.createElement('option');
-    opt.value = u; opt.textContent = '@' + u;
-    if (u === prev) opt.selected = true;
-    sel.appendChild(opt);
-  });
+  const userSignature = users.join('\n');
+  if (userSignature !== userFilterSignature) {
+    while (sel.options.length > 1) sel.remove(1);
+    users.forEach(u => {
+      const opt = document.createElement('option');
+      opt.value = u; opt.textContent = '@' + u;
+      if (u === prev) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    userFilterSignature = userSignature;
+  }
   currentFilter = sel.value;
 
   const filtered = currentFilter ? traceData.filter(t => t.user === currentFilter) : traceData;
@@ -1289,7 +1303,7 @@ function renderAll(traceData) {
   // Active traces always expanded
   if (active.length > 0) {
     activeEl.innerHTML = '<div class="section-label">Active <span class="count">(' + active.length + ')</span></div>' +
-      active.map(t => renderTrace(t, true)).join('');
+      active.map(t => renderTrace(t, true, hasRenderedTraces && !renderedTraceIds.has(t.trace_id))).join('');
   } else {
     activeEl.innerHTML = '';
   }
@@ -1297,12 +1311,15 @@ function renderAll(traceData) {
   // History traces collapsible
   if (completed.length > 0) {
     historyEl.innerHTML = '<div class="section-label">History <span class="count">(' + completed.length + ')</span></div>' +
-      completed.map(t => renderTrace(t, false)).join('');
+      completed.map(t => renderTrace(t, false, hasRenderedTraces && !renderedTraceIds.has(t.trace_id))).join('');
   } else if (active.length === 0) {
     historyEl.innerHTML = '<div class="empty">No traces yet. Send a task via voice to see the pipeline.</div>';
   } else {
     historyEl.innerHTML = '';
   }
+
+  renderedTraceIds = new Set(traceData.map(t => t.trace_id));
+  hasRenderedTraces = true;
 
   // Badges
   const badge = document.getElementById('status-badge');

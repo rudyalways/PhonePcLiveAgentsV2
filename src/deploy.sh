@@ -1,9 +1,9 @@
 #!/bin/bash
 # Manage all LiveKit services (start / stop / restart).
 # Usage:
-#   bash src/deploy.sh            # start all services
+#   bash src/deploy.sh            # clean restart all services
 #   bash src/deploy.sh --stop     # stop all services
-#   bash src/deploy.sh --restart  # stop then start
+#   bash src/deploy.sh --restart  # same as default: clean restart all services
 # Add user: python3 src/add-user.py <username> <secret>
 
 set -e  # Exit on error
@@ -36,16 +36,81 @@ describe_port_listener() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | sed 's/^/    /' || true
 }
 
+process_pids() {
+  local pattern="$1"
+  pgrep -f "$pattern" 2>/dev/null || true
+}
+
 wait_for_process_exit() {
   local pattern="$1"
-  local name="$2"
-  for _ in $(seq 1 30); do
-    if ! pgrep -f "$pattern" > /dev/null 2>&1; then
+  local timeout_s="${2:-10}"
+  local deadline=$((SECONDS + timeout_s))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -z "$(process_pids "$pattern")" ]; then
       return 0
     fi
-    sleep 0.2
+    sleep 0.25
   done
-  echo "  ⚠ $name still exiting; continuing"
+  [ -z "$(process_pids "$pattern")" ]
+}
+
+stop_process_strict() {
+  local name="$1"
+  local pattern="$2"
+  local pids
+
+  pids="$(process_pids "$pattern")"
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+
+  echo "  stopping $name"
+  pkill -TERM -f "$pattern" 2>/dev/null || true
+  if wait_for_process_exit "$pattern" 10; then
+    echo "  ✓ $name stopped"
+    return 0
+  fi
+
+  echo "  ⚠ $name still exiting; forcing stop"
+  pkill -KILL -f "$pattern" 2>/dev/null || true
+  if wait_for_process_exit "$pattern" 5; then
+    echo "  ✓ $name stopped"
+    return 0
+  fi
+
+  echo "  ✗ $name did not stop cleanly:"
+  process_pids "$pattern" | while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    ps -p "$pid" -o pid,command= 2>/dev/null | sed 's/^/    /' || true
+  done
+  exit 1
+}
+
+wait_for_port_service() {
+  local port="$1"
+  local name="$2"
+  local pattern="$3"
+  local log="$4"
+  for _ in $(seq 1 40); do
+    if port_owned_by "$port" "$pattern"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "  ✗ $name did not become ready on port $port — check $log"
+  return 1
+}
+
+wait_for_livekit_agent() {
+  for _ in $(seq 1 80); do
+    if pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1 &&
+       lsof -nP -iTCP:8082 -sTCP:LISTEN > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "  ✗ AI agent did not become ready — check logs/livekit-agent.log"
+  return 1
 }
 
 start_port_service() {
@@ -92,19 +157,16 @@ verify_port_service() {
 # ── Stop ──────────────────────────────────────────────────────────────────────
 
 do_stop() {
-  pkill -f "livekit-token-server" 2>/dev/null || true
-  pkill -f "screen-publisher-server" 2>/dev/null || true
-  pkill -f "livekit-agent.py" 2>/dev/null || true
-  pkill -f "mobile-control-server" 2>/dev/null || true
-  pkill -f "pipeline-trace.py" 2>/dev/null || true
-  pkill -f "screen-capture-server.py" 2>/dev/null || true
-  pkill -f "src/voice-agent.ts" 2>/dev/null || true
-  pkill -f "src/web-client.ts" 2>/dev/null || true
-  pkill -f "watch-tasks-stream.sh" 2>/dev/null || true
-  pkill -f "watch-tasks.sh" 2>/dev/null || true
-  wait_for_process_exit "livekit-agent.py" "livekit-agent"
-  wait_for_process_exit "src/voice-agent.ts" "voice-agent"
-  wait_for_process_exit "src/web-client.ts" "web-client"
+  stop_process_strict "AI agent" "src/livekit-agent.py start"
+  stop_process_strict "token server" "livekit-token-server.py"
+  stop_process_strict "screen publisher server" "screen-publisher-server.py"
+  stop_process_strict "mobile control server" "mobile-control-server.py"
+  stop_process_strict "pipeline trace" "pipeline-trace.py"
+  stop_process_strict "screen capture server" "screen-capture-server.py"
+  stop_process_strict "voice agent / result watcher" "src/voice-agent.ts"
+  stop_process_strict "web client" "src/web-client.ts"
+  stop_process_strict "watch-tasks stream" "watch-tasks-stream.sh"
+  stop_process_strict "watch-tasks" "watch-tasks.sh"
   echo "All Sutando services stopped."
 }
 
@@ -134,14 +196,19 @@ fi
 
 if [ "$1" = "--restart" ]; then
   echo "Restarting LiveKit services..."
-  echo ""
-  echo "Stopping services..."
-  do_stop
-  sleep 2
-  echo ""
-  echo "Starting services..."
-  echo ""
+elif [ "${1:-}" = "" ]; then
+  echo "Clean restarting LiveKit services..."
+else
+  echo "Unknown option: $1"
+  echo "Usage: bash src/deploy.sh [--restart|--stop|--logs]"
+  exit 1
 fi
+echo ""
+echo "Stopping services..."
+do_stop
+echo ""
+echo "Starting services..."
+echo ""
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 
@@ -260,6 +327,7 @@ if ! lsof -i :9900 -sTCP:LISTEN > /dev/null 2>&1; then
 else
   echo "  ✓ voice agent / result watcher (already running)"
 fi
+wait_for_port_service 9900 "voice agent / result watcher" "voice-agent.ts" "logs/voice-agent.log" || exit 1
 
 if ! lsof -i :8080 -sTCP:LISTEN > /dev/null 2>&1; then
   CLIENT_PORT=8080 PORT=9900 npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
@@ -267,6 +335,7 @@ if ! lsof -i :8080 -sTCP:LISTEN > /dev/null 2>&1; then
 else
   echo "  ✓ web client (already running)"
 fi
+wait_for_port_service 8080 "web client" "web-client.ts" "logs/web-client.log" || exit 1
 
 export CLIENT_PORT="${CLIENT_PORT:-8081}"  # Avoid conflict with startup.sh's web-client (port 8080)
 echo ""
@@ -276,22 +345,27 @@ echo "Starting LiveKit services..."
 start_port_service 7850 "token server" "livekit-token-server.py" "logs/livekit-token-server.log" \
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/livekit-token-server.py
+wait_for_port_service 7850 "token server" "livekit-token-server.py" "logs/livekit-token-server.log" || exit 1
 
 start_port_service "$CLIENT_PORT" "screen publisher server" "screen-publisher-server.py" "logs/screen-publisher-server.log" \
   "Stop the conflicting process, or rerun with CLIENT_PORT=<free-port> bash src/deploy.sh." \
   "$PYTHON" src/screen-publisher-server.py
+wait_for_port_service "$CLIENT_PORT" "screen publisher server" "screen-publisher-server.py" "logs/screen-publisher-server.log" || exit 1
 
 start_port_service 7901 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" \
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/mobile-control-server.py
+wait_for_port_service 7901 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" || exit 1
 
 start_port_service 7900 "screen capture server" "screen-capture-server.py" "logs/screen-capture.log" \
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/screen-capture-server.py
+wait_for_port_service 7900 "screen capture server" "screen-capture-server.py" "logs/screen-capture.log" || exit 1
 
 start_port_service 7902 "pipeline trace" "pipeline-trace.py" "logs/pipeline-trace.log" \
   "Stop the conflicting process, then rerun deploy." \
   python3 skills/pipeline-trace/scripts/pipeline-trace.py
+wait_for_port_service 7902 "pipeline trace" "pipeline-trace.py" "logs/pipeline-trace.log" || exit 1
 
 sleep 1
 
@@ -303,6 +377,7 @@ if ! pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1; then
 else
   echo "  ✓ AI agent (already running)"
 fi
+wait_for_livekit_agent || exit 1
 
 sleep 3
 echo ""
