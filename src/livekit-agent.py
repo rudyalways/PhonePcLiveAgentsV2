@@ -605,8 +605,6 @@ class SutandoAgent(Agent):
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._pending_tasks: dict[str, float] = {}
         self._last_transcript: str = ""  # Most recent user transcription (for inline tool logging)
-        self._claude_queue: asyncio.Queue = asyncio.Queue()
-        self._claude_worker_task: asyncio.Task | None = None
 
     def _is_session_healthy(self) -> bool:
         """Return True if sutando-core updated core-status.json within the last 5 minutes."""
@@ -620,9 +618,8 @@ class SutandoAgent(Agent):
             return False
 
     async def _execute_via_claude(self, task: str, task_id: str) -> str:
-        """Execute task independently via claude -p subprocess (serial, one at a time)."""
+        """Execute task independently via claude -p subprocess."""
         logger.info("Executing %s via claude -p", task_id)
-        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "claude", "-p", task,
@@ -631,48 +628,13 @@ class SutandoAgent(Agent):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(REPO),
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
             result = stdout.decode().strip()
             return result if result else "任务完成。"
         except asyncio.TimeoutError:
-            if proc and proc.returncode is None:
-                proc.kill()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    pass
-            logger.warning("Task %s timed out (3 min), subprocess killed", task_id)
-            return "任务执行超时（3分钟），已终止。"
+            return "任务执行超时（2分钟）。"
         except Exception as e:
-            if proc and proc.returncode is None:
-                proc.kill()
             return f"执行失败: {e}"
-
-    def _ensure_claude_worker(self) -> None:
-        """Start the serial claude-p worker if not already running."""
-        if self._claude_worker_task is None or self._claude_worker_task.done():
-            self._claude_worker_task = asyncio.create_task(self._claude_worker())
-
-    async def _claude_worker(self) -> None:
-        """Background worker: processes claude -p tasks serially (no concurrent GUI conflicts)."""
-        while True:
-            task, task_id, session = await self._claude_queue.get()
-            try:
-                result_text = await self._execute_via_claude(task, task_id)
-                self._pending_tasks.pop(task_id, None)
-                log_conversation(self._username, "assistant", result_text[:200])
-                logger.info("Queue result %s: %s", task_id, result_text[:100])
-                try:
-                    session.generate_reply(
-                        instructions=f"The task completed. Tell the user this result concisely: {result_text[:500]}"
-                    )
-                except Exception as e:
-                    logger.warning("Failed to speak queued result %s: %s", task_id, e)
-            except Exception as e:
-                logger.exception("Claude worker error for %s: %s", task_id, e)
-                self._pending_tasks.pop(task_id, None)
-            finally:
-                self._claude_queue.task_done()
 
     @function_tool()
     async def work(self, context: RunContext, task: str) -> str:
@@ -697,18 +659,8 @@ class SutandoAgent(Agent):
         log_conversation(self._username, "user", task)
         logger.info("Task %s [%s]: %s", task_id, self._username, task[:100])
 
-        # Return immediately — dispatch in background to avoid blocking Qwen
-        session = context.session
-        asyncio.create_task(self._dispatch_task(task, task_id, task_file, session))
-        return "收到，正在处理。完成后会告诉你结果。"
-
-    async def _dispatch_task(
-        self, task: str, task_id: str, task_file: Path, session
-    ) -> None:
-        """Background: wait for core, fall back to claude -p queue."""
+        # Give sutando-core 10s to respond (if alive, it's faster + richer)
         result_file = self._results_dir / f"{task_id}.txt"
-
-        # Give sutando-core 10s to respond (faster + richer if alive)
         for _ in range(10):
             if result_file.exists():
                 result_text = result_file.read_text().strip()
@@ -717,19 +669,42 @@ class SutandoAgent(Agent):
                 self._pending_tasks.pop(task_id, None)
                 log_conversation(self._username, "assistant", result_text[:200])
                 logger.info("Result %s (core): %s", task_id, result_text[:100])
-                try:
-                    session.generate_reply(
-                        instructions=f"The task completed. Tell the user this result concisely: {result_text[:500]}"
-                    )
-                except Exception as e:
-                    logger.warning("Failed to speak core result %s: %s", task_id, e)
-                return
+                return result_text
             await asyncio.sleep(1)
 
-        # Core didn't respond — queue for serial self-execution via claude -p
+        # Core didn't respond — self-execute via claude -p (full tool access).
+        # Remove task file to prevent double-execution by core.
         task_file.unlink(missing_ok=True)
-        self._ensure_claude_worker()
-        await self._claude_queue.put((task, task_id, session))
+        result_text = await self._execute_via_claude(task, task_id)
+        self._pending_tasks.pop(task_id, None)
+        log_conversation(self._username, "assistant", result_text[:200])
+        return result_text
+
+    async def _poll_and_speak(
+        self, task_id: str, task_file: Path, result_file: Path, session: AgentSession
+    ) -> None:
+        """Background poller: waits for task result, then pushes it via generate_reply."""
+        try:
+            for _ in range(TASK_TIMEOUT_S - 8):
+                if result_file.exists():
+                    result_text = result_file.read_text().strip()
+                    archive_file(result_file, "results", task_id, self._username)
+                    archive_file(task_file, "tasks", task_id, self._username)
+                    self._pending_tasks.pop(task_id, None)
+                    log_conversation(self._username, "assistant", result_text[:200])
+                    logger.info("Result (async) %s: %s", task_id, result_text[:100])
+                    try:
+                        await session.generate_reply(
+                            instructions=f"The task completed. Tell the user this result concisely: {result_text[:500]}"
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to speak async result: %s", e)
+                    return
+                await asyncio.sleep(1)
+            self._pending_tasks.pop(task_id, None)
+            logger.warning("Task %s timed out in background poller", task_id)
+        except Exception as e:
+            logger.exception("Background poll error for %s: %s", task_id, e)
 
     def _log_inline_tool(self, result: str) -> None:
         """Log an inline tool call (non-work) to the conversation log using last transcription."""

@@ -109,7 +109,6 @@ _TASK_RE = re.compile(r'Task (task-\d+) \[(\w+)\]: (.+)')
 _EXEC_RE = re.compile(r'Executing (task-\d+) via claude -p')
 _RESULT_CORE_RE = re.compile(r'Result (task-\d+) \(core\): (.+)')
 _RESULT_ASYNC_RE = re.compile(r'Result \(async\) (task-\d+): (.+)')
-_RESULT_QUEUE_RE = re.compile(r'Queue result (task-\d+): (.+)')
 
 _INLINE_TOOL_PATTERNS = [
     (re.compile(r'^Opened (.+)'), 'open_url'),
@@ -197,14 +196,6 @@ def parse_agent_log() -> list[AgentEvent]:
             continue
 
         m = _RESULT_ASYNC_RE.search(msg)
-        if m:
-            events.append(AgentEvent(
-                timestamp=ts, event_type="result_async",
-                task_id=m.group(1), text=m.group(2)
-            ))
-            continue
-
-        m = _RESULT_QUEUE_RE.search(msg)
         if m:
             events.append(AgentEvent(
                 timestamp=ts, event_type="result_async",
@@ -426,27 +417,14 @@ def build_traces() -> list[Trace]:
         exec_ts = 0.0
         has_self_exec = False
         has_core_result = False
-        result_ev_ts = 0.0
-        result_ev_text = ""
         for ev in matched_events:
             if ev.event_type == "self_execute":
                 has_self_exec = True
                 exec_ts = ev.timestamp
             elif ev.event_type == "result_core":
                 has_core_result = True
-                result_ev_ts = ev.timestamp
-                result_ev_text = ev.text
             elif ev.event_type == "result_async":
                 has_core_result = True
-                result_ev_ts = ev.timestamp
-                result_ev_text = ev.text
-
-        # Agent log has precise task_id→result mapping; conversation log only
-        # has sequential user→assistant pairing which breaks when tasks overlap.
-        # Always prefer agent log result when available.
-        if result_ev_ts > 0:
-            assistant_ts = result_ev_ts
-            assistant_text = result_ev_text
 
         if matched_task_id:
             if has_self_exec:
@@ -512,7 +490,6 @@ def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
                        full_result, core_status, duration, source, tier) -> list[Checkpoint]:
     """Build 7 detailed checkpoints for a trace."""
     cps = []
-    is_stale = assistant_ts == 0 and (time.time() - user_ts) > 600
 
     # 1. Voice Input
     cp1 = Checkpoint(name="voice_input", label="语音输入", status="completed",
@@ -534,9 +511,6 @@ def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
     elif assistant_ts > 0:
         cp2 = Checkpoint(name="tool_decision", label="工具决策", status="completed",
                          timestamp=user_ts, content="work() 调用")
-    elif is_stale:
-        cp2 = Checkpoint(name="tool_decision", label="工具决策", status="error",
-                         timestamp=user_ts, content="超时未响应")
     else:
         cp2 = Checkpoint(name="tool_decision", label="工具决策", status="active",
                          timestamp=user_ts, content="等待 AI 决策...")
@@ -554,9 +528,6 @@ def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
     elif assistant_ts > 0:
         cp3 = Checkpoint(name="task_created", label="任务创建", status="completed",
                          timestamp=user_ts, content=f"task 已创建 | {source}")
-    elif is_stale:
-        cp3 = Checkpoint(name="task_created", label="任务创建", status="error",
-                         timestamp=user_ts, content="超时未响应")
     else:
         cp3 = Checkpoint(name="task_created", label="任务创建", status="active",
                          timestamp=user_ts, content="正在创建任务...")
@@ -587,19 +558,15 @@ def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
 
     # 5. Processing
     is_active = assistant_ts == 0 and cp3.status != "skipped"
-    stale_timeout = 600  # 10 min — mark as stale instead of active
-    elapsed = time.time() - user_ts if is_active else 0.0
-    if is_active and elapsed > stale_timeout:
-        cp5 = Checkpoint(name="processing", label="处理中", status="error",
-                         timestamp=user_ts,
-                         content=f"超时未响应 ({elapsed:.0f}s)")
-    elif is_active and core_status.get("status") == "running":
+    if is_active and core_status.get("status") == "running":
         step = core_status.get("step", "working...")
+        elapsed = time.time() - user_ts
         cp5 = Checkpoint(name="processing", label="处理中", status="active",
                          timestamp=user_ts,
                          content=f"{step} ({elapsed:.0f}s)",
                          meta={"step": step, "elapsed": elapsed})
     elif is_active:
+        elapsed = time.time() - user_ts
         cp5 = Checkpoint(name="processing", label="处理中", status="active",
                          timestamp=user_ts,
                          content=f"执行中... ({elapsed:.0f}s)")
@@ -975,10 +942,9 @@ function renderHealth(data) {
   bar.innerHTML = items.join('') || '<div class="health-item" style="color:#333">No services detected</div>';
 }
 
-// SSE with auto-reconnect
+// SSE
 let es;
 function connectSSE() {
-  if (es) { try { es.close(); } catch(e) {} }
   es = new EventSource('/sse');
   const connEl = document.getElementById('conn-status');
   es.onopen = function() { connEl.className = 'connected-indicator'; connEl.title = 'SSE connected'; };
@@ -988,17 +954,15 @@ function connectSSE() {
   es.addEventListener('health', function(e) {
     try { renderHealth(JSON.parse(e.data)); } catch(err) { console.error('health parse error', err); }
   });
-  es.onerror = function() {
-    connEl.className = 'disconnected-indicator'; connEl.title = 'SSE disconnected';
-    try { es.close(); } catch(e) {}
-    setTimeout(connectSSE, 3000);
-  };
+  es.onerror = function() { connEl.className = 'disconnected-indicator'; connEl.title = 'SSE disconnected'; };
 }
 
-// Polling fallback: fetch traces every 5s in case SSE drops silently
+// Refresh relative times every 10s
 setInterval(function() {
-  fetch('/api/traces').then(r => r.json()).then(renderAll).catch(() => {});
-}, 5000);
+  document.querySelectorAll('.trace-time').forEach(function(el) {
+    // re-render handled by next SSE push
+  });
+}, 10000);
 
 fetch('/api/traces').then(r => r.json()).then(renderAll).catch(() => {});
 fetch('/api/health').then(r => r.json()).then(renderHealth).catch(() => {});
