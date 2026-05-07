@@ -85,6 +85,25 @@
     statusEl.className = `status ${cls}`;
   }
 
+  function getCookie(name) {
+    const prefix = `${encodeURIComponent(name)}=`;
+    const cookie = document.cookie
+      .split('; ')
+      .find((part) => part.startsWith(prefix));
+    return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : '';
+  }
+
+  function setCookie(name, value) {
+    const maxAge = 60 * 60 * 24 * 90;
+    const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; SameSite=Lax${secure}`;
+  }
+
+  function saveCredentials(username, secret) {
+    setCookie('screenPublisherUser', username);
+    setCookie('screenPublisherSecret', secret);
+  }
+
   async function connect() {
     try {
       const username = (usernameEl?.value || '').trim();
@@ -106,6 +125,7 @@
       if (!resp.ok) throw new Error(`Token server error: ${resp.status}`);
       const { jwt, url } = await resp.json();
       if (!url) throw new Error('LIVEKIT_URL not set on token server');
+      saveCredentials(username, secret);
 
       setStatus('Connecting to LiveKit...', '');
       room = new Room({ adaptiveStream: false, dynacast: false });
@@ -198,8 +218,18 @@
   shareBtn.onclick = startSharing;
   stopBtn.onclick = stopSharing;
   connectBtn.onclick = connect;
+  [usernameEl, secretEl].forEach((input) => {
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        connect();
+      }
+    });
+  });
 
   const qs = new URLSearchParams(window.location.search);
+  usernameEl.value = getCookie('screenPublisherUser');
+  secretEl.value = getCookie('screenPublisherSecret');
   if (qs.get('user')) usernameEl.value = qs.get('user');
   if (qs.get('secret')) secretEl.value = qs.get('secret');
   if (usernameEl.value.trim() && secretEl.value) connect();
