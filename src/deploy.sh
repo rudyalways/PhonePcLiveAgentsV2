@@ -82,6 +82,7 @@ do_stop() {
   pkill -f "livekit-agent.py" 2>/dev/null || true
   pkill -f "mobile-control-server" 2>/dev/null || true
   pkill -f "pipeline-trace.py" 2>/dev/null || true
+  pkill -f "screen-capture-server.py" 2>/dev/null || true
   echo "All LiveKit services stopped."
 }
 
@@ -97,6 +98,7 @@ if [ "$1" = "--logs" ]; then
     "$REPO/logs/livekit-token-server.log"
     "$REPO/logs/screen-publisher-server.log"
     "$REPO/logs/mobile-control.log"
+    "$REPO/logs/screen-capture.log"
     "$REPO/logs/pipeline-trace.log"
   )
   # Create files if they don't exist yet so tail doesn't error
@@ -235,16 +237,16 @@ else
   echo "  ✓ screen publisher server (already running)"
 fi
 
-if ! lsof -i :7847 -sTCP:LISTEN > /dev/null 2>&1; then
+if ! lsof -i :7901 -sTCP:LISTEN > /dev/null 2>&1; then
   "$PYTHON" src/mobile-control-server.py > logs/mobile-control.log 2>&1 &
-  echo "  ✓ mobile control server (port 7847)"
+  echo "  ✓ mobile control server (port 7901)"
 else
   echo "  ✓ mobile control server (already running)"
 fi
 
-if ! lsof -i :7848 -sTCP:LISTEN > /dev/null 2>&1; then
+if ! lsof -i :7902 -sTCP:LISTEN > /dev/null 2>&1; then
   python3 skills/pipeline-trace/scripts/pipeline-trace.py > logs/pipeline-trace.log 2>&1 &
-  echo "  ✓ pipeline trace (port 7848)"
+  echo "  ✓ pipeline trace (port 7902)"
 else
   echo "  ✓ pipeline trace (already running)"
 fi
@@ -256,9 +258,13 @@ start_port_service "$CLIENT_PORT" "screen publisher server" "screen-publisher-se
   "Stop the conflicting process, or rerun with CLIENT_PORT=<free-port> bash src/deploy.sh." \
   "$PYTHON" src/screen-publisher-server.py
 
-start_port_service 7847 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" \
+start_port_service 7901 "mobile control server" "mobile-control-server.py" "logs/mobile-control.log" \
   "Stop the conflicting process, then rerun deploy." \
   "$PYTHON" src/mobile-control-server.py
+
+start_port_service 7900 "screen capture server" "screen-capture-server.py" "logs/screen-capture.log" \
+  "Stop the conflicting process, then rerun deploy." \
+  "$PYTHON" src/screen-capture-server.py
 
 sleep 1
 
@@ -274,11 +280,13 @@ fi
 sleep 3
 echo ""
 echo "Verifying services..."
-VERIFY_PORTS="7850:token-server 8081:screen-publisher 7847:mobile-control 7848:pipeline-trace"
+VERIFY_PORTS="7850:token-server 8081:screen-publisher 7901:mobile-control 7900:screen-capture 7902:pipeline-trace"
 all_ok=1
 verify_port_service 7850 "token-server" "livekit-token-server.py" "logs/livekit-token-server.log"
 verify_port_service "$CLIENT_PORT" "screen-publisher" "screen-publisher-server.py" "logs/screen-publisher-server.log"
-verify_port_service 7847 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
+verify_port_service 7901 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
+verify_port_service 7900 "screen-capture" "screen-capture-server.py" "logs/screen-capture.log"
+verify_port_service 7902 "pipeline-trace" "pipeline-trace.py" "logs/pipeline-trace.log"
 
 # Check agent process (doesn't bind a port)
 if pgrep -f "livekit-agent.py" > /dev/null 2>&1; then

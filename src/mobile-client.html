@@ -140,21 +140,32 @@
       mainUi.style.display = 'flex';
       setStatus('Connecting...', '');
 
-      room = new Room({ adaptiveStream: true, dynacast: true });
+      /* Match screen-publisher Room flags — adaptiveStream/dynacast can race during ICE/subscribe
+         churn and trigger SDK "participant that's not present" when attaching remote screen tracks. */
+      room = new Room({ adaptiveStream: false, dynacast: false });
 
       room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
         console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
-        if (track.kind === Track.Kind.Video) {
-          track.attach(screenView);
-          screenView.style.display = 'block';
-        }
-        if (track.kind === Track.Kind.Audio) {
-          const el = track.attach();
-          el.setAttribute('autoplay', '');
-          el.setAttribute('playsinline', '');
-          el.volume = 1.0;
-          document.body.appendChild(el);
-          el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
+        try {
+          const live = participant.sid ? room.remoteParticipants.get(participant.sid) : null;
+          if (!live) {
+            console.warn('[LiveKit] Skipping track attach — participant no longer in room', participant.sid);
+            return;
+          }
+          if (track.kind === Track.Kind.Video) {
+            track.attach(screenView);
+            screenView.style.display = 'block';
+          }
+          if (track.kind === Track.Kind.Audio) {
+            const el = track.attach();
+            el.setAttribute('autoplay', '');
+            el.setAttribute('playsinline', '');
+            el.volume = 1.0;
+            document.body.appendChild(el);
+            el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
+          }
+        } catch (e) {
+          console.warn('[LiveKit] TrackSubscribed attach failed:', e?.message || e);
         }
       });
 
@@ -176,7 +187,14 @@
       });
 
       room.on(RoomEvent.ParticipantConnected, () => updateParticipants());
-      room.on(RoomEvent.ParticipantDisconnected, () => updateParticipants());
+
+      room.on(RoomEvent.ParticipantDisconnected, (p) => {
+        updateParticipants();
+        if (p.identity === 'screen-publisher') {
+          screenView.srcObject = null;
+          screenView.style.display = 'none';
+        }
+      });
 
       await room.connect(url, jwt);
 

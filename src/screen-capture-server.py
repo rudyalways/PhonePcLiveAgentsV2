@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Screen capture HTTP server — runs in a terminal (has Screen Recording permission).
-The voice agent calls http://localhost:7845/capture to get instant screenshots.
+The voice agent calls http://localhost:7900/capture to get instant screenshots.
 
 Usage: python3 src/screen-capture-server.py
 (Run in a terminal window — NOT as a launchd daemon)
@@ -16,7 +16,7 @@ import urllib.request
 import os as _os
 from datetime import datetime
 
-PORT = 7845
+PORT = int(os.environ.get("SCREEN_CAPTURE_PORT", "7900"))
 DIR = "/tmp/sutando-screenshots"
 # Web-client endpoint for agent-state reporting. When a /capture happens we
 # flash state=seeing on the menu-bar avatar for ~1.5s — makes screen-capture

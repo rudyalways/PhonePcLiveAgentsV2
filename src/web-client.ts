@@ -11,6 +11,7 @@
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { readTmuxStatus } from './tmux-status.js';
+import { AGENT_API_PORT, DASHBOARD_PORT } from './agent-dashboard-ports.js';
 
 const HTTP_PORT = Number(process.env.CLIENT_PORT) || 8080;
 const HTTP_HOST = process.env.CLIENT_HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces for EC2
@@ -490,7 +491,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 <div class="header">
   <div class="avatar-wrap s-idle" id="avatar-wrap">
     <canvas id="speak-canvas" width="60" height="60"></canvas>
-    <img class="avatar" id="stand-avatar" src="http://localhost:7844/avatar">
+    <img class="avatar" id="stand-avatar" src="http://localhost:${DASHBOARD_PORT}/avatar">
     <div id="avatar-svg-wrap">
       <svg class="avatar-svg-default" viewBox="-50 -50 100 100" xmlns="http://www.w3.org/2000/svg">
         <defs>
@@ -529,7 +530,7 @@ const HTML = /* html */ `<!DOCTYPE html>
     <h1 id="stand-name">Sutando</h1>
     <div class="meta">
       <span class="status-pill voice-off" id="voice-status"><span class="dot" id="dot"></span> <span id="status">Text only</span></span>
-      <a href="http://localhost:7844" target="_blank">Dashboard</a>
+      <a href="http://localhost:${DASHBOARD_PORT}" target="_blank">Dashboard</a>
       <span class="stats" id="stats"></span>
     </div>
   </div>
@@ -540,7 +541,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 </div>
 <input type="text" id="wsUrl" value="${DEFAULT_WS_URL}" />
 <script>
-fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
+fetch('http://localhost:${DASHBOARD_PORT}/stand-identity').then(r=>r.json()).then(s=>{
   if(s.name){
     document.getElementById('stand-name').textContent='Sutando — '+s.name;
     document.getElementById('hero-name').textContent='Sutando — '+s.name;
@@ -578,7 +579,7 @@ fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
 </script>
 
 <div class="hero s-idle" id="hero">
-  <img class="avatar-hero" id="hero-avatar" src="http://localhost:7844/avatar">
+  <img class="avatar-hero" id="hero-avatar" src="http://localhost:${DASHBOARD_PORT}/avatar">
   <div class="hero-svg-wrap" id="hero-svg-wrap">
     <svg class="avatar-svg-default" viewBox="-50 -50 100 100" xmlns="http://www.w3.org/2000/svg">
       <!-- Hero reuses header's #visorSweep gradient (single definition). -->
@@ -1025,7 +1026,7 @@ function startTaskPolling() {
   taskPollTimer = setInterval(async () => {
     try {
       const hostname = window.location.hostname;
-      const resp = await fetch('http://' + hostname + ':7843/tasks/active');
+      const resp = await fetch('http://' + hostname + ':' + '${AGENT_API_PORT}' + '/tasks/active');
       const data = await resp.json();
       // Replace taskMap with API data (preserve expanded state and WebSocket-delivered results)
       const apiTasks = new Set();
@@ -1730,7 +1731,7 @@ window.toggle = toggle;
 
 // ─── Suggestion chips ─────────────────────────────────────
 function copyLogs() {
-  var apiBase = 'http://' + location.hostname + ':7843';
+  var apiBase = 'http://' + location.hostname + ':' + '${AGENT_API_PORT}';
   fetch(apiBase + '/logs/voice').then(function(r) { return r.json(); }).then(function(d) {
     var text = (d.lines || []).join(String.fromCharCode(10));
     navigator.clipboard.writeText(text).then(function() {
@@ -1741,7 +1742,7 @@ function copyLogs() {
 
 function answerQuestion(qid, answer) {
   if (!answer || !answer.trim()) return;
-  const apiBase = 'http://' + location.hostname + ':7843';
+  const apiBase = 'http://' + location.hostname + ':' + '${AGENT_API_PORT}';
   fetch(apiBase + '/answer', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1830,7 +1831,7 @@ function sendText() {
     dbg('Sent text via voice: "' + text.slice(0, 50) + '"', 'event');
   } else {
     // Voice disconnected — route through task bridge (same as Telegram/Discord)
-    const apiBase = 'http://' + location.hostname + ':7843';
+    const apiBase = 'http://' + location.hostname + ':' + '${AGENT_API_PORT}';
     fetch(apiBase + '/task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'web', task: text }) })
       .then(r => r.json())
       .then(d => {
@@ -1867,7 +1868,7 @@ function sendText() {
 window._drQuestions = [];
 window._drProactive = null;
 window._drContent = null;
-const API_BASE = 'http://' + window.location.hostname + ':7843';
+const API_BASE = 'http://' + window.location.hostname + ':' + '${AGENT_API_PORT}';
 function getSuggestionChips() {
   var h = new Date().getHours();
   var usage = getChipUsage();
@@ -2062,7 +2063,7 @@ function renderTabContent() {
     window._drLocalContent = false;
 
   } else if (tab === 'notes') {
-    var DASH = 'http://' + window.location.hostname + ':7844';
+    var DASH = 'http://' + window.location.hostname + ':' + '${DASHBOARD_PORT}';
     fetch(DASH + '/notes').then(function(r){return r.json()}).then(function(notes) {
       var searchHtml = '<div style="margin-bottom:8px"><input id="note-search" type="text" placeholder="Search notes..." style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid #1e1e30;background:#0e0e18;color:#ccc;font-size:12px;outline:none" oninput="filterNotes(this.value)"></div>';
       var html = '';
@@ -2120,7 +2121,7 @@ function renderTabContent() {
 }
 
 function showNoteContent(slug) {
-  var DASH = 'http://' + window.location.hostname + ':7844';
+  var DASH = 'http://' + window.location.hostname + ':' + '${DASHBOARD_PORT}';
   var container = document.getElementById('dr-content');
   if (!container) return;
   fetch(DASH + '/notes/' + slug).then(function(r){return r.text()}).then(function(text) {
@@ -2171,7 +2172,7 @@ function showNoteContent(slug) {
 window.showNoteContent = showNoteContent;
 
 function deleteNoteFromUI(slug) {
-  var DASH = 'http://' + window.location.hostname + ':7844';
+  var DASH = 'http://' + window.location.hostname + ':' + '${DASHBOARD_PORT}';
   fetch(DASH + '/notes/' + slug, {method: 'DELETE'}).then(function() {
     renderTabContent(); // refresh notes list
   });
@@ -2271,7 +2272,7 @@ document.addEventListener('keydown', function(e) {
     Promise.all([
       fetch(API_BASE + '/dynamic-content').then(r => r.json()).catch(() => ({})),
       fetch(API_BASE + '/core-status').then(r => r.json()).catch(() => ({status:'idle'})),
-      fetch('http://' + window.location.hostname + ':7844/notes').then(r => r.json()).catch(() => []),
+      fetch('http://' + window.location.hostname + ':' + '${DASHBOARD_PORT}' + '/notes').then(r => r.json()).catch(() => []),
       fetch(API_BASE + '/contextual-chips').then(r => r.json()).catch(() => ({chips:[]}))
     ]).then(([dc, loopData, notes, ctx]) => {
       window._contextualChips = (ctx && ctx.chips) || [];

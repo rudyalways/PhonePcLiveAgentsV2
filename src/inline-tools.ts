@@ -16,6 +16,7 @@ const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 // Re-export recording/screen/browser tools from browser-tools
 export { describeScreenTool, clickTool, scrollAndDescribeTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool } from './browser-tools.js';
 import { describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool } from './browser-tools.js';
+import { SCREEN_CAPTURE_ORIGIN } from './screen-capture-origin.js';
 
 // Re-export meeting tools from meeting-tools
 export { summonTool, dismissTool, joinZoomTool, joinGmeetTool, lookupMeetingIdTool, callContactTool } from './meeting-tools.js';
@@ -152,7 +153,7 @@ export const captureScreenTool: ToolDefinition = {
 			const { display } = args as { display?: number };
 			// If no display specified, capture all displays
 			const query = display ? `?display=${display}` : '?all=true';
-			const res = await fetch(`http://localhost:7845/capture${query}`);
+			const res = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture${query}`);
 			const data = await res.json() as { status: string; path?: string; all_paths?: string[]; displays?: number; error?: string };
 			if (data.status === 'ok' && data.path) {
 				const label = data.displays && data.displays > 1

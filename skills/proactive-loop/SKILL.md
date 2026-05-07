@@ -25,6 +25,17 @@ bash src/watch-tasks.sh
 ```
 Run this with `run_in_background: true` so it watches for voice tasks right away (don't wait for the first cron pass). When the watcher fires, read its output — it lists ALL pending task files.
 
+## Observability（Pipeline Trace ①–⑥）
+
+When handling a task emitted from voice/LiveKit, help the owner debug stuck runs:
+
+- **Before executing** the body of `tasks/task-*.txt`, run:<br/>
+  `python3 src/pipeline_emit.py core_task_begin <TASK_ID> --detail "picked up by sutando-core" --component sutando-core`
+- **Right after writing** `results/<TASK_ID>.txt`, run:<br/>
+  `python3 src/pipeline_emit.py core_task_done <TASK_ID> --detail "written results/*.txt" --component sutando-core`
+
+These writes append to `logs/pipeline-task-events.jsonl`, which Pipeline Trace merges into steps ②–⑤.
+
 ## Start the loop
 
 Use `/loop <interval>` with this prompt:

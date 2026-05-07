@@ -6,16 +6,16 @@ Real-time visualization of user operation pipeline checkpoints.
 
 ```bash
 python3 skills/pipeline-trace/scripts/pipeline-trace.py
-# Open http://localhost:7848
+# Open http://localhost:7902
 ```
 
 ## What it shows
 
-- Every user operation (voice, Discord, Telegram, API) as a trace with 8 checkpoints
+- Every user operation (voice, Discord, Telegram, API) as a trace with checkpoints (执行方式 + ①–⑥ core 链路 when applicable + 回复)
 - Real-time status updates via SSE
 - Service health overview
 - Historical traces with timing
 
 ## Port
 
-7848 (override with `PIPELINE_TRACE_PORT` env var)
+7902 (override with `PIPELINE_TRACE_PORT` env var)

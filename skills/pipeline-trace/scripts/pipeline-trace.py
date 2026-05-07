@@ -6,12 +6,13 @@ Data sources:
 1. Conversation logs (logs/conversation-{user}.log) — user input + assistant response
 2. Agent log (logs/livekit-agent.log) — task creation, execution path, timing
 3. Task/result archives (tasks/*/archive/, results/*/archive/) — metadata + full results
-4. core-status.json — real-time processing step
-5. state/*.heartbeat — service liveness
+4. logs/pipeline-task-events.jsonl — watcher / LiveKit / voice-bridge / (optional) core emits
+5. core-status.json — real-time processing step (proactive loop / sutando-core)
+6. state/*.heartbeat — service liveness
 
 Usage:
   python3 skills/pipeline-trace/scripts/pipeline-trace.py
-  Open http://localhost:7848
+  Open http://localhost:7902
 """
 
 import http.server
@@ -29,7 +30,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 REPO_DIR = Path(__file__).resolve().parent.parent.parent.parent
-PORT = int(os.environ.get("PIPELINE_TRACE_PORT", "7848"))
+PORT = int(os.environ.get("PIPELINE_TRACE_PORT", "7902"))
 POLL_INTERVAL = 2.0
 MAX_TRACES = 100
 HEARTBEAT_INTERVAL = 15
@@ -347,6 +348,66 @@ _HEARTBEAT_PROCESS_MAP = {
     "token-server": "livekit-token-server",
 }
 
+_PIPELINE_LOG = REPO_DIR / "logs" / "pipeline-task-events.jsonl"
+
+
+def _pgrep(pattern: str) -> bool:
+    try:
+        return subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            timeout=3,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def load_pipeline_events_by_task() -> dict[str, list[dict]]:
+    """Parse recent JSONL pipeline emits, grouped by task_id."""
+    by_task: dict[str, list[dict]] = {}
+    if not _PIPELINE_LOG.exists():
+        return by_task
+    try:
+        lines = _PIPELINE_LOG.read_text(errors="replace").splitlines()[-12000:]
+    except Exception:
+        return by_task
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        tid = row.get("task_id") or ""
+        if not tid:
+            continue
+        by_task.setdefault(tid, []).append(row)
+    for evs in by_task.values():
+        evs.sort(key=lambda r: r.get("ts", 0))
+    return by_task
+
+
+def _latest_event(evs: list[dict], phase: str) -> dict | None:
+    for ev in reversed(evs):
+        if ev.get("phase") == phase:
+            return ev
+    return None
+
+
+def _any_event_failed(evs: list[dict], phases: set[str]) -> dict | None:
+    for ev in reversed(evs):
+        if ev.get("phase") in phases and ev.get("ok") is False:
+            return ev
+    return None
+
+
+def _task_result_files_exist(task_id: str) -> tuple[bool, bool]:
+    """(tasks/task_id.txt still present, results/task_id.txt present)."""
+    tpath = REPO_DIR / "tasks" / f"{task_id}.txt"
+    rpath = REPO_DIR / "results" / f"{task_id}.txt"
+    return tpath.exists(), rpath.exists()
+
 
 def read_heartbeats() -> list[dict]:
     state_dir = REPO_DIR / "state"
@@ -386,6 +447,7 @@ def build_traces() -> list[Trace]:
     task_archive = load_task_archive()
     result_archive = load_result_archive()
     core_status = read_core_status()
+    pipeline_by_task = load_pipeline_events_by_task()
 
     # Index agent events by task_id
     agent_by_task: dict[str, list[AgentEvent]] = {}
@@ -464,6 +526,7 @@ def build_traces() -> list[Trace]:
             duration=duration,
             source=source,
             tier=tier,
+            pipeline_events=pipeline_by_task.get(matched_task_id, []),
         )
 
         trace = Trace(
@@ -485,12 +548,313 @@ def build_traces() -> list[Trace]:
     return all_traces
 
 
+def _build_executor_bridge(
+    *,
+    matched_task_id: str,
+    exec_path: str,
+    user_ts: float,
+    assistant_ts: float,
+    core_status: dict,
+    pipeline_events: list[dict],
+) -> list[Checkpoint]:
+    """Six-step core ↔ watcher ↔ voice visibility (success + failure semantics)."""
+    if not matched_task_id:
+        return []
+
+    evs = list(pipeline_events or [])
+    now = time.time()
+    wq_ev = _latest_event(evs, "watcher_to_core_queue")
+    wp_ev = _latest_event(evs, "watcher_pickup")
+    watcher_ok_ev = (wq_ev and wq_ev.get("ok", True)) or (
+        wp_ev and wp_ev.get("ok", True)
+    )
+    watcher_glob_fail = _latest_event(evs, "watcher_fswatch_missing")
+    task_waiting = assistant_ts <= 0
+    task_txt, result_txt = _task_result_files_exist(matched_task_id)
+
+    watchers_proc = _pgrep("watch-tasks") or _pgrep("fswatch ")
+    sutando_core_proc = _pgrep("claude.*sutando-core") or _pgrep("claude.*--name.*sutando-core")
+
+    # --- 1. File watcher → core queue ---
+    b1_ts = (_latest_event(evs, "watcher_to_core_queue") or _latest_event(evs, "watcher_pickup") or {}).get(
+        "ts", 0
+    ) or (_latest_event(evs, "task_enqueued") or {}).get("ts", 0)
+    if watcher_glob_fail and not watcher_glob_fail.get("ok", True):
+        b1_status, b1_content = (
+            "error",
+            "失败：fswatch 缺失或不可用 — " + (watcher_glob_fail.get("detail") or "安装 fswatch 并重启 watch-tasks"),
+        )
+    elif watcher_ok_ev:
+        d = ((wq_ev or {}).get("detail")) or (
+            (wp_ev or {}).get("detail") or "已枚举 tasks/*.txt → sutando-core 可读输出"
+        )
+        b1_status, b1_content = "completed", d
+    elif task_waiting and (now - user_ts) > 20 and not watchers_proc:
+        b1_status, b1_content = (
+            "error",
+            "失败：watch-tasks/fswatch 进程未检测到 — Claude 可能不会收到 TASK_DETECTED（建议 pgrep watch-tasks）",
+        )
+    elif task_waiting:
+        b1_status, b1_content = "active", "等待 fswatch 触发并将任务写给 sutando-core 阅读…"
+    else:
+        # Finished trace without explicit watcher emit (historical): infer OK if core path worked
+        b1_status, b1_content = "completed", "（推断）链路曾完成或未记录 watcher 打点"
+
+    b1_meta = {"failure_hint": "watcher_dead_or_fswatch"} if b1_status == "error" else {}
+
+    # --- 2. sutando-core session alive ---
+    claim_ev = _latest_event(evs, "core_task_claim") or _latest_event(evs, "core_task_begin")
+    if claim_ev is not None and claim_ev.get("ok", True):
+        b2_ts, b2_status, b2_content = claim_ev.get("ts", 0), "completed", claim_ev.get("detail") or "sutando-core 报告开始处理此 task"
+        b2_meta = {}
+    elif claim_ev is not None and claim_ev.get("ok") is False:
+        b2_ts = float(claim_ev.get("ts", 0)) or user_ts
+        b2_status, b2_content = (
+            "error",
+            "失败：" + (claim_ev.get("detail") or "core 拒绝或未能认领 task"),
+        )
+        b2_meta = {"failure_hint": "core_claim_rejected"}
+    elif sutando_core_proc:
+        b2_ts = float(core_status.get("ts", 0)) or user_ts
+        if task_waiting and not claim_ev:
+            b2_status, b2_content = "active", "检测到 claude sutando-core 进程；等待 claim 打点（建议在处理 task 前后运行 pipeline_emit）"
+        else:
+            b2_status, b2_content = "completed", "检测到 claude sutando-core / tmux 会话进程"
+        b2_meta = {"peek_core_status_json": True, "peek_tmux_attach": True}
+    elif task_waiting:
+        b2_ts = user_ts
+        b2_status, b2_content = (
+            "error",
+            "失败：未检测到 sutando-core（claude --name sutando-core）— proactive loop 可能不会消费任务",
+        )
+        b2_meta = {"failure_hint": "sutando_core_down"}
+    else:
+        b2_ts = user_ts
+        b2_status, b2_content = "skipped", "任务已关闭（无待定 core）"
+        b2_meta = {}
+    # --- 3. Core processing (+ proactive loop heartbeat) ---
+    cs_stat = core_status.get("status", "idle")
+    step = core_status.get("step", "")
+    sla_miss = _any_event_failed(evs, {"core_sla_miss"})
+    if sla_miss:
+        b3_ts = sla_miss.get("ts", 0) or user_ts
+        b3_status = "error"
+        b3_content = "失败/降级：" + (
+            sla_miss.get("detail")
+            or "LiveKit：10s 内无 results → 已从 tasks/ 摘除并改走 claude -p"
+        )
+        b3_meta = {"failure_hint": "livekit_core_timeout", "proactive_vs_livekit_note": True}
+    elif exec_path == "self-execute" and not sla_miss:
+        # Self-exec via other path — still informative
+        b3_ts = user_ts
+        b3_status, b3_content = "skipped", "自执行模式下由 claude -p 短进程处理（非会话内 proactive loop）"
+        b3_meta = {}
+    elif task_waiting and cs_stat == "running":
+        elapsed = max(0.0, now - user_ts)
+        b3_ts = float(core_status.get("ts", 0)) or now
+        b3_status = "active"
+        b3_content = f"进行中：core-status.step = {step or 'working…'} （已等待 {elapsed:.0f}s；含 proactive-loop 报告的 step）"
+        b3_meta = {"elapsed_s": round(elapsed, 1)}
+    elif pulse := _latest_event(evs, "livekit_poll_core_pulse"):
+        b3_ts = pulse.get("ts", 0)
+        b3_status, b3_content = "completed", f"LiveKit 轮询心跳：{pulse.get('detail', '')}"
+        b3_meta = {}
+    elif apulse := _latest_event(evs, "livekit_async_poll_pulse"):
+        b3_ts = apulse.get("ts", 0)
+        b3_status, b3_content = "active", apulse.get("detail", "") or "LiveKit async 长线轮询 heartbeat"
+        b3_meta = {}
+    elif assistant_ts > 0 and not sla_miss:
+        b3_ts = assistant_ts - 1
+        b3_status, b3_content = "completed", "已进入回复阶段 — core 侧面视为成功"
+        b3_meta = {}
+    elif cs_stat != "running" and task_waiting and sutando_core_proc:
+        staleness = now - float(core_status.get("ts", 0) or 0)
+        if staleness > 120:
+            b3_ts = now
+            b3_status = "error"
+            b3_content = (
+                f"失败：core-status 过久未更新 ({staleness:.0f}s stale) — session 卡住或没在写 core-status.json"
+            )
+            b3_meta = {"failure_hint": "core_status_stale"}
+        else:
+            b3_ts = now
+            b3_status, b3_content = (
+                "active",
+                "core-status=idle — 可能在两次 proactive pass 间隙；若过久请检查会话",
+            )
+            b3_meta = {}
+    elif task_waiting:
+        b3_ts = now
+        b3_status, b3_content = "pending", "等待执行状态…"
+        b3_meta = {}
+    else:
+        b3_ts = assistant_ts or user_ts
+        b3_status, b3_content = "completed", "—"
+        b3_meta = {}
+
+    # --- 4. Core execute success (semantic) ---
+    done_ev = _latest_event(evs, "core_task_done") or _latest_event(evs, "self_execute_finished")
+    timeout_ev = _any_event_failed(
+        evs,
+        {"livekit_async_wait_timeout", "task_bridge_timeout"},
+    )
+    if timeout_ev:
+        b4_status, b4_content = "error", "失败：" + (
+            timeout_ev.get("detail") or "桥接层等待结果超时"
+        )
+        b4_ts = timeout_ev.get("ts", 0)
+        b4_meta = {"failure_hint": "bridge_timeout"}
+    elif exec_path == "self-execute":
+        se = _latest_event(evs, "self_execute_finished")
+        if se and se.get("ok") is False:
+            b4_status, b4_content = "error", se.get("detail") or "claude -p 失败"
+            b4_ts = se.get("ts", 0)
+            b4_meta = {"failure_hint": "self_exec_error"}
+        else:
+            b4_status = "completed"
+            b4_content = (
+                (se.get("detail")[:180] if se else "")
+                or "claude -p 自执行路径完成（非 sutando-core 会话内）"
+            )
+            b4_ts = (se or {}).get("ts", 0) or user_ts
+            b4_meta = {}
+    elif done_ev:
+        b4_ts, b4_status, b4_content = done_ev.get("ts", 0), "completed", done_ev.get("detail") or "core 报告 task 完成"
+        b4_meta = {}
+    elif assistant_ts > 0 and not sla_miss:
+        b4_ts = assistant_ts - 0.5
+        b4_status, b4_content = "completed", "已产生语音/文本回复 — 推断执行成功"
+        b4_meta = {}
+    elif task_waiting:
+        b4_ts = user_ts
+        b4_status, b4_content = "active", "仍在执行或等待结果…"
+        b4_meta = {}
+    else:
+        b4_ts = user_ts
+        b4_status, b4_content = "pending", "—"
+        b4_meta = {}
+
+    # --- 5. Result file on disk ---
+    ro = _latest_event(evs, "result_file_observed")
+    if ro and ro.get("ok"):
+        b5_ts, b5_status, b5_content = ro.get("ts", 0), "completed", ro.get("detail") or "results/*.txt 已读"
+        b5_meta = {}
+    elif assistant_ts > 0:
+        b5_ts = assistant_ts - 0.4
+        b5_status, b5_content = "completed", "结果已消费（可能已归档至 results/archive）"
+        b5_meta = {}
+    elif result_txt:
+        b5_ts = now
+        b5_status, b5_content = "active", "results/*.txt 存在，等待 LiveKit/桥接读取"
+        b5_meta = {}
+    elif task_waiting and task_txt and not sla_miss:
+        b5_ts = user_ts
+        b5_status, b5_content = "pending", "尚无 results/task.txt — sutando-core 尚未写回?"
+        b5_meta = {}
+    elif sla_miss:
+        b5_ts = sla_miss.get("ts", user_ts)
+        b5_status, b5_content = "skipped", "未走 sutando-core 结果文件路径（LiveKit SLA 超时）"
+        b5_meta = {}
+    else:
+        b5_ts = user_ts
+        b5_status, b5_content = "completed", "—"
+        b5_meta = {}
+
+    # --- 6. Voice / agent consumes result ---
+    ad = (
+        _latest_event(evs, "agent_consumed_sync_result")
+        or _latest_event(evs, "agent_result_delivery")
+        or _latest_event(evs, "agent_generate_reply_from_result")
+    )
+    if timeout_ev:
+        b6_ts = timeout_ev.get("ts", now)
+        b6_status, b6_content = "error", "失败：未及时向用户播报 — " + (
+            timeout_ev.get("detail") or "查看 task_bridge_timeout / async timeout"
+        )
+        b6_meta = {"failure_hint": "voice_delivery"}
+    elif ad:
+        b6_ts, b6_status, b6_content = ad.get("ts", 0), "completed", ad.get("detail") or "Agent 已从 results 拉回并交给模型/TTS"
+        b6_meta = {}
+    elif assistant_ts > 0:
+        b6_ts = assistant_ts
+        b6_status, b6_content = (
+            "completed",
+            "对话日志已有 assistant — 推断已交付语音/文本客户端",
+        )
+        b6_meta = {}
+    elif task_waiting:
+        b6_ts = user_ts
+        b6_status, b6_content = "pending", "等待 Agent 读取 results 并向用户播报"
+        b6_meta = {}
+    else:
+        b6_ts = assistant_ts or user_ts
+        b6_status, b6_content = "completed", "—"
+        b6_meta = {}
+
+    # Promote timestamps: avoid 0 ordering glitches
+    def _sanitize_ts(t: float, fallback: float) -> float:
+        x = float(t or 0)
+        return x if x > 946684800 else fallback
+
+    u_ts = float(user_ts)
+    return [
+        Checkpoint(
+            name="bridge_watcher_handoff",
+            label="① 文件监听→核心",
+            status=b1_status,
+            timestamp=_sanitize_ts(float(b1_ts or 0), u_ts),
+            content=b1_content,
+            meta=b1_meta,
+        ),
+        Checkpoint(
+            name="bridge_core_alive",
+            label="② sutando-core",
+            status=b2_status,
+            timestamp=_sanitize_ts(float(b2_ts or 0), u_ts),
+            content=b2_content,
+            meta=b2_meta,
+        ),
+        Checkpoint(
+            name="bridge_core_process",
+            label="③ 核心处理 / proactive ",
+            status=b3_status,
+            timestamp=_sanitize_ts(float(b3_ts or 0), u_ts),
+            content=b3_content,
+            meta=b3_meta,
+        ),
+        Checkpoint(
+            name="bridge_execute_ok",
+            label="④ 核心执行产物",
+            status=b4_status,
+            timestamp=_sanitize_ts(float(b4_ts or 0), u_ts),
+            content=b4_content,
+            meta=b4_meta,
+        ),
+        Checkpoint(
+            name="bridge_result_disk",
+            label="⑤ 结果落盘",
+            status=b5_status,
+            timestamp=_sanitize_ts(float(b5_ts or 0), u_ts),
+            content=b5_content,
+            meta=b5_meta,
+        ),
+        Checkpoint(
+            name="bridge_voice_agent",
+            label="⑥ 播报/Agent",
+            status=b6_status,
+            timestamp=_sanitize_ts(float(b6_ts or 0), u_ts),
+            content=b6_content,
+            meta=b6_meta,
+        ),
+    ]
+
+
 def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
                        matched_task_id, exec_path, exec_ts, task_meta,
-                       full_result, core_status, duration, source, tier) -> list[Checkpoint]:
-    """Build 7 detailed checkpoints for a trace."""
+                       full_result, core_status, duration, source, tier,
+                       pipeline_events) -> list[Checkpoint]:
+    """Build detailed checkpoints including cross-service executor bridge."""
     cps = []
-
     # 1. Voice Input
     cp1 = Checkpoint(name="voice_input", label="语音输入", status="completed",
                      timestamp=user_ts, content=user_text)
@@ -556,9 +920,30 @@ def _build_checkpoints(*, user_ts, user_text, assistant_ts, assistant_text,
                          timestamp=user_ts, content="已执行")
     cps.append(cp4)
 
-    # 5. Processing
+    executor_bridge: list[Checkpoint] = []
+    if matched_task_id and exec_path != "direct":
+        executor_bridge = _build_executor_bridge(
+            matched_task_id=matched_task_id,
+            exec_path=exec_path,
+            user_ts=user_ts,
+            assistant_ts=assistant_ts,
+            core_status=core_status,
+            pipeline_events=pipeline_events or [],
+        )
+    if executor_bridge:
+        cps.extend(executor_bridge)
+
+    # 5. Processing (rollup — expanded by ①–⑥ when bridge present)
     is_active = assistant_ts == 0 and cp3.status != "skipped"
-    if is_active and core_status.get("status") == "running":
+    if executor_bridge:
+        cp5 = Checkpoint(
+            name="processing",
+            label="处理中(汇总)",
+            status="skipped",
+            timestamp=user_ts,
+            content="Executor 细节见 ①–⑥。proactive-loop 写入的 core-status.step 会出现在 ③。",
+        )
+    elif is_active and core_status.get("status") == "running":
         step = core_status.get("step", "working...")
         elapsed = time.time() - user_ts
         cp5 = Checkpoint(name="processing", label="处理中", status="active",
@@ -649,6 +1034,9 @@ def health_broadcast_loop():
                 "heartbeats": heartbeats,
                 "owner_activity": activity,
                 "core_status": core,
+                "watcher_live": _pgrep("watch-tasks"),
+                "sutando_core_live": _pgrep("claude.*sutando-core")
+                or _pgrep("claude.*--name.*sutando-core"),
             }
             broadcast("health", json.dumps(data, ensure_ascii=False))
         except Exception:
@@ -725,6 +1113,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-
 .tl-label.active{color:#4eccc3}
 .tl-time{font-size:10px;color:#555;margin-left:auto}
 .tl-content{margin-top:3px;font-size:11px;color:#888;word-break:break-all;white-space:pre-wrap;max-height:80px;overflow:hidden;text-overflow:ellipsis}
+.tl-meta{margin-top:4px;font-size:10px;color:#5a8a82;font-family:ui-monospace,monospace}
 .tl-content.result-content{max-height:120px;color:#999;background:#0d0d18;padding:8px 10px;border-radius:6px;margin-top:6px}
 
 /* Health bar */
@@ -753,7 +1142,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-
 </div>
 
 <div class="container">
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+  <div style="font-size:10px;color:#555;line-height:1.45;margin:0 0 12px">
+    Executor 链路①–⑥ 读取 <span style="color:#6a8">logs/pipeline-task-events.jsonl</span> + 实时进程探测。
+    窥视 sutando-core：<code style="background:#151520;padding:1px 5px;border-radius:4px;color:#8ab">core-status.json</code>（proactive-loop 写 step）；
+    <code style="background:#151520;padding:1px 5px;border-radius:4px;color:#8ab">tmux -S /tmp/sutando-tmux.sock attach -t sutando-core</code>
+  </div>
     <label style="font-size:11px;color:#555">用户:</label>
     <select id="user-filter" style="background:#111;color:#aaa;border:1px solid #333;border-radius:4px;padding:3px 6px;font-size:12px" onchange="applyFilter()">
       <option value="">全部</option>
@@ -822,6 +1215,9 @@ function renderTimeline(checkpoints) {
     if (c.content && c.status !== 'pending') {
       const isResult = c.name === 'result';
       html += '<div class="tl-content' + (isResult ? ' result-content' : '') + '">' + escapeHtml(c.content) + '</div>';
+    }
+    if (c.meta && typeof c.meta === 'object' && Object.keys(c.meta).length) {
+      html += '<div class="tl-meta">' + escapeHtml(JSON.stringify(c.meta)) + '</div>';
     }
     html += '</div>';
   }
@@ -935,6 +1331,10 @@ function renderHealth(data) {
     const label = cs.status === 'running' ? 'Core: ' + (cs.step || 'working') : 'Core: idle';
     items.push('<div class="health-item"><div class="health-dot ' + cls + '"></div>' + label + '</div>');
   }
+  if (data.watcher_live !== undefined) {
+    items.push('<div class="health-item"><div class="health-dot ' + (data.watcher_live ? 'ok' : 'bad') + '"></div>watch-tasks</div>');
+    items.push('<div class="health-item"><div class="health-dot ' + (data.sutando_core_live ? 'ok' : 'bad') + '"></div>sutando-core</div>');
+  }
   if (data.owner_activity && data.owner_activity.ts) {
     const ago = relativeTime(data.owner_activity.ts);
     items.push('<div class="health-item"><div class="health-dot ok"></div>Owner: ' + (data.owner_activity.channel || '?') + ' ' + ago + '</div>');
@@ -1041,7 +1441,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             heartbeats = read_heartbeats()
             activity = read_owner_activity()
             core = read_core_status()
-            data = {"heartbeats": heartbeats, "owner_activity": activity, "core_status": core}
+            data = {
+                "heartbeats": heartbeats,
+                "owner_activity": activity,
+                "core_status": core,
+                "watcher_live": _pgrep("watch-tasks"),
+                "sutando_core_live": _pgrep("claude.*sutando-core")
+                or _pgrep("claude.*--name.*sutando-core"),
+            }
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

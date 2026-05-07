@@ -517,7 +517,7 @@ def run_all_checks() -> list[dict]:
     checks.append(web_check)
 
     # Optional services (downgrade missing to warning, not failure)
-    for port, name in [(7843, "agent-api"), (7844, "dashboard"), (7845, "screen-capture")]:
+    for port, name in [(7950, "agent-api"), (7951, "dashboard"), (7900, "screen-capture")]:
         c = check_port(port, name)
         if c["status"] != "ok":
             c["status"] = "warn"

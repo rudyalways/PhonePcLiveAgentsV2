@@ -9,9 +9,11 @@
  */
 
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, appendFileSync, renameSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
+import { AGENT_API_PORT } from './agent-dashboard-ports.js';
 
 const REPO_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const TASK_DIR = join(REPO_DIR, 'tasks');
@@ -61,6 +63,23 @@ mkdirSync(TASK_DIR, { recursive: true });
 mkdirSync(RESULT_DIR, { recursive: true });
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
+
+function pipelineEmit(
+	phase: string,
+	taskId: string,
+	ok: boolean,
+	detail: string,
+	component: string,
+): void {
+	try {
+		const script = join(REPO_DIR, 'src', 'pipeline_emit.py');
+		const args = [script, phase, taskId || ''];
+		args.push(ok ? '--ok' : '--fail', '--detail', detail, '--component', component);
+		execFileSync('python3', args, { timeout: 4000, stdio: ['ignore', 'ignore', 'ignore'] });
+	} catch {
+		// best-effort observability
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Task status notifications — sent to the web client
@@ -153,6 +172,7 @@ export const workTool: ToolDefinition = {
 		// Record owner activity for status-aware-pivot in proactive loop
 		writeOwnerActivity('voice', task);
 		console.log(`${ts()} [TaskBridge] Task ${taskId}: ${task.slice(0, 100)}`);
+		pipelineEmit('task_enqueued', taskId, true, 'bodhi work() wrote tasks/*.txt', 'voice-agent-bridge');
 		_sendTaskStatus?.(taskId, 'working', task.slice(0, 60));
 		return {
 			status: 'pending',
@@ -187,7 +207,7 @@ export const cancelTask: ToolDefinition = {
 			console.log(`${ts()} [TaskBridge] Cancelled task ${taskId}`);
 			_sendTaskStatus?.(taskId, 'cancelled', 'Task cancelled by user');
 			// Notify agent-api
-			try { fetch('http://localhost:7843/task-done', { method: 'POST', headers: _apiHeaders(), body: JSON.stringify({ taskId, result: 'Cancelled by user' }) }).catch(() => {}); } catch {}
+			try { fetch(`http://localhost:${AGENT_API_PORT}/task-done`, { method: 'POST', headers: _apiHeaders(), body: JSON.stringify({ taskId, result: 'Cancelled by user' }) }).catch(() => {}); } catch {}
 			return { status: 'cancelled', taskId, message: 'Cancelled the most recent task.' };
 		} catch (err) {
 			return { status: 'error', message: `Failed to cancel: ${err instanceof Error ? err.message : err}` };
@@ -366,6 +386,13 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 			if (Date.now() - submittedAt > TASK_TIMEOUT_MS) {
 				_pendingTasks.delete(taskId);
 				console.error(`${ts()} [TaskBridge] Task ${taskId} timed out after ${TASK_TIMEOUT_MS / 1000}s`);
+				pipelineEmit(
+					'task_bridge_timeout',
+					taskId,
+					false,
+					`Pending > ${TASK_TIMEOUT_MS / 1000}s; core may be stuck`,
+					'voice-agent-bridge',
+				);
 				_sendTaskStatus?.(taskId, 'timeout', 'Task timed out — core agent may be unresponsive');
 				onResult(`[Task timed out after ${Math.floor(TASK_TIMEOUT_MS / 60000)} minutes. The processing engine may need to be restarted.]`);
 			}
@@ -387,6 +414,13 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 				if (result) {
 					const taskId = file.replace('.txt', '');
 					console.log(`${ts()} [TaskBridge] Result ${file}: ${result.slice(0, 100)}`);
+					pipelineEmit(
+						'agent_result_delivery',
+						taskId,
+						true,
+						'Gemini polling saw results/*.txt → onResult()',
+						'voice-agent-bridge',
+					);
 					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 					_deliveredResults.add(file);
 					_pendingTasks.delete(taskId);
@@ -394,7 +428,7 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					onResult(result);
 					// Notify agent-api directly, then delete file
 					try {
-						fetch('http://localhost:7843/task-done', {
+						fetch(`http://localhost:${AGENT_API_PORT}/task-done`, {
 							method: 'POST',
 							headers: _apiHeaders(),
 							body: JSON.stringify({ taskId, result }),

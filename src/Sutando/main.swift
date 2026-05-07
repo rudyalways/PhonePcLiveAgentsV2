@@ -753,8 +753,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let tasksDir = workspace + "/tasks"
 
         // Call screen-capture-server to capture the screen and get the file path back.
-        // Server runs at localhost:7845, default capture is the main display.
-        guard let url = URL(string: "http://localhost:7845/capture") else { return }
+        // Server runs at localhost:7900, default capture is the main display.
+        guard let url = URL(string: "http://localhost:7900/capture") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
         URLSession.shared.dataTask(with: req) { [self] data, _, error in
@@ -882,7 +882,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             repeat with w in windows
                 set tabList to tabs of w
                 repeat with i from 1 to count of tabList
-                    if URL of item i of tabList contains "localhost:7844" then
+                    if URL of item i of tabList contains "localhost:7951" then
                         set active tab index of w to i
                         set index of w to 1
                         set found to true
@@ -892,7 +892,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if found then exit repeat
             end repeat
             if not found then
-                open location "http://localhost:7844"
+                open location "http://localhost:7951"
             end if
         end tell
         """)

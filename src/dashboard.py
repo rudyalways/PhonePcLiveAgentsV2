@@ -5,8 +5,8 @@ Sutando dashboard — current system status for the local agent.
 Combines: capability matrix, service health, activity feed, quick links, and system stats.
 
 Usage:
-  python3 src/dashboard.py              # serve on port 7844
-  Open http://localhost:7844 in browser
+  python3 src/dashboard.py              # serve on port 7951 (DASHBOARD_PORT)
+  Open http://localhost:7951 in browser
 
 Auto-refreshes every 15 seconds.
 """
@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 REPO_DIR = Path(__file__).parent.parent
-PORT = 7844
+PORT = int(os.environ.get("DASHBOARD_PORT", "7951"))
 
 
 def _resolve_note_path(raw_slug: str):
@@ -317,9 +317,9 @@ def render_dashboard() -> str:
 <h2>Quick Links</h2>
 <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px">
 <a href="http://localhost:8080" style="color:#4a8aaa;text-decoration:none">Voice UI :8080</a>
-<a href="http://localhost:7843" style="color:#4a8aaa;text-decoration:none">Task API :7843</a>
-<a href="http://localhost:7844" style="color:#4a8aaa;text-decoration:none">Dashboard :7844</a>
-<a href="http://localhost:7845" style="color:#4a8aaa;text-decoration:none">Screen Capture :7845</a>
+<a href="http://localhost:7950" style="color:#4a8aaa;text-decoration:none">Task API :7950</a>
+<a href="http://localhost:7951" style="color:#4a8aaa;text-decoration:none">Dashboard :7951</a>
+<a href="http://localhost:7900" style="color:#4a8aaa;text-decoration:none">Screen Capture :7900</a>
 <a href="/notes-ui" style="color:#4a8aaa;text-decoration:none">Notes Browser</a>
 <a href="https://github.com/sonichi/sutando" style="color:#4a8aaa;text-decoration:none">GitHub</a>
 <a href="https://sutando.ai" style="color:#4a8aaa;text-decoration:none">Website</a>

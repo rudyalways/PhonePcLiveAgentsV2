@@ -2,8 +2,8 @@
 # POC: CodeQL #16-23, #28-31, #35-36 — path injection in agent-api.py and dashboard.py
 # Tests that path traversal attempts are blocked by existing guards.
 
-API_PORT=7843
-DASH_PORT=7844
+API_PORT=7950
+DASH_PORT=7951
 
 echo "=== agent-api.py path injection tests ==="
 

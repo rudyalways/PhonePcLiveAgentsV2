@@ -8,6 +8,8 @@ import { writeFileSync, unlinkSync, readFileSync, existsSync } from 'node:fs';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { demoStateRef } from './recording-state.js';
+import { SCREEN_CAPTURE_ORIGIN } from './screen-capture-origin.js';
+import { DASHBOARD_PORT } from './agent-dashboard-ports.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -100,7 +102,7 @@ const TAB_ALIASES: Record<string, string> = {
 	'gmail': 'mail.google.com', 'email': 'mail.google.com', 'inbox': 'mail.google.com',
 	'calendar': 'calendar.google.com', 'gcal': 'calendar.google.com',
 	'twitter': 'x.com', 'x': 'x.com',
-	'dashboard': 'localhost:7844', 'sutando': 'localhost:8080', 'web client': 'localhost:8080',
+	'dashboard': `localhost:${DASHBOARD_PORT}`, 'sutando': 'localhost:8080', 'web client': 'localhost:8080',
 	'gemini': 'gemini.google.com',
 };
 
@@ -241,7 +243,7 @@ export const captureScreenTool: ToolDefinition = {
 	execution: 'inline',
 	async execute() {
 		try {
-			const res = await fetch('http://localhost:7845/capture');
+			const res = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`);
 			const data = await res.json() as { status: string; path?: string; error?: string };
 			if (data.status === 'ok' && data.path) {
 				console.log(`${ts()} [Screen] Captured: ${data.path}`);
@@ -384,7 +386,7 @@ export const describeScreenTool: ToolDefinition = {
 		try {
 			const { display } = (args || {}) as { display?: number };
 			const query = display ? `?display=${display}` : '?all=true';
-			const captureRes = await fetch(`http://localhost:7845/capture${query}`);
+			const captureRes = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture${query}`);
 			const captureData = await captureRes.json() as { status: string; path?: string; all_paths?: string[]; error?: string };
 			if (captureData.status !== 'ok' || !captureData.path) {
 				return { error: `Could not capture screen: ${captureData.error || 'unknown'}` };

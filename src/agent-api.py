@@ -15,9 +15,9 @@ Endpoints:
   POST /twilio/transcription — voicemail transcription callback (Twilio)
 
 Usage:
-  python3 src/agent-api.py              # start on port 7843
-  curl -X POST http://localhost:7843/task -d '{"from":"agent-2","task":"research X"}'
-  curl http://localhost:7843/result/task-123456   # poll for result
+  python3 src/agent-api.py              # start on port 7950 (AGENT_API_PORT)
+  curl -X POST http://localhost:7950/task -d '{"from":"agent-2","task":"research X"}'
+  curl http://localhost:7950/result/task-123456   # poll for result
 
 Agent-to-agent:
   POST /task with callback_url → Sutando POSTs result to that URL when done
@@ -83,7 +83,7 @@ def validate_twilio_signature(handler, body: str) -> bool:
 
 REPO_DIR = Path(__file__).parent.parent
 TASK_DIR = REPO_DIR / "tasks"
-PORT = 7843
+PORT = int(os.environ.get("AGENT_API_PORT", "7950"))
 
 # Simple token auth — set SUTANDO_API_TOKEN in .env for remote access security
 API_TOKEN = os.environ.get("SUTANDO_API_TOKEN", "")

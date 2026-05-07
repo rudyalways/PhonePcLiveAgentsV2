@@ -36,7 +36,7 @@ Sutando 移动端远程控制功能允许用户通过手机 App 实时查看并�
 │         ▼                  ▼                                  │
 │  ┌─────────────┐    ┌─────────────────────────────┐         │
 │  │ LiveKit     │    │ Mobile Control Server       │         │
-│  │ Agent       │    │ (Python HTTP, Port 7847)    │         │
+│  │ Agent       │    │ (Python HTTP, Port 7901)    │         │
 │  │ (Screen     │    │ - Click (Quartz CGEvents)   │         │
 │  │  Publisher) │    │ - Type (Clipboard Paste)    │         │
 │  └─────────────┘    │ - Scroll (CGScrollWheel)    │         │
@@ -66,7 +66,7 @@ Sutando 移动端远程控制功能允许用户通过手机 App 实时查看并�
 - **分辨率**: 自适应 (默认 1920x1080)
 
 #### 2. **Mobile Control Server** (Python HTTP)
-- **端口**: 7847
+- **端口**: 7901
 - **协议**: HTTP REST API
 - **认证**: 用户名 + 密码 (SHA-256 哈希验证)
 - **功能**: 接收手机发送的输入指令，转换为 macOS 系统事件
@@ -370,7 +370,7 @@ bash src/start-livekit.sh
 
 这会启动：
 - Token Server (端口 7850)
-- Mobile Control Server (端口 7847)
+- Mobile Control Server (端口 7901)
 - Screen Publisher Server (端口 8080, HTTPS)
 
 **方式 2: 单独启动**
@@ -394,7 +394,7 @@ pgrep -fl "livekit-token-server|mobile-control-server|screen-publisher-server"
 curl "http://localhost:7850/token?user=zqy&secret=your_password&identity=phone-user"
 
 # 测试 Mobile Control Server
-curl -H "X-User: zqy" -H "X-Secret: your_password" http://localhost:7847/screen/info
+curl -H "X-User: zqy" -H "X-Secret: your_password" http://localhost:7901/screen/info
 ```
 
 ---
@@ -485,7 +485,7 @@ bash src/start-livekit.sh
 1. **检查 Mobile Control Server 是否运行:**
    ```bash
    curl -H "X-User: zqy" -H "X-Secret: your_password" \
-     http://localhost:7847/screen/info
+     http://localhost:7901/screen/info
    # 应返回: {"width": 1920, "height": 1080}
    ```
 
@@ -495,7 +495,7 @@ bash src/start-livekit.sh
 
 3. **手动测试点击:**
    ```bash
-   curl -X POST http://localhost:7847/input/click \
+   curl -X POST http://localhost:7901/input/click \
      -H "Content-Type: application/json" \
      -H "X-User: zqy" -H "X-Secret: your_password" \
      -d '{"x": 960, "y": 540}'
@@ -520,7 +520,7 @@ bash src/start-livekit.sh
 
 **验证修复:**
 ```bash
-curl -X POST http://localhost:7847/input/type \
+curl -X POST http://localhost:7901/input/type \
   -H "Content-Type: application/json" \
   -H "X-User: zqy" -H "X-Secret: your_password" \
   -d '{"text": "你好世界"}'
@@ -571,7 +571,7 @@ curl -X POST http://localhost:7847/input/type \
 
 ### Mobile Control Server API
 
-**Base URL**: `http://localhost:7847`
+**Base URL**: `http://localhost:7901`
 
 **认证**: 所有请求需要 `X-User` 和 `X-Secret` 请求头
 

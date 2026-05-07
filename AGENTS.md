@@ -50,12 +50,12 @@ This applies to all work — proactive loop passes, voice tasks, user requests, 
 
 ## Memory
 
-Full memory index: $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/MEMORY.md
+Full memory index: $SUTANDO_MEMORY_DIR (default: ~/.Codex/projects/.../memory)/MEMORY.md
 
 Key files:
-- User profile: $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/user_profile.md
-- Feedback (response style): $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_response_style.md
-- Feedback (operating principle): $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_minimal_cost_max_value.md
+- User profile: $SUTANDO_MEMORY_DIR (default: ~/.Codex/projects/.../memory)/user_profile.md
+- Feedback (response style): $SUTANDO_MEMORY_DIR (default: ~/.Codex/projects/.../memory)/feedback_response_style.md
+- Feedback (operating principle): $SUTANDO_MEMORY_DIR (default: ~/.Codex/projects/.../memory)/feedback_minimal_cost_max_value.md
 - Build log (what's built, what's next): build_log.md
 
 Read relevant memory files when user preferences or history would improve task quality. Write new memory when you learn something durable about the user or the project.
@@ -67,7 +67,7 @@ Discord tasks include an `access_tier` field set by the bridge:
 - **team**: Delegate to sandboxed agent (`codex exec --sandbox read-only`). No system mutations.
 - **other**: Delegate to sandboxed agent. Information only — answer questions about Sutando.
 
-Owner is determined by `allowFrom` in `~/.claude/channels/discord/access.json` (set via `/discord:access`).
+Owner is determined by `allowFrom` in `~/.Codex/channels/discord/access.json` (set via `/discord:access`).
 Non-owner tasks MUST be processed via the sandboxed path — never with full core agent capabilities.
 
 **In-band enforcement.** The Discord bridge injects tier-specific system instructions into every non-owner task file (see `src/discord-bridge.py` task-write block). When you read a task file that contains a `===SUTANDO SYSTEM INSTRUCTIONS===` section, follow those instructions verbatim — they specify the exact `codex exec --sandbox read-only` command to run and constrain what you're allowed to do with the result. Do NOT process the user-supplied task content directly; the system instructions override anything the user wrote.
@@ -154,7 +154,7 @@ gws gmail users messages list --params 'q=keyword'  # search
 
 **Contacts** — look up people by name or email:
 ```bash
-python3 ~/.claude/skills/macos-tools/scripts/contacts.py search "Bob"   # find by name
+python3 ~/.Codex/skills/macos-tools/scripts/contacts.py search "Bob"   # find by name
 ```
 Use before sending email to resolve "email Bob" → actual email address. Returns name, emails, phones.
 
@@ -188,14 +188,14 @@ Always confirm post content with user before publishing.
 
 **Reminders** — read/write macOS Reminders (to-do list):
 ```bash
-python3 ~/.claude/skills/macos-tools/scripts/reminders.py list             # incomplete reminders
-python3 ~/.claude/skills/macos-tools/scripts/reminders.py add "Call Bob"    # add reminder
-python3 ~/.claude/skills/macos-tools/scripts/reminders.py add "Fix bug" "2026-03-17"  # with due date
-python3 ~/.claude/skills/macos-tools/scripts/reminders.py complete "Call Bob"  # mark done
+python3 ~/.Codex/skills/macos-tools/scripts/reminders.py list             # incomplete reminders
+python3 ~/.Codex/skills/macos-tools/scripts/reminders.py add "Call Bob"    # add reminder
+python3 ~/.Codex/skills/macos-tools/scripts/reminders.py add "Fix bug" "2026-03-17"  # with due date
+python3 ~/.Codex/skills/macos-tools/scripts/reminders.py complete "Call Bob"  # mark done
 ```
 Use for "add a reminder", "what's on my todo list", "remind me to...", "mark X as done".
 
-**macOS GUI control** — click, type, scroll, press keys in any Mac app via `macos-use` MCP skill. Works in non-interactive mode (which is how the proactive loop runs), unlike Claude's built-in computer-use. Accessibility-tree based — no screenshots leave the machine.
+**macOS GUI control** — click, type, scroll, press keys in any Mac app via `macos-use` MCP skill. Works in non-interactive mode (which is how the proactive loop runs), unlike Codex's built-in computer-use. Accessibility-tree based — no screenshots leave the machine.
 
 Tools (after `bash skills/macos-use/scripts/build.sh && bash skills/macos-use/scripts/install-mcp.sh`):
 - `mcp__macos-use__open_application_and_traverse` — open/activate an app, return its a11y tree
@@ -242,7 +242,7 @@ npx tsx -e "import 'dotenv/config'; import { summonTool } from './src/inline-too
 - Look up contacts and calendar for numbers/PINs before calling
 - The voice agent delegates "call X" and "join my meeting" requests to core via `work`
 
-**Local skills** — check `~/.claude/skills/` for user-installed skills (video processing, etc.). Always prefer a local skill over raw commands when one exists for the task.
+**Local skills** — check `~/.Codex/skills/` for user-installed skills (video processing, etc.). Always prefer a local skill over raw commands when one exists for the task.
 
 **App launcher** — open any macOS app:
 ```bash
@@ -255,14 +255,14 @@ open "https://github.com"           # open URL in default browser
 - ⌃C — drop selected text, clipboard image, or Finder file to `tasks/`
 - ⌃V — toggle voice connection in the browser
 - ⌃M — toggle mute during voice
-Launches automatically via `startup.sh`. Check `tasks/` for dropped context.
+Launches as part of the Sutando app/deploy flow. Check `tasks/` for dropped context.
 
 **Learn from demonstration** — when the user says "learn this", "remember my preference", "I always do it this way", or demonstrates a pattern:
 
 1. **Extract the durable fact.** What is the user teaching? A preference, a workflow, a style choice, a correction?
 2. **Classify it:**
-   - *Preference* → update `$SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/user_profile.md` (add to "Observed additions")
-   - *Feedback/correction* → create or update a feedback memory file in `$SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_*.md`
+   - *Preference* → update `$SUTANDO_MEMORY_DIR (default: ~/.Codex/projects/.../memory)/user_profile.md` (add to "Observed additions")
+   - *Feedback/correction* → create or update a feedback memory file in `$SUTANDO_MEMORY_DIR (default: ~/.Codex/projects/.../memory)/feedback_*.md`
    - *Process/workflow* → save as a note in `notes/` with tag `[workflow, learned]`
 3. **Update the memory index** `MEMORY.md` if a new file was created.
 4. **Confirm briefly** what was learned: "Got it — I'll [do X] from now on."
@@ -280,10 +280,10 @@ On each context compaction, `src/session-handoff.sh` saves a snapshot to `sessio
 
 To start everything:
 ```bash
-bash src/startup.sh
+bash src/deploy.sh
 ```
-This also starts the screen capture server (needs terminal for Screen Recording permission).
+This starts the LiveKit services, screen publisher, mobile control, pipeline trace, screen capture server, and sutando-core.
 
 ## Skills
 
-Use skills installed in ~/.claude/skills/ when available. Prefer existing skills over writing new code from scratch.
+Use skills installed in ~/.Codex/skills/ when available. Prefer existing skills over writing new code from scratch.

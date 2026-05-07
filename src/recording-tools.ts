@@ -8,6 +8,7 @@ import { writeFileSync, unlinkSync, readFileSync, readlinkSync, existsSync, stat
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { demoStateRef, narrationSpeakingRef, lastSpokenRef, nextDescRef, scrollPausedRef } from './recording-state.js';
+import { SCREEN_CAPTURE_ORIGIN } from './screen-capture-origin.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -298,7 +299,7 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 
 async function captureScreen(): Promise<string | null> {
 	try {
-		const res = await fetch('http://localhost:7845/capture');
+		const res = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`);
 		const data = await res.json() as { status: string; path?: string };
 		return data.status === 'ok' && data.path ? data.path : null;
 	} catch { return null; }
@@ -357,7 +358,7 @@ export const scrollAndDescribeTool: ToolDefinition = {
 
 			// Capture + describe FIRST, then start recording.
 			// This way the vision API latency doesn't eat into recording time.
-			const captureRes = await fetch('http://localhost:7845/capture');
+			const captureRes = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`);
 			const captureData = await captureRes.json() as { status: string; path?: string };
 			const firstDesc = captureData.path ? await describeScreenshot(captureData.path) : '';
 			try { unlinkSync(LIVE_TRANSCRIPT_SRT_PATH); } catch {}

@@ -23,6 +23,7 @@ import logging
 import os
 import subprocess
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 REPO = Path(__file__).resolve().parent.parent
+_SRC = Path(__file__).resolve().parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+try:
+    from pipeline_emit import emit as _pipeline_emit
+except ImportError:
+    def _pipeline_emit(**_kw):  # type: ignore[misc,no-redef]
+        pass
+
 load_dotenv(REPO / ".env")
 
 from livekit import rtc
@@ -658,26 +668,85 @@ class SutandoAgent(Agent):
         write_owner_activity("voice", task)
         log_conversation(self._username, "user", task)
         logger.info("Task %s [%s]: %s", task_id, self._username, task[:100])
+        _pipeline_emit(
+            phase="task_enqueued",
+            task_id=task_id,
+            ok=True,
+            detail="tasks/*.txt written (LiveKit Gemini work)",
+            component="livekit-agent",
+        )
 
         # Give sutando-core 10s to respond (if alive, it's faster + richer)
         result_file = self._results_dir / f"{task_id}.txt"
-        for _ in range(10):
+        _pipeline_emit(
+            phase="livekit_wait_core_started",
+            task_id=task_id,
+            ok=True,
+            detail="polling results/ ≤10s for sutando-core",
+            component="livekit-agent",
+        )
+        for poll_i in range(10):
             if result_file.exists():
                 result_text = result_file.read_text().strip()
+                _pipeline_emit(
+                    phase="result_file_observed",
+                    task_id=task_id,
+                    ok=True,
+                    detail="livekit-sync: results/*.txt readable",
+                    component="livekit-agent",
+                )
                 archive_file(result_file, "results", task_id, self._username)
                 archive_file(task_file, "tasks", task_id, self._username)
                 self._pending_tasks.pop(task_id, None)
                 log_conversation(self._username, "assistant", result_text[:200])
                 logger.info("Result %s (core): %s", task_id, result_text[:100])
+                _pipeline_emit(
+                    phase="agent_consumed_sync_result",
+                    task_id=task_id,
+                    ok=True,
+                    detail="Returning to Gemini for TTS",
+                    component="livekit-agent",
+                )
                 return result_text
+            if poll_i in (4, 9):
+                _pipeline_emit(
+                    phase="livekit_poll_core_pulse",
+                    task_id=task_id,
+                    ok=True,
+                    detail=f"still waiting sutando-core {poll_i + 1}/10s",
+                    component="livekit-agent",
+                )
             await asyncio.sleep(1)
 
         # Core didn't respond — self-execute via claude -p (full tool access).
         # Remove task file to prevent double-execution by core.
+        _pipeline_emit(
+            phase="core_sla_miss",
+            task_id=task_id,
+            ok=False,
+            detail="10s no core result → remove task file, run claude -p",
+            component="livekit-agent",
+        )
         task_file.unlink(missing_ok=True)
+        _pipeline_emit(
+            phase="self_execute_started",
+            task_id=task_id,
+            ok=True,
+            detail="claude -p subprocess",
+            component="livekit-agent",
+        )
         result_text = await self._execute_via_claude(task, task_id)
         self._pending_tasks.pop(task_id, None)
         log_conversation(self._username, "assistant", result_text[:200])
+        _pipeline_emit(
+            phase="self_execute_finished",
+            task_id=task_id,
+            ok=True,
+            detail=result_text[:120].replace("\n", " ")
+            if result_text
+            else "empty",
+            component="livekit-agent",
+        )
         return result_text
 
     async def _poll_and_speak(
@@ -685,14 +754,35 @@ class SutandoAgent(Agent):
     ) -> None:
         """Background poller: waits for task result, then pushes it via generate_reply."""
         try:
-            for _ in range(TASK_TIMEOUT_S - 8):
+            _pipeline_emit(
+                phase="livekit_async_wait_started",
+                task_id=task_id,
+                ok=True,
+                detail=f"background poll up to ~{TASK_TIMEOUT_S}s",
+                component="livekit-agent",
+            )
+            for pi in range(TASK_TIMEOUT_S - 8):
                 if result_file.exists():
                     result_text = result_file.read_text().strip()
+                    _pipeline_emit(
+                        phase="result_file_observed",
+                        task_id=task_id,
+                        ok=True,
+                        detail="async poll: results/*.txt",
+                        component="livekit-agent",
+                    )
                     archive_file(result_file, "results", task_id, self._username)
                     archive_file(task_file, "tasks", task_id, self._username)
                     self._pending_tasks.pop(task_id, None)
                     log_conversation(self._username, "assistant", result_text[:200])
                     logger.info("Result (async) %s: %s", task_id, result_text[:100])
+                    _pipeline_emit(
+                        phase="agent_generate_reply_from_result",
+                        task_id=task_id,
+                        ok=True,
+                        detail="session.generate_reply with result excerpt",
+                        component="livekit-agent",
+                    )
                     try:
                         await session.generate_reply(
                             instructions=f"The task completed. Tell the user this result concisely: {result_text[:500]}"
@@ -700,9 +790,24 @@ class SutandoAgent(Agent):
                     except Exception as e:
                         logger.warning("Failed to speak async result: %s", e)
                     return
+                if pi % 45 == 0 and pi > 0:
+                    _pipeline_emit(
+                        phase="livekit_async_poll_pulse",
+                        task_id=task_id,
+                        ok=True,
+                        detail=f"async alive {pi}s waiting results/",
+                        component="livekit-agent",
+                    )
                 await asyncio.sleep(1)
             self._pending_tasks.pop(task_id, None)
             logger.warning("Task %s timed out in background poller", task_id)
+            _pipeline_emit(
+                phase="livekit_async_wait_timeout",
+                task_id=task_id,
+                ok=False,
+                detail=f"background poller exhausted ~{TASK_TIMEOUT_S}s",
+                component="livekit-agent",
+            )
         except Exception as e:
             logger.exception("Background poll error for %s: %s", task_id, e)
 
@@ -843,11 +948,12 @@ class SutandoAgent(Agent):
     async def describe_screen(self, context: RunContext) -> str:
         """Capture the current screen and describe what's on it."""
         try:
+            port = os.environ.get("SCREEN_CAPTURE_PORT", "7900")
             result = subprocess.run(
                 [
                     "curl",
                     "-s",
-                    "http://localhost:7845/capture",
+                    f"http://localhost:{port}/capture",
                 ],
                 timeout=10,
                 capture_output=True,

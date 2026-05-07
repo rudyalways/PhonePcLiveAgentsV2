@@ -4,7 +4,7 @@
 # While subprocess.run with list args prevents shell injection,
 # an attacker can inject arbitrary screencapture flags.
 
-PORT=7845
+PORT=7900
 
 echo "=== Test 1: normal display param ==="
 curl -s "http://localhost:$PORT/capture?display=1" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()))"
