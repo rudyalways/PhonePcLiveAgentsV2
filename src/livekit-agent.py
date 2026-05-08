@@ -54,6 +54,7 @@ from livekit.agents import (
     RunContext,
     RoomInputOptions,
 )
+from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
 
 logger = logging.getLogger("sutando-agent")
 logging.getLogger("livekit.plugins.openai").setLevel(logging.DEBUG)
@@ -80,290 +81,8 @@ RESULT_WATCHER_FALLBACK_S = float(os.environ.get("RESULT_WATCHER_FALLBACK_S", "0
 RESULT_WATCHER_HEARTBEAT_S = 5
 RESULT_WATCHER_HEARTBEAT = STATE_DIR / "livekit-result-watcher.heartbeat"
 
-
-# ---------------------------------------------------------------------------
-# Qwen compatibility patch — fill missing item.id/item_id in events
-# ---------------------------------------------------------------------------
-
-
-def _patch_qwen_compat():
-    """Monkey-patch livekit-plugins-openai for Qwen Realtime API compatibility.
-
-    Qwen deviates from OpenAI's Realtime protocol in three ways:
-    1. Shorter event names (response.audio.delta vs response.output_audio.delta)
-    2. Missing fields (output_index, content_index, item_id)
-    3. Out-of-order events (response done/delta before response.created)
-
-    This patch normalizes all three before the SDK processes each event.
-    """
-    import uuid
-    import asyncio
-    try:
-        from livekit.plugins.openai.realtime import realtime_model as rm
-        from livekit.agents import utils
-    except ImportError:
-        return
-
-    _QWEN_EVENT_MAP = {
-        "response.audio.delta": "response.output_audio.delta",
-        "response.audio.done": "response.output_audio.done",
-        "response.audio_transcript.delta": "response.output_audio_transcript.delta",
-        "response.audio_transcript.done": "response.output_audio_transcript.done",
-        "response.text.delta": "response.output_text.delta",
-        "response.text.done": "response.output_text.done",
-    }
-
-    original_init = rm.RealtimeSession.__init__
-    _event_counts = {}
-
-    def patched_init(self, *args, **kwargs):
-        self._qwen_item_ids = {}
-        original_init(self, *args, **kwargs)
-
-        def _ensure_generation(session):
-            """Auto-create _current_generation if Qwen sent events out of order."""
-            if session._current_generation is not None:
-                return
-            synth_id = f"qwen_synth_{uuid.uuid4().hex[:12]}"
-            session._current_generation = rm._ResponseGeneration(
-                message_ch=utils.aio.Chan(),
-                function_ch=utils.aio.Chan(),
-                messages={},
-                _created_timestamp=__import__("time").time(),
-                _done_fut=asyncio.Future(),
-            )
-            generation_ev = __import__("livekit.agents", fromlist=["llm"]).llm.GenerationCreatedEvent(
-                message_stream=session._current_generation.message_ch,
-                function_stream=session._current_generation.function_ch,
-                user_initiated=False,
-                response_id=synth_id,
-            )
-
-            # Qwen skipped response.created — resolve any pending generate_reply futures
-            if session._response_created_futures:
-                oldest_key = next(iter(session._response_created_futures))
-                fut = session._response_created_futures.pop(oldest_key)
-                if not fut.done():
-                    generation_ev.user_initiated = True
-                    fut.set_result(generation_ev)
-                    logger.info("[QWEN-PATCH] resolved pending generate_reply future %s", oldest_key)
-
-            session.emit("generation_created", generation_ev)
-            logger.info("[QWEN-PATCH] auto-created _current_generation id=%s", synth_id)
-
-        def _ensure_message(session, item_id):
-            """Auto-create a message entry if it doesn't exist yet."""
-            gen = session._current_generation
-            if gen is None or item_id in gen.messages:
-                return
-            gen.messages[item_id] = rm._MessageGeneration(
-                message_id=item_id,
-                text_ch=utils.aio.Chan(),
-                audio_ch=utils.aio.Chan(),
-                modalities=asyncio.Future(),
-            )
-            llm_mod = __import__("livekit.agents", fromlist=["llm"]).llm
-            gen.message_ch.send_nowait(
-                llm_mod.MessageGeneration(
-                    message_id=item_id,
-                    text_stream=gen.messages[item_id].text_ch,
-                    audio_stream=gen.messages[item_id].audio_ch,
-                    modalities=gen.messages[item_id].modalities,
-                )
-            )
-
-        def _on_event(event):
-            evt_type = event.get("type", "unknown")
-
-            # 1) Normalize event names
-            mapped = _QWEN_EVENT_MAP.get(evt_type)
-            if mapped:
-                event["type"] = mapped
-                evt_type = mapped
-
-            # 2) Fix missing fields
-            _qwen_fix_fields(self, event, evt_type)
-
-            # 3) Handle out-of-order: ensure _current_generation exists
-            needs_gen = (
-                evt_type.startswith("response.")
-                and evt_type not in ("response.created", "response.done")
-            )
-            if needs_gen:
-                _ensure_generation(self)
-                # Also ensure the message entry exists for audio/transcript events
-                item_id = event.get("item_id")
-                if item_id and evt_type in (
-                    "response.output_audio.delta",
-                    "response.output_audio.done",
-                    "response.output_audio_transcript.delta",
-                    "response.output_audio_transcript.done",
-                    "response.output_text.delta",
-                    "response.output_text.done",
-                    "response.content_part.added",
-                    "response.content_part.done",
-                ):
-                    _ensure_message(self, item_id)
-
-            # Fix 3: Handle "active response" error — clear generation state
-            if evt_type == "error":
-                error_msg = str(event.get("error", {}).get("message", ""))
-                if "active response" in error_msg.lower():
-                    self._close_current_generation(reason="qwen: server reported active response conflict")
-                    logger.info("[QWEN-PATCH] cleared generation after active-response error")
-
-            # Log
-            _event_counts[evt_type] = _event_counts.get(evt_type, 0) + 1
-            cnt = _event_counts[evt_type]
-            if cnt <= 3 or cnt % 50 == 0:
-                extra = ""
-                if "error" in evt_type:
-                    extra = f" detail={event}"
-                elif "speech" in evt_type:
-                    extra = f" detail={event}"
-                logger.info("[QWEN-WS] ← %s (#%d)%s", evt_type, cnt, extra)
-
-        def _on_client_event(event):
-            evt_type = event.get("type", "unknown")
-
-            # Fix 2: Auto-resolve conversation.item.create futures
-            # Qwen doesn't send conversation.item.added acknowledgments
-            if evt_type == "conversation.item.create":
-                item = event.get("item", {})
-                item_id = item.get("id")
-                if item_id and hasattr(self, "_item_create_future"):
-                    fut = self._item_create_future.pop(item_id, None)
-                    if fut and not fut.done():
-                        fut.set_result(None)
-                        logger.info("[QWEN-PATCH] auto-resolved item_create future for %s", item_id)
-
-                # If this is a function_call_output, nudge Qwen to respond after 2s
-                if item.get("type") == "function_call_output":
-                    def _nudge_response():
-                        if self._current_generation is None:
-                            logger.info("[QWEN-PATCH] nudging Qwen with response.create after tool output")
-                            self.send_event({"type": "response.create", "response": {}})
-                    asyncio.get_event_loop().call_later(0.5, _nudge_response)
-
-            key = f"out:{evt_type}"
-            _event_counts[key] = _event_counts.get(key, 0) + 1
-            cnt = _event_counts[key]
-            if cnt <= 3 or cnt % 50 == 0:
-                if evt_type == "input_audio_buffer.append":
-                    logger.info("[QWEN-WS] → %s (#%d) [audio chunk]", evt_type, cnt)
-                else:
-                    logger.info("[QWEN-WS] → %s (#%d) %s", evt_type, cnt,
-                               {k: v for k, v in event.items() if k != "type"})
-
-        self.on("openai_server_event_received", _on_event)
-        self.on("openai_client_event_queued", _on_client_event)
-
-    def _qwen_fix_fields(session, event: dict, evt_type: str):
-        """Fill missing fields that Qwen omits."""
-        import uuid as _uuid
-
-        if evt_type == "response.created":
-            resp = event.get("response")
-            if isinstance(resp, dict):
-                if not resp.get("id"):
-                    resp["id"] = f"qwen_resp_{_uuid.uuid4().hex[:12]}"
-                if not resp.get("status"):
-                    resp["status"] = "in_progress"
-            else:
-                event["response"] = {"id": f"qwen_resp_{_uuid.uuid4().hex[:12]}", "status": "in_progress"}
-
-        oi = event.get("output_index")
-        if oi is None:
-            event["output_index"] = 0
-            oi = 0
-        ci = event.get("content_index")
-        if ci is None:
-            event["content_index"] = 0
-
-        resp_id = event.get("response_id", "default")
-        key = (resp_id, oi)
-
-        item = event.get("item")
-        if isinstance(item, dict) and not item.get("id"):
-            if key not in session._qwen_item_ids:
-                session._qwen_item_ids[key] = f"qwen_{_uuid.uuid4().hex[:12]}"
-            item["id"] = session._qwen_item_ids[key]
-
-        if not event.get("item_id"):
-            if key not in session._qwen_item_ids:
-                session._qwen_item_ids[key] = f"qwen_{_uuid.uuid4().hex[:12]}"
-            event["item_id"] = session._qwen_item_ids[key]
-
-    rm.RealtimeSession.__init__ = patched_init
-
-    # Fix 1: Wait for server to finish active response before sending response.create
-    original_generate_reply = rm.RealtimeSession.generate_reply
-
-    def patched_generate_reply(self, **kwargs):
-        gen = self._current_generation
-        has_gen = gen is not None
-        done_fut_done = gen._done_fut.done() if gen else "N/A"
-        pending_futs = len(self._response_created_futures)
-        logger.info(
-            "[QWEN-PATCH] generate_reply called: has_gen=%s, done_fut_done=%s, pending_response_futs=%d",
-            has_gen, done_fut_done, pending_futs,
-        )
-        if gen is not None and not gen._done_fut.done():
-            # Server still has an active response — send cancel and wait for response.done
-            from livekit.plugins.openai._oai_api import ResponseCancelEvent
-            self.send_event(ResponseCancelEvent(type="response.cancel"))
-            logger.info("[QWEN-PATCH] sent response.cancel, chaining generate_reply after done_fut")
-
-            result_fut = asyncio.Future()
-            timeout_handle = asyncio.get_event_loop().call_later(
-                3.0,
-                lambda: _force_proceed(self, result_fut, kwargs),
-            )
-
-            def _on_old_done(fut):
-                timeout_handle.cancel()
-                try:
-                    new_fut = original_generate_reply(self, **kwargs)
-                    def _chain(f):
-                        if result_fut.done():
-                            return
-                        try:
-                            result_fut.set_result(f.result())
-                        except Exception as e:
-                            result_fut.set_exception(e)
-                    new_fut.add_done_callback(_chain)
-                except Exception as e:
-                    if not result_fut.done():
-                        result_fut.set_exception(e)
-
-            gen._done_fut.add_done_callback(_on_old_done)
-            return result_fut
-
-        return original_generate_reply(self, **kwargs)
-
-    def _force_proceed(session, result_fut, kwargs):
-        """Timeout fallback: force-close generation and proceed."""
-        if result_fut.done():
-            return
-        logger.warning("[QWEN-PATCH] 3s timeout waiting for response.done, force-closing")
-        session._close_current_generation(reason="qwen: timeout waiting for server cancel ack")
-        try:
-            new_fut = original_generate_reply(session, **kwargs)
-            def _chain(f):
-                if result_fut.done():
-                    return
-                try:
-                    result_fut.set_result(f.result())
-                except Exception as e:
-                    result_fut.set_exception(e)
-            new_fut.add_done_callback(_chain)
-        except Exception as e:
-            if not result_fut.done():
-                result_fut.set_exception(e)
-
-    rm.RealtimeSession.generate_reply = patched_generate_reply
-
-    logger.info("Qwen compatibility patch applied to livekit-plugins-openai")
+# Qwen/DashScope protocol handling lives in qwen_realtime_compat.py so Gemini
+# and other providers continue to use their native LiveKit plugins unchanged.
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +116,7 @@ def create_realtime_model() -> "lk_llm.RealtimeModel":
                 "base_url": "https://dashscope.aliyuncs.com/api-ws/v1/realtime",
                 "api_key_env": "DASHSCOPE_API_KEY",
                 "model": "qwen3.5-omni-plus-realtime",
-                "voice": "Cherry",
+                "voice": "Ethan",
             },
             "minimax": {
                 "base_url": "https://api.minimax.chat/v1",
@@ -409,29 +128,69 @@ def create_realtime_model() -> "lk_llm.RealtimeModel":
         cfg = provider_defaults[REALTIME_PROVIDER]
 
         if REALTIME_PROVIDER == "qwen":
-            _patch_qwen_compat()
+            from qwen_realtime_compat import (
+                patch_qwen_realtime,
+                qwen_input_transcription_config,
+                qwen_turn_detection_config,
+            )
+
+            patch_qwen_realtime()
 
         extra_kwargs = {}
         if REALTIME_PROVIDER == "qwen":
-            from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
-            extra_kwargs["turn_detection"] = ServerVad(
-                type="server_vad",
-                threshold=0.5,
-                prefix_padding_ms=300,
-                silence_duration_ms=800,
-                create_response=True,
-                interrupt_response=True,
-            )
-            extra_kwargs["input_audio_transcription"] = None
+            # DashScope Qwen Omni realtime docs configure VAD plus
+            # input_audio_transcription. Sending transcription=None matches our
+            # logs: append-only with no input_audio_buffer.speech_* / no response.
+            extra_kwargs["turn_detection"] = qwen_turn_detection_config()
             extra_kwargs["input_audio_noise_reduction"] = None
+            extra_kwargs["input_audio_transcription"] = qwen_input_transcription_config()
 
         model = openai_realtime.RealtimeModel(
             model=os.environ.get("REALTIME_MODEL", cfg["model"]),
-            voice=os.environ.get("REALTIME_VOICE", cfg["voice"]),
+            voice=(
+                os.environ.get("QWEN_REALTIME_VOICE", cfg["voice"])
+                if REALTIME_PROVIDER == "qwen"
+                else os.environ.get("REALTIME_VOICE", cfg["voice"])
+            ),
             api_key=os.environ.get(cfg["api_key_env"], ""),
             base_url=os.environ.get("REALTIME_BASE_URL", cfg["base_url"]),
             **extra_kwargs,
         )
+
+        try:
+            from urllib.parse import urlparse
+
+            opts = getattr(model, "_opts", None)
+            raw_base = (opts.base_url if opts else "") or cfg["base_url"]
+            parsed = urlparse(raw_base)
+            api_host = parsed.netloc or raw_base[:80]
+            td = extra_kwargs.get("turn_detection")
+            if td is not None and REALTIME_PROVIDER == "qwen":
+                vad_info = (
+                    f"{td.get('type', '?') if isinstance(td, dict) else getattr(td, 'type', '?')}"
+                    f"(thr={td.get('threshold', '?') if isinstance(td, dict) else getattr(td, 'threshold', '?')},"
+                    f"prefix_ms={td.get('prefix_padding_ms', '?') if isinstance(td, dict) else getattr(td, 'prefix_padding_ms', '?')},"
+                    f"silence_ms={td.get('silence_duration_ms', '?') if isinstance(td, dict) else getattr(td, 'silence_duration_ms', '?')})"
+                )
+            elif td is not None:
+                vad_info = "server_vad(configured)"
+            else:
+                vad_info = "sdk-default"
+            it = extra_kwargs.get("input_audio_transcription")
+            if it is None:
+                tx_info = "disabled"
+            else:
+                tx_info = getattr(it, "model", None) or str(it)
+            logger.info(
+                "[REALTIME] provider=%s model=%s host=%s vad=%s input_user_transcription=%s",
+                REALTIME_PROVIDER,
+                getattr(model, "model", cfg["model"]),
+                api_host,
+                vad_info,
+                tx_info,
+            )
+        except Exception as ex:
+            logger.debug("[REALTIME] config summary log failed: %s", ex)
 
         if REALTIME_PROVIDER == "qwen":
             model._capabilities.auto_tool_reply_generation = True
@@ -1100,7 +859,7 @@ async def entrypoint(ctx: JobContext):
 
     await ctx.connect()
 
-    logger.info("[DISPATCH] job received: room=%s username=%s", ctx.room.name, username)
+    logger.info("[DISPATCH] job received: room=%s username=%s", room_name, username)
     for p in ctx.room.remote_participants.values():
         logger.info("[DISPATCH] existing participant: identity=%s tracks=%d",
                     p.identity, len(p.track_publications))
@@ -1112,16 +871,45 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(llm=realtime_model)
     greeting = build_greeting(username)
 
-    await session.start(
-        room=ctx.room,
-        agent=agent,
-        room_input_options=RoomInputOptions(
+    if REALTIME_PROVIDER == "qwen":
+        from qwen_realtime_compat import QWEN_INPUT_SAMPLE_RATE
+
+        # RoomOptions (not legacy RoomInputOptions) so we can disable input AGC/AP: logs showed
+        # ~0 RMS int16 on /mobile (APM can zero mic); Qwen then never sees speech.
+        logger.info(
+            "[SESSION] RoomOptions: participant_identity=phone-user "
+            "audio=%dHz mono AGC=False text=True (Qwen)",
+            QWEN_INPUT_SAMPLE_RATE,
+        )
+        await session.start(
+            room=ctx.room,
+            agent=agent,
+            room_options=RoomOptions(
+                audio_input=AudioInputOptions(
+                    sample_rate=QWEN_INPUT_SAMPLE_RATE,
+                    auto_gain_control=False,
+                ),
+                text_input=True,
+                close_on_disconnect=False,
+                participant_identity="phone-user",
+            ),
+        )
+    else:
+        logger.info(
+            "[SESSION] RoomInputOptions: participant_identity=phone-user audio=True text=True "
+            "close_on_disconnect=False (audio from phone-user only)"
+        )
+        room_in = dict(
             text_enabled=True,
             audio_enabled=True,
             close_on_disconnect=False,
             participant_identity="phone-user",
-        ),
-    )
+        )
+        await session.start(
+            room=ctx.room,
+            agent=agent,
+            room_input_options=RoomInputOptions(**room_in),
+        )
     agent.start_result_watcher(session)
 
     # Capture user transcriptions for inline tool logging (open_url, press_key, etc.)
@@ -1137,6 +925,7 @@ async def entrypoint(ctx: JobContext):
                     transcript = event.get("transcript", "").strip()
                     if transcript:
                         agent._last_transcript = transcript
+                        logger.info("[TRANSCRIPT] user input_audio (completed): %s", transcript[:400])
                 elif event_type in ("response.output_audio_transcript.done", "response.output_text.done"):
                     response_text = (
                         event.get("transcript")
@@ -1144,6 +933,8 @@ async def entrypoint(ctx: JobContext):
                         or event.get("delta")
                         or ""
                     )
+                    if response_text and str(response_text).strip():
+                        logger.info("[TRANSCRIPT] assistant output (done): %s", str(response_text).strip()[:400])
                     agent._log_direct_response(response_text)
             realtime_session.on("openai_server_event_received", _capture_transcript)
             logger.info("Transcript capture hook attached to realtime session")

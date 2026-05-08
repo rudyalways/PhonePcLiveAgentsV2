@@ -19,6 +19,7 @@
     background: #1a1a2e; border: 1px solid #2a2a4e;
   }
   .status.connected { border-color: #2a6e2a; color: #6fbf6f; }
+  .status.reconnecting { border-color: #7a5c16; color: #e5c45f; }
   .status.error { border-color: #6e2a2a; color: #bf6f6f; }
   button {
     padding: 14px 32px; font-size: 16px; border: none; border-radius: 10px;
@@ -51,12 +52,12 @@
 
 <h1>Sutando Mobile</h1>
 
-<div class="login-form" id="login-form">
-  <input id="username-input" type="text" placeholder="Username" autocomplete="username" />
-  <input id="secret-input" type="password" placeholder="Password" autocomplete="current-password" />
-  <button id="connect-btn">Connect</button>
+<form class="login-form" id="login-form" action="#" autocomplete="on">
+  <input id="username-input" name="username" type="text" placeholder="Username" autocomplete="username" />
+  <input id="secret-input" name="password" type="password" placeholder="Password" autocomplete="current-password" />
+  <button id="connect-btn" type="submit">Connect</button>
   <div id="login-error"></div>
-</div>
+</form>
 
 <div id="main-ui">
   <div id="status" class="status">Connecting...</div>
@@ -69,6 +70,7 @@
 </div>
 
 <script type="module">
+  // Optional: ?micMeter=1 → Console mic level. Also: chrome://webrtc-internals (Chrome) for graphs.
   import {
     Room,
     RoomEvent,
@@ -94,6 +96,75 @@
   let room = null;
   let micTrack = null;
   let muted = false;
+  let micMeterIntervalId = null;
+  /** Resumed during Connect (user gesture); do not create a second suspended context for the meter */
+  let connectAudioCtx = null;
+  let micMeterSourceNode = null;
+  let savedCredentials = null;
+  let desiredConnected = false;
+  let reconnecting = false;
+  let reconnectAttempt = 0;
+  let reconnectTimerId = null;
+  let roomStateIntervalId = null;
+  let ignoreDisconnectEvent = false;
+
+  function stopMicLevelMeter() {
+    if (micMeterIntervalId) {
+      clearInterval(micMeterIntervalId);
+      micMeterIntervalId = null;
+    }
+    if (micMeterSourceNode) {
+      try {
+        micMeterSourceNode.disconnect();
+      } catch (_) {}
+      micMeterSourceNode = null;
+    }
+  }
+
+  /** When URL has ?micMeter=1, logs mic energy. Must use the same AudioContext resumed on Connect. */
+  function startMicLevelMeter(mediaStreamTrack, audioCtx) {
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get('micMeter') !== '1' && sp.get('micMeter') !== 'true') return;
+    stopMicLevelMeter();
+    if (!audioCtx) {
+      console.warn('[micMeter] skipped: no AudioContext');
+      return;
+    }
+    try {
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().then(() => console.log('[micMeter] AudioContext resumed → ' + audioCtx.state)).catch(() => {});
+      }
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      micMeterSourceNode = audioCtx.createMediaStreamSource(new MediaStream([mediaStreamTrack]));
+      micMeterSourceNode.connect(analyser);
+      const td = new Uint8Array(analyser.fftSize);
+      let tick = 0;
+      micMeterIntervalId = setInterval(() => {
+        analyser.getByteTimeDomainData(td);
+        let s = 0;
+        let peak = 0;
+        for (let i = 0; i < td.length; i++) {
+          const x = (td[i] - 128) / 128;
+          s += x * x;
+          const a = Math.abs(td[i] - 128);
+          if (a > peak) peak = a;
+        }
+        const rms = Math.sqrt(s / td.length);
+        tick += 1;
+        if (tick <= 5 || tick % 4 === 0) {
+          console.log(
+            '[micMeter] ctx=' + audioCtx.state +
+            ' rms=' + rms.toFixed(4) + ' peak_u8=' + peak +
+            ' — say "hello"; expect rms > ~0.02 when mic hears you (0 ≈ silence)'
+          );
+        }
+      }, 500);
+      console.log('[micMeter] enabled (shared AudioContext state=' + audioCtx.state + ')');
+    } catch (e) {
+      console.warn('[micMeter] failed:', e?.message || e);
+    }
+  }
 
   function setStatus(text, cls) {
     statusEl.textContent = text;
@@ -109,6 +180,227 @@
       : 'Waiting for other participants...';
   }
 
+  function tokenQuery({ username, secret }) {
+    return `user=${encodeURIComponent(username)}&secret=${encodeURIComponent(secret)}&identity=phone-user&name=Phone`;
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimerId) {
+      clearTimeout(reconnectTimerId);
+      reconnectTimerId = null;
+    }
+  }
+
+  function stopRoomStateMonitor() {
+    if (roomStateIntervalId) {
+      clearInterval(roomStateIntervalId);
+      roomStateIntervalId = null;
+    }
+  }
+
+  function startRoomStateMonitor() {
+    stopRoomStateMonitor();
+    roomStateIntervalId = setInterval(checkRoomState, 5000);
+    setTimeout(checkRoomState, 1500);
+  }
+
+  async function checkRoomState() {
+    if (!desiredConnected || reconnecting || !savedCredentials) return;
+    try {
+      const resp = await fetch(`${TOKEN_SERVER}/room-state?${tokenQuery(savedCredentials)}`, { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`room-state ${resp.status}`);
+      const state = await resp.json();
+      const participants = (state.participants || []).map((p) => p.identity);
+      console.log('[LiveKit] room-state participants:', participants.join(', ') || '(none)');
+      if (!state.identityPresent) {
+        scheduleReconnect('Phone was dropped from LiveKit room');
+      }
+    } catch (e) {
+      console.warn('[LiveKit] room-state check failed:', e?.message || e);
+    }
+  }
+
+  function scheduleReconnect(reason) {
+    if (!desiredConnected || !savedCredentials || reconnecting || reconnectTimerId) return;
+    const delay = Math.min(12000, 1000 * Math.pow(2, reconnectAttempt));
+    reconnectAttempt += 1;
+    setStatus(`${reason}; reconnecting in ${Math.round(delay / 1000)}s...`, 'reconnecting');
+    console.warn('[LiveKit] Scheduling reconnect:', reason);
+    reconnectTimerId = setTimeout(() => {
+      reconnectTimerId = null;
+      reconnect(reason).catch((e) => {
+        console.warn('[LiveKit] Reconnect failed:', e?.message || e);
+        scheduleReconnect('Reconnect failed');
+      });
+    }, delay);
+  }
+
+  async function reconnect(reason) {
+    if (!desiredConnected || !savedCredentials) return;
+    reconnecting = true;
+    setStatus(`Reconnecting (${reason})...`, 'reconnecting');
+    try {
+      await connectWithCredentials(savedCredentials, { isReconnect: true });
+    } finally {
+      reconnecting = false;
+    }
+  }
+
+  function teardownRoom({ hideUi, closeAudio, keepDesired } = {}) {
+    stopMicLevelMeter();
+    stopRoomStateMonitor();
+    clearReconnectTimer();
+    if (!keepDesired) desiredConnected = false;
+    if (micTrack) {
+      micTrack.stop();
+      micTrack = null;
+    }
+    if (room) {
+      ignoreDisconnectEvent = true;
+      Promise.resolve(room.disconnect()).catch(() => {}).finally(() => { ignoreDisconnectEvent = false; });
+      room = null;
+    }
+    if (closeAudio && connectAudioCtx) {
+      connectAudioCtx.close().catch(() => {});
+      connectAudioCtx = null;
+    }
+    muted = false;
+    screenView.style.display = 'none';
+    screenView.srcObject = null;
+    if (hideUi) {
+      mainUi.style.display = 'none';
+      loginForm.style.display = 'flex';
+    }
+    connectBtn.disabled = false;
+    disconnectBtn.style.display = hideUi ? 'none' : 'block';
+    muteBtn.style.display = hideUi ? 'none' : 'block';
+    muteBtn.textContent = 'Mute';
+    muteBtn.classList.remove('muted');
+    participantsEl.textContent = '';
+  }
+
+  function attachRoomHandlers(currentRoom) {
+    currentRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+      console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
+      try {
+        const live = participant.sid ? currentRoom.remoteParticipants.get(participant.sid) : null;
+        if (!live) {
+          console.warn('[LiveKit] Skipping track attach — participant no longer in room', participant.sid);
+          return;
+        }
+        if (track.kind === Track.Kind.Video) {
+          track.attach(screenView);
+          screenView.style.display = 'block';
+        }
+        if (track.kind === Track.Kind.Audio) {
+          const el = track.attach();
+          el.setAttribute('autoplay', '');
+          el.setAttribute('playsinline', '');
+          el.volume = 1.0;
+          document.body.appendChild(el);
+          el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
+        }
+      } catch (e) {
+        console.warn('[LiveKit] TrackSubscribed attach failed:', e?.message || e);
+      }
+    });
+
+    currentRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+      track.detach().forEach((el) => el.remove());
+      if (track.kind === Track.Kind.Video) screenView.style.display = 'none';
+    });
+
+    currentRoom.on(RoomEvent.Connected, () => {
+      setStatus('Connected', 'connected');
+      disconnectBtn.style.display = 'block';
+      muteBtn.style.display = 'block';
+      reconnectAttempt = 0;
+      updateParticipants();
+      startRoomStateMonitor();
+    });
+
+    if (RoomEvent.Reconnecting) {
+      currentRoom.on(RoomEvent.Reconnecting, () => {
+        if (desiredConnected) setStatus('Reconnecting...', 'reconnecting');
+      });
+    }
+
+    if (RoomEvent.Reconnected) {
+      currentRoom.on(RoomEvent.Reconnected, () => {
+        if (desiredConnected) setStatus('Connected', 'connected');
+        updateParticipants();
+        startRoomStateMonitor();
+      });
+    }
+
+    if (RoomEvent.ConnectionStateChanged) {
+      currentRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
+        console.log('[LiveKit] connection state:', state);
+      });
+    }
+
+    currentRoom.on(RoomEvent.Disconnected, (reason) => {
+      console.warn('[LiveKit] Disconnected:', reason || '(no reason)');
+      if (ignoreDisconnectEvent) return;
+      teardownRoom({ hideUi: false, closeAudio: false, keepDesired: true });
+      if (desiredConnected) scheduleReconnect('Disconnected from LiveKit');
+    });
+
+    currentRoom.on(RoomEvent.ParticipantConnected, () => updateParticipants());
+
+    currentRoom.on(RoomEvent.ParticipantDisconnected, (p) => {
+      updateParticipants();
+      if (p.identity === 'screen-publisher') {
+        screenView.srcObject = null;
+        screenView.style.display = 'none';
+      }
+    });
+  }
+
+  async function connectWithCredentials(credentials, { isReconnect = false } = {}) {
+    clearReconnectTimer();
+    stopRoomStateMonitor();
+    if (room || micTrack) teardownRoom({ hideUi: false, closeAudio: false, keepDesired: true });
+
+    if (!connectAudioCtx) {
+      connectAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (connectAudioCtx.state === 'suspended') await connectAudioCtx.resume();
+
+    const resp = await fetch(`${TOKEN_SERVER}/token?${tokenQuery(credentials)}`);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.error || `Token error ${resp.status}`);
+    }
+    const { jwt, url } = await resp.json();
+    if (!url) throw new Error('LIVEKIT_URL not configured on server');
+
+    loginForm.style.display = 'none';
+    mainUi.style.display = 'flex';
+    setStatus(isReconnect ? 'Reconnecting...' : 'Connecting...', isReconnect ? 'reconnecting' : '');
+
+    /* Match screen-publisher Room flags — adaptiveStream/dynacast can race during ICE/subscribe
+       churn and trigger SDK "participant that's not present" when attaching remote screen tracks. */
+    room = new Room({ adaptiveStream: false, dynacast: false });
+    attachRoomHandlers(room);
+
+    await room.connect(url, jwt);
+
+    const tracks = await createLocalTracks({ audio: true, video: false });
+    micTrack = tracks[0];
+    await room.localParticipant.publishTrack(micTrack, {
+      name: 'mic',
+      source: Track.Source.Microphone,
+    });
+    console.log('[LiveKit] Mic published');
+    startMicLevelMeter(micTrack.mediaStreamTrack, connectAudioCtx);
+    desiredConnected = true;
+    reconnectAttempt = 0;
+    setStatus('Connected', 'connected');
+    updateParticipants();
+    startRoomStateMonitor();
+  }
+
   async function connect() {
     const username = usernameInput.value.trim();
     const secret = secretInput.value;
@@ -120,99 +412,20 @@
 
     connectBtn.disabled = true;
     loginError.style.display = 'none';
+    savedCredentials = { username, secret };
+    desiredConnected = true;
 
     try {
-      // Unlock Web Audio on iOS — must happen in user-gesture context
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-      const resp = await fetch(
-        `${TOKEN_SERVER}/token?user=${encodeURIComponent(username)}&secret=${encodeURIComponent(secret)}&identity=phone-user&name=Phone`
-      );
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.error || `Token error ${resp.status}`);
-      }
-      const { jwt, url } = await resp.json();
-      if (!url) throw new Error('LIVEKIT_URL not configured on server');
-
-      loginForm.style.display = 'none';
-      mainUi.style.display = 'flex';
-      setStatus('Connecting...', '');
-
-      /* Match screen-publisher Room flags — adaptiveStream/dynacast can race during ICE/subscribe
-         churn and trigger SDK "participant that's not present" when attaching remote screen tracks. */
-      room = new Room({ adaptiveStream: false, dynacast: false });
-
-      room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
-        console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
-        try {
-          const live = participant.sid ? room.remoteParticipants.get(participant.sid) : null;
-          if (!live) {
-            console.warn('[LiveKit] Skipping track attach — participant no longer in room', participant.sid);
-            return;
-          }
-          if (track.kind === Track.Kind.Video) {
-            track.attach(screenView);
-            screenView.style.display = 'block';
-          }
-          if (track.kind === Track.Kind.Audio) {
-            const el = track.attach();
-            el.setAttribute('autoplay', '');
-            el.setAttribute('playsinline', '');
-            el.volume = 1.0;
-            document.body.appendChild(el);
-            el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
-          }
-        } catch (e) {
-          console.warn('[LiveKit] TrackSubscribed attach failed:', e?.message || e);
-        }
-      });
-
-      room.on(RoomEvent.TrackUnsubscribed, (track) => {
-        track.detach().forEach((el) => el.remove());
-        if (track.kind === Track.Kind.Video) screenView.style.display = 'none';
-      });
-
-      room.on(RoomEvent.Connected, () => {
-        setStatus('Connected', 'connected');
-        disconnectBtn.style.display = 'block';
-        muteBtn.style.display = 'block';
-        updateParticipants();
-      });
-
-      room.on(RoomEvent.Disconnected, () => {
-        setStatus('Disconnected', '');
-        cleanup();
-      });
-
-      room.on(RoomEvent.ParticipantConnected, () => updateParticipants());
-
-      room.on(RoomEvent.ParticipantDisconnected, (p) => {
-        updateParticipants();
-        if (p.identity === 'screen-publisher') {
-          screenView.srcObject = null;
-          screenView.style.display = 'none';
-        }
-      });
-
-      await room.connect(url, jwt);
-
-      const tracks = await createLocalTracks({ audio: true, video: false });
-      micTrack = tracks[0];
-      await room.localParticipant.publishTrack(micTrack, {
-        name: 'mic',
-        source: Track.Source.Microphone,
-      });
-      console.log('[LiveKit] Mic published');
-
+      await connectWithCredentials(savedCredentials);
     } catch (err) {
       console.error('Connect failed:', err);
+      teardownRoom({ hideUi: true, closeAudio: true });
       loginForm.style.display = 'flex';
       mainUi.style.display = 'none';
       loginError.textContent = err.message;
       loginError.style.display = 'block';
       connectBtn.disabled = false;
+      desiredConnected = false;
     }
   }
 
@@ -225,28 +438,23 @@
   }
 
   async function disconnect() {
-    if (room) await room.disconnect();
-    cleanup();
+    desiredConnected = false;
+    savedCredentials = null;
+    clearReconnectTimer();
+    teardownRoom({ hideUi: true, closeAudio: true });
+    setStatus('Disconnected', '');
   }
 
   function cleanup() {
-    if (micTrack) { micTrack.stop(); micTrack = null; }
-    room = null;
-    muted = false;
-    screenView.style.display = 'none';
-    screenView.srcObject = null;
-    mainUi.style.display = 'none';
-    loginForm.style.display = 'flex';
-    connectBtn.disabled = false;
-    muteBtn.textContent = 'Mute';
-    muteBtn.classList.remove('muted');
-    participantsEl.textContent = '';
+    teardownRoom({ hideUi: true, closeAudio: true });
   }
 
-  connectBtn.onclick = connect;
+  loginForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    connect();
+  });
   disconnectBtn.onclick = disconnect;
   muteBtn.onclick = toggleMute;
-  secretInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
 </script>
 
 </body>

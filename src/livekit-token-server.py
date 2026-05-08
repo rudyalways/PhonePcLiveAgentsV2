@@ -173,6 +173,36 @@ def ensure_agent_dispatched(room: str) -> None:
         print(f"[TokenServer] Agent dispatch error: {e}", flush=True)
 
 
+async def _list_room_participants(room: str) -> list[dict]:
+    if not LIVEKIT_URL:
+        return []
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lkapi:
+        parts = await lkapi.room.list_participants(ListParticipantsRequest(room=room))
+        return [
+            {
+                "identity": p.identity,
+                "name": p.name,
+                "kind": int(p.kind),
+                "state": int(p.state),
+                "tracks": [
+                    {
+                        "sid": t.sid,
+                        "name": t.name,
+                        "type": int(t.type),
+                        "source": int(t.source),
+                        "muted": bool(t.muted),
+                    }
+                    for t in p.tracks
+                ],
+            }
+            for p in parts.participants
+        ]
+
+
+def list_room_participants(room: str) -> list[dict]:
+    return asyncio.run(_list_room_participants(room))
+
+
 async def _startup_cleanup() -> None:
     """Remove stale agents and dispatches from all sutando rooms on server start."""
     if not LIVEKIT_URL:
@@ -217,7 +247,7 @@ def startup_cleanup() -> None:
 class TokenHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path not in ("/token", "/api/token"):
+        if parsed.path not in ("/token", "/api/token", "/room-state", "/api/room-state"):
             self.send_response(404)
             self.end_headers()
             return
@@ -240,6 +270,24 @@ class TokenHandler(BaseHTTPRequestHandler):
         room = user_info["room"]
 
         try:
+            if parsed.path in ("/room-state", "/api/room-state"):
+                participants = list_room_participants(room)
+                body = json.dumps({
+                    "room": room,
+                    "participants": participants,
+                    "identityPresent": any(p["identity"] == identity for p in participants),
+                }).encode()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             jwt = create_token(identity, name, room)
 
             body = json.dumps({

@@ -10,8 +10,9 @@ import os
 import ssl
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.request import urlopen, Request
 from urllib.error import URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 PORT = int(os.environ.get("CLIENT_PORT", "8080"))
 TOKEN_PORT = int(os.environ.get("TOKEN_SERVER_PORT", "7850"))
@@ -23,12 +24,21 @@ KEY_FILE = STATE_DIR / "server.key"
 
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/screen", "/index.html"):
-            self.path = "/screen-publisher.html"
-        elif self.path in ("/mobile", "/mobile.html", "/phone"):
-            self.path = "/mobile-client.html"
-        elif self.path.startswith("/token"):
+        parsed = urlparse(self.path)
+        path_only = parsed.path or "/"
+        query_suffix = ("?" + parsed.query) if parsed.query else ""
+
+        if path_only.startswith("/token") or path_only.startswith("/room-state"):
             return self._proxy_token()
+
+        if path_only in ("/", "/screen", "/index.html"):
+            self.path = "/screen-publisher.html" + query_suffix
+        elif path_only in ("/mobile", "/mobile.html", "/phone"):
+            # Map short paths to mobile-client.html but keep ?query (e.g. ?micMeter=1).
+            self.path = "/mobile-client.html" + query_suffix
+        else:
+            self.path = path_only + query_suffix
+
         self.directory = str(SRC_DIR)
         return super().do_GET()
 
