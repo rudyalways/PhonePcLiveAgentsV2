@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import '../config/app_config.dart';
 import '../controllers/connect_controller.dart';
 
 class ConnectPage extends GetView<ConnectController> {
@@ -55,7 +56,7 @@ class ConnectPage extends GetView<ConnectController> {
                     TextField(
                       controller: controller.serverUrlController,
                       style: const TextStyle(color: Colors.white),
-                      decoration: _inputDecoration('Server Address', '192.168.1.100:8080'),
+                      decoration: _inputDecoration('Server Address', AppConfig.serverAddressHint),
                       keyboardType: TextInputType.url,
                       textInputAction: TextInputAction.next,
                       autocorrect: false,

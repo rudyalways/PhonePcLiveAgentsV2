@@ -25,8 +25,8 @@ Use your phone to voice-control your PC through AI. Speak into your phone's brow
                                    └──────────────┘
 ```
 
-1. **PC** opens `https://<local-ip>:8080/` — shares screen to the LiveKit room
-2. **Phone** uses the Flutter app (or `https://<local-ip>:8080/mobile`) — joins the room, sends mic audio, sees PC screen
+1. **PC** opens `https://<local-ip>:7081/` — publishes screen to the LiveKit room (or `http://<local-ip>:7080/` for the Sutando voice web UI)
+2. **Phone** uses the Flutter app (default server port `7081`) or `https://<local-ip>:7081/mobile` in the browser — joins the room, sends mic audio, sees PC screen
 3. **Agent** subscribes to the phone's audio, sends it to a Realtime AI model (Qwen, Gemini, or OpenAI), publishes TTS audio back to the room
 4. The AI model can call tools: open apps, press keys, type text, describe screen, or delegate complex tasks to a Claude Code backend
 
@@ -92,11 +92,11 @@ On first run, this automatically creates a Python virtual environment (`.venv-li
 
 This starts all services in the background:
 - **Token server** (port 7850) — JWT authentication
-- **Screen publisher server** (port 8081) — HTTPS web server + token proxy
+- **Screen publisher server** (port 7081) — HTTPS web server + token proxy
 - **Mobile control server** (port 7901) — Remote control API
 - **Screen capture server** (port 7900) — HTTP `/capture` for agents and tools
 - **Pipeline trace** (port 7902) — Pipeline Trace UI
-- **AI agent** (port 8082) — Speech processing via Realtime AI model
+- **AI agent** (port 7082) — LiveKit worker + speech / Realtime AI
 - **sutando-core** — Task processing engine (auto-starts if not running)
 
 Logs are written to `logs/`. 
@@ -118,8 +118,8 @@ bash src/deploy.sh --logs
 
 ### 4. Connect
 
-1. On your **PC browser**, open `https://localhost:8081/` — click "Publish Screen" to share your screen
-2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:8081/mobile` in the browser — tap "Connect"
+1. On your **PC browser**, open `https://localhost:7081/` — click "Publish Screen" to share your screen
+2. On your **phone**, use the Flutter app (recommended) or open `https://<pc-local-ip>:7081/mobile` in the browser — tap "Connect"
 3. Speak to your phone — the AI agent will respond and execute commands on your PC
 
 > Accept the self-signed certificate warning on both devices. HTTPS is required for WebRTC microphone access.
@@ -156,7 +156,7 @@ flutter run          # connected device or emulator
 src/
 ├── livekit-agent.py            # AI agent — speech processing, tool execution, Qwen compat patches
 ├── livekit-token-server.py     # JWT token server for LiveKit room access (port 7850)
-├── screen-publisher-server.py  # HTTPS server serving web clients + token proxy (port 8080)
+├── screen-publisher-server.py  # HTTPS server serving web clients + token proxy (port 7081)
 ├── screen-publisher.html       # PC client — captures and publishes screen to LiveKit room
 ├── mobile-client.html          # Phone client (web fallback) — mic input, screen view, audio playback
 ├── start-livekit.sh            # One-command launcher for all three services
@@ -208,7 +208,9 @@ Screen and browser preference: for "what's on my screen" or logged-in sites, use
 | `REALTIME_MODEL` | per-provider | Override the default model |
 | `REALTIME_VOICE` | per-provider | TTS voice name |
 | `TOKEN_SERVER_PORT` | `7850` | Token server port |
-| `CLIENT_PORT` | `8080` | Web client HTTPS port |
+| `CLIENT_PORT` | `7081` | Screen publisher HTTPS port (`screen-publisher-server.py`) |
+| `PORT` | `7980` | Voice agent WebSocket / browser WS to voice session |
+| `LIVEKIT_WORKER_PORT` | `7082` | Python LiveKit agent worker HTTP health/bind port |
 
 ## Qwen compatibility
 

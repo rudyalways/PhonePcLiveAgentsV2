@@ -5,7 +5,7 @@ Usage:
     python3 src/dm-result.py "Result text here"
     python3 src/dm-result.py --file results/task-123.txt
 
-Checks http://localhost:8080/sse-status for voiceConnected.
+Checks http://localhost:7080/sse-status for voiceConnected.
 If voice is connected, does nothing (voice agent will speak the result).
 If voice is disconnected, sends the result to the owner's Discord DM.
 
@@ -33,7 +33,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ACCESS_JSON = Path.home() / ".claude" / "channels" / "discord" / "access.json"
-SSE_STATUS_URL = "http://localhost:8080/sse-status"
+SSE_STATUS_URL = "http://localhost:7080/sse-status"
 
 
 def voice_connected() -> bool:

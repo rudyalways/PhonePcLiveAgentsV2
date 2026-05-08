@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 // values. Prevents regression of the avatar-animation chain that shipped
 // 2026-04-17 (web-client step 1 of 3, no test coverage at merge time).
 
-const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
+const PORT = 17081; // isolated from dev stack (7080 web-client + 7980 voice-agent)
 
 // Test spawns the same web-client.ts the prod server uses. web-client reads
 // `../core-status.json` via the #443 coreIsRunning fallback, so a mid-pass
@@ -59,7 +59,7 @@ describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 			'npx',
 			['tsx', 'src/web-client.ts'],
 			{
-				env: { ...process.env, CLIENT_PORT: String(PORT), PORT: '19900', CLIENT_HOST: '127.0.0.1' },
+				env: { ...process.env, CLIENT_PORT: String(PORT), PORT: '17980', CLIENT_HOST: '127.0.0.1' },
 				// 'ignore' prevents the pipe buffer from filling in CI (stdout isn't drained),
 				// which would block the child and cause the /sse-status poll to time out.
 				stdio: 'ignore',

@@ -223,7 +223,7 @@ interface CallSession {
 const activeCalls = new Map<string, CallSession>();
 let activePlaybackProc: ChildProcess | null = null; // ffmpeg process for /play-audio streaming
 const pendingMeetingJoins = new Set<string>(); // prevents duplicate near-simultaneous joins
-let nextBodhiPort = 9910; // Dynamic ports for per-call VoiceSessions
+let nextBodhiPort = 7910; // Dynamic ports for per-call VoiceSessions (<8000)
 
 // --- Goodbye detection ---
 // Phone calls need explicit hangup (unlike browser which just disconnects).

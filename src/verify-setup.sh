@@ -124,7 +124,7 @@ done
 echo ""
 echo "Services (if running):"
 
-for port_name in "9900:voice-agent" "8080:web-client" "7951:dashboard" "7950:agent-api"; do
+for port_name in "7980:voice-agent" "7080:web-client" "7951:dashboard" "7950:agent-api"; do
   port="${port_name%%:*}"
   name="${port_name##*:}"
   if lsof -i :"$port" &>/dev/null; then

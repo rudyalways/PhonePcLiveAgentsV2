@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../config/app_config.dart';
 import '../services/token_service.dart';
 import '../app/routes.dart';
 
@@ -25,6 +26,8 @@ class ConnectController extends GetxController {
     final savedUser = prefs.getString('username');
     if (savedUrl != null && savedUrl.isNotEmpty) {
       serverUrlController.text = savedUrl;
+    } else {
+      serverUrlController.text = AppConfig.defaultHttpsServerUrl;
     }
     if (savedUser != null && savedUser.isNotEmpty) {
       usernameController.text = savedUser;

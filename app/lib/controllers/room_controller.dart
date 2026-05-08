@@ -53,7 +53,7 @@ class RoomController extends GetxController with WidgetsBindingObserver {
       return;
     }
 
-    // Extract host from serverUrl (e.g. "https://192.168.1.100:8080" → "192.168.1.100")
+    // Extract host from serverUrl (HTTPS screen publisher; default port 7081 — see AppConfig).
     final uri = Uri.tryParse(serverUrl);
     if (uri == null || uri.host.isEmpty) {
       debugPrint('[SUTANDO] Input control: invalid serverUrl=$serverUrl');

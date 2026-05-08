@@ -127,7 +127,7 @@ wait_for_port_service() {
 wait_for_livekit_agent() {
   for _ in $(seq 1 80); do
     if pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1 &&
-       lsof -nP -iTCP:8082 -sTCP:LISTEN > /dev/null 2>&1; then
+       lsof -nP -iTCP:7082 -sTCP:LISTEN > /dev/null 2>&1; then
       return 0
     fi
     sleep 0.25
@@ -480,23 +480,23 @@ echo ""
 python3 "$REPO/src/archive-stale-results.py" 2>/dev/null || true
 
 echo "Starting voice services..."
-if ! lsof -i :9900 -sTCP:LISTEN > /dev/null 2>&1; then
-  PORT=9900 HOST=0.0.0.0 npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
-  echo "  ✓ voice agent / result watcher (port 9900)"
+if ! lsof -i :7980 -sTCP:LISTEN > /dev/null 2>&1; then
+  PORT=7980 HOST=0.0.0.0 npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
+  echo "  ✓ voice agent / result watcher (port 7980)"
 else
   echo "  ✓ voice agent / result watcher (already running)"
 fi
-wait_for_port_service 9900 "voice agent / result watcher" "voice-agent.ts" "logs/voice-agent.log" || exit 1
+wait_for_port_service 7980 "voice agent / result watcher" "voice-agent.ts" "logs/voice-agent.log" || exit 1
 
-if ! lsof -i :8080 -sTCP:LISTEN > /dev/null 2>&1; then
-  CLIENT_PORT=8080 PORT=9900 npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
-  echo "  ✓ web client (port 8080)"
+if ! lsof -i :7080 -sTCP:LISTEN > /dev/null 2>&1; then
+  CLIENT_PORT=7080 PORT=7980 npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
+  echo "  ✓ web client (port 7080)"
 else
   echo "  ✓ web client (already running)"
 fi
-wait_for_port_service 8080 "web client" "web-client.ts" "logs/web-client.log" || exit 1
+wait_for_port_service 7080 "web client" "web-client.ts" "logs/web-client.log" || exit 1
 
-export CLIENT_PORT="${CLIENT_PORT:-8081}"  # Avoid conflict with startup.sh's web-client (port 8080)
+export CLIENT_PORT="${CLIENT_PORT:-7081}"  # HTTPS screen/mobile publisher (web UI uses 7080)
 echo ""
 
 echo "Starting LiveKit services..."
@@ -541,15 +541,15 @@ wait_for_livekit_agent || exit 1
 sleep 3
 echo ""
 echo "Verifying services..."
-VERIFY_PORTS="7850:token-server 8081:screen-publisher 7901:mobile-control 7900:screen-capture 7902:pipeline-trace"
+VERIFY_PORTS="7850:token-server 7081:screen-publisher 7901:mobile-control 7900:screen-capture 7902:pipeline-trace"
 all_ok=1
 verify_port_service 7850 "token-server" "livekit-token-server.py" "logs/livekit-token-server.log"
 verify_port_service "$CLIENT_PORT" "screen-publisher" "screen-publisher-server.py" "logs/screen-publisher-server.log"
 verify_port_service 7901 "mobile-control" "mobile-control-server.py" "logs/mobile-control.log"
 verify_port_service 7900 "screen-capture" "screen-capture-server.py" "logs/screen-capture.log"
 verify_port_service 7902 "pipeline-trace" "pipeline-trace.py" "logs/pipeline-trace.log"
-verify_port_service 9900 "voice-agent / result watcher" "voice-agent.ts" "logs/voice-agent.log"
-verify_port_service 8080 "web-client" "web-client.ts" "logs/web-client.log"
+verify_port_service 7980 "voice-agent / result watcher" "voice-agent.ts" "logs/voice-agent.log"
+verify_port_service 7080 "web-client" "web-client.ts" "logs/web-client.log"
 
 # Check agent process (doesn't bind a port)
 if pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1; then

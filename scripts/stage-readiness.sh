@@ -6,7 +6,7 @@
 # window before going on screen — no interactive prompts, finishes in <20s.
 #
 # Checks (all in terms of "does Sutando work RIGHT NOW for the talk?"):
-#   voice-agent:       port 9900 responsive, recent Health tick, client can connect
+#   voice-agent:       port 7980 responsive, recent Health tick, client can connect
 #   bodhi FATAL:       0× CLOSED→RECONNECTING in the last 10 min (post-#409 expected)
 #   conversation:      port 3100 /health endpoint returns ok
 #   ngrok tunnel:      query local ngrok agent API (:4040), match by public_url
@@ -44,16 +44,16 @@ fail() { printf "  \033[31m✗ FAIL\033[0m  %-${WIDTH}s %s\n" "$1" "$2"; FAIL=$(
 [ $QUIET -eq 0 ] && echo "━━━ Sutando Stage Readiness ━━━"
 
 # 1) voice-agent
-if lsof -iTCP:9900 -sTCP:LISTEN >/dev/null 2>&1; then
+if lsof -iTCP:7980 -sTCP:LISTEN >/dev/null 2>&1; then
     # Check for a Health tick in the last 60s.
     VLOG="$REPO/logs/voice-agent.log"
     if [ -f "$VLOG" ] && [ $(($(date +%s) - $(stat_mtime "$VLOG"))) -lt 60 ]; then
-        pass "voice-agent" "port 9900 listening, log fresh (<60s)"
+        pass "voice-agent" "port 7980 listening, log fresh (<60s)"
     else
-        warn "voice-agent" "port 9900 listening but log stale"
+        warn "voice-agent" "port 7980 listening but log stale"
     fi
 else
-    fail "voice-agent" "port 9900 not listening — start with 'npx tsx src/voice-agent.ts'"
+    fail "voice-agent" "port 7980 not listening — start with 'npx tsx src/voice-agent.ts'"
 fi
 
 # 2) bodhi FATAL count (since last voice-agent restart)

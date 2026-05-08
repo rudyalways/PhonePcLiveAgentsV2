@@ -102,7 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func isVoiceConnected() -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
-        proc.arguments = ["-i", ":9900", "-sTCP:ESTABLISHED"]
+        proc.arguments = ["-i", ":7980", "-sTCP:ESTABLISHED"]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
@@ -348,7 +348,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func pollMuteState() {
-        guard let url = URL(string: "http://localhost:8080/sse-status") else { return }
+        guard let url = URL(string: "http://localhost:7080/sse-status") else { return }
         let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             guard let data = data, error == nil,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
@@ -800,13 +800,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func httpToggle(endpoint: String) {
-        guard let url = URL(string: "http://localhost:8080/\(endpoint)") else { return }
+        guard let url = URL(string: "http://localhost:7080/\(endpoint)") else { return }
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
             if let error = error {
                 NSLog("Sutando: \(endpoint) failed: \(error.localizedDescription)")
                 // Fallback: open the web UI so user can toggle manually
                 DispatchQueue.main.async {
-                    self.notify("Sutando", "Web client not reachable — open localhost:8080")
+                    self.notify("Sutando", "Web client not reachable — open localhost:7080")
                 }
                 return
             }
@@ -820,7 +820,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openWebUI() {
         NSLog("Sutando: openWebUI called")
-        // Switch to existing localhost:8080 tab or open new one
+        // Switch to existing localhost:7080 tab or open new one
         let script = NSAppleScript(source: """
         tell application "Google Chrome"
             activate
@@ -828,7 +828,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             repeat with w in windows
                 set tabList to tabs of w
                 repeat with i from 1 to count of tabList
-                    if URL of item i of tabList contains "localhost:8080" then
+                    if URL of item i of tabList contains "localhost:7080" then
                         set active tab index of w to i
                         set index of w to 1
                         set found to true
@@ -838,7 +838,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if found then exit repeat
             end repeat
             if not found then
-                open location "http://localhost:8080"
+                open location "http://localhost:7080"
             end if
         end tell
         """)
@@ -850,7 +850,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 notify("Sutando", "Open Web UI needs: System Settings → Privacy & Security → Automation → allow Sutando to control Chrome")
             } else {
                 // Fallback: just open the URL directly
-                if let url = URL(string: "http://localhost:8080") {
+                if let url = URL(string: "http://localhost:7080") {
                     NSWorkspace.shared.open(url)
                 }
             }

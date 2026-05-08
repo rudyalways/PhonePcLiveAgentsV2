@@ -1,10 +1,10 @@
 #!/bin/bash
 # BUG-318: Verify voice metrics disconnect bug (issue #319)
-# Requires: voice agent running on port 9900
+# Requires: voice agent running on port 7980
 # Usage: bash scripts/verify-voice-metrics-bug.sh
 
 METRICS=data/voice-metrics.jsonl
-PORT=9900
+PORT=7980
 
 # Count lines before
 BEFORE=$(wc -l < "$METRICS" 2>/dev/null || echo 0)

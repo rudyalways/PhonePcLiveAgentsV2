@@ -8,7 +8,7 @@ Usage:
   python3 src/health-check.py --fix      # attempt to fix issues
 
 Checks:
-  - Voice agent (port 9900), web client, agent API, dashboard
+  - Voice agent (port 7980), web client, agent API, dashboard
   - Critical files (CLAUDE.md, build_log.md, ACTIVITY.md)
   - Memory system (MEMORY.md index, key memory files)
   - Notes directory
@@ -503,7 +503,7 @@ def run_all_checks() -> list[dict]:
     checks = []
 
     # Core services (required)
-    voice_check = check_port(9900, "voice-agent")
+    voice_check = check_port(7980, "voice-agent")
     if voice_check["status"] == "ok":
         mark_stale_if_outdated(voice_check, REPO_DIR / "src" / "voice-agent.ts", "voice-agent.ts")
     checks.append(voice_check)
@@ -511,7 +511,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_voice_transport(voice_check))
     checks.append(check_bodhi_dist())
 
-    web_check = check_port(8080, "web-client")
+    web_check = check_port(7080, "web-client")
     if web_check["status"] == "ok":
         mark_stale_if_outdated(web_check, REPO_DIR / "src" / "web-client.ts", "web-client.ts")
     checks.append(web_check)

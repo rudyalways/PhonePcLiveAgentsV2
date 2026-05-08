@@ -18,7 +18,7 @@ DISCORD_TOKEN=$(grep DISCORD_BOT_TOKEN ~/.claude/channels/discord/.env 2>/dev/nu
 DISCORD_USER_ID=$(python3 -c "import json; print(json.load(open('$HOME/.claude/channels/discord/access.json')).get('allowFrom',[''])[0])" 2>/dev/null)
 
 # 1. Voice — write proactive message if voice agent is up
-if curl -s -o /dev/null -w "%{http_code}" http://localhost:9900 2>/dev/null | grep -q "426"; then
+if curl -s -o /dev/null -w "%{http_code}" http://localhost:7980 2>/dev/null | grep -q "426"; then
   echo "$MSG" > "$REPO_DIR/results/proactive-$TS.txt"
 fi
 

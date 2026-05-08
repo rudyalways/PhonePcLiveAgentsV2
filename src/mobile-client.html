@@ -30,6 +30,11 @@
   #disconnect-btn { background: #dc2626; color: white; display: none; }
   #mute-btn { background: #444; color: white; display: none; }
   #mute-btn.muted { background: #b91c1c; }
+  #enable-audio-btn {
+    display: none; background: #b45309; color: #fff; border: 2px solid #f59e0b;
+    max-width: 320px; line-height: 1.35;
+  }
+  #enable-audio-btn:active { filter: brightness(1.08); }
   #screen-view {
     width: 100%; max-width: 100vw; aspect-ratio: 16/9;
     background: #111; border-radius: 8px; border: 1px solid #2a2a4e;
@@ -61,6 +66,7 @@
 
 <div id="main-ui">
   <div id="status" class="status">Connecting...</div>
+  <button type="button" id="enable-audio-btn">Enable audio — tap to hear</button>
   <video id="screen-view" autoplay playsinline></video>
   <div id="participants" class="participants"></div>
   <div class="controls">
@@ -70,7 +76,9 @@
 </div>
 
 <script type="module">
-  // Optional: ?micMeter=1 → Console mic level. Also: chrome://webrtc-internals (Chrome) for graphs.
+  // Optional URL flags on /mobile?... :
+  //   micMeter=1   — mic RMS in console
+  //   audioDebug=1 — verbose remote TTS trace (startAudio, AudioContext, subscriptions)
   import {
     Room,
     RoomEvent,
@@ -80,6 +88,13 @@
 
   // Token endpoint: same origin (proxied by screen-publisher-server)
   const TOKEN_SERVER = `${window.location.origin}`;
+  const PAGE_PARAMS = new URLSearchParams(window.location.search);
+  const AUDIO_DEBUG = PAGE_PARAMS.get('audioDebug') === '1' || PAGE_PARAMS.get('audioDebug') === 'true';
+
+  /** Verbose only (?audioDebug=1). */
+  function audioDbg(...args) {
+    if (AUDIO_DEBUG) console.log('[LiveKit-audio]', ...args);
+  }
 
   const loginForm = document.getElementById('login-form');
   const mainUi = document.getElementById('main-ui');
@@ -89,6 +104,7 @@
   const screenView = document.getElementById('screen-view');
   const participantsEl = document.getElementById('participants');
   const statusEl = document.getElementById('status');
+  const enableAudioBtn = document.getElementById('enable-audio-btn');
   const loginError = document.getElementById('login-error');
   const usernameInput = document.getElementById('username-input');
   const secretInput = document.getElementById('secret-input');
@@ -169,6 +185,39 @@
   function setStatus(text, cls) {
     statusEl.textContent = text;
     statusEl.className = `status ${cls || ''}`;
+  }
+
+  /** LiveKit: unlock remote audio (browser autoplay). Safe to call after connect / reconnect; may still need user tap. */
+  function refreshEnableAudioButton() {
+    if (!enableAudioBtn) return;
+    if (!room) {
+      enableAudioBtn.style.display = 'none';
+      return;
+    }
+    enableAudioBtn.style.display = room.canPlaybackAudio ? 'none' : 'block';
+  }
+
+  async function unlockRemoteAudio(hint) {
+    if (!room) return;
+    const tag = hint ? ` ${hint}` : '';
+    audioDbg('startAudio attempt' + tag, {
+      audioContextState: connectAudioCtx?.state,
+      canPlaybackAudio: room.canPlaybackAudio,
+    });
+    try {
+      if (connectAudioCtx && connectAudioCtx.state === 'suspended') {
+        await connectAudioCtx.resume();
+        audioDbg('AudioContext.resume →', connectAudioCtx.state);
+      }
+      await room.startAudio();
+      audioDbg('room.startAudio() settled' + tag, { canPlaybackAudio: room.canPlaybackAudio });
+    } catch (e) {
+      console.warn('[LiveKit] startAudio failed:', e?.message || e);
+    }
+    refreshEnableAudioButton();
+    if (!AUDIO_DEBUG && room && !room.canPlaybackAudio) {
+      console.info('[LiveKit-audio] Playback still blocked after startAudio' + tag + ' — use “Enable audio — tap to hear”');
+    }
   }
 
   function updateParticipants() {
@@ -274,6 +323,7 @@
     connectBtn.disabled = false;
     disconnectBtn.style.display = hideUi ? 'none' : 'block';
     muteBtn.style.display = hideUi ? 'none' : 'block';
+    if (enableAudioBtn) enableAudioBtn.style.display = 'none';
     muteBtn.textContent = 'Mute';
     muteBtn.classList.remove('muted');
     participantsEl.textContent = '';
@@ -298,7 +348,21 @@
           el.setAttribute('playsinline', '');
           el.volume = 1.0;
           document.body.appendChild(el);
-          el.play().catch(e => console.warn('[LiveKit] Audio play blocked:', e));
+          audioDbg('remote audio element attached', {
+            from: participant.identity,
+            trackSid: pub?.trackSid,
+            publication: pub?.trackName,
+            muted: pub?.isMuted,
+          });
+          el.play()
+            .then(() => {
+              console.info('[LiveKit-audio] playing remote audio from', participant.identity, pub?.trackSid || '');
+              audioDbg('HTMLAudioElement.play resolved', { paused: el.paused, muted: el.muted });
+            })
+            .catch((e) => {
+              console.warn('[LiveKit] Audio play blocked:', e?.message || e, { identity: participant.identity });
+              refreshEnableAudioButton();
+            });
         }
       } catch (e) {
         console.warn('[LiveKit] TrackSubscribed attach failed:', e?.message || e);
@@ -317,6 +381,14 @@
       reconnectAttempt = 0;
       updateParticipants();
       startRoomStateMonitor();
+      unlockRemoteAudio('room:connected');
+    });
+
+    currentRoom.on(RoomEvent.AudioPlaybackStatusChanged, (canPlay) => {
+      console.info('[LiveKit-audio] browser allows remote playback:', canPlay === true, {
+        showEnableButton: !canPlay,
+      });
+      refreshEnableAudioButton();
     });
 
     if (RoomEvent.Reconnecting) {
@@ -330,6 +402,7 @@
         if (desiredConnected) setStatus('Connected', 'connected');
         updateParticipants();
         startRoomStateMonitor();
+        unlockRemoteAudio('room:reconnected');
       });
     }
 
@@ -399,6 +472,13 @@
     setStatus('Connected', 'connected');
     updateParticipants();
     startRoomStateMonitor();
+    await unlockRemoteAudio('post-publish');
+    refreshEnableAudioButton();
+    console.info('[LiveKit-audio] session ready', {
+      canPlaybackAudio: room.canPlaybackAudio,
+      audioContextState: connectAudioCtx?.state,
+      audioDebug: AUDIO_DEBUG,
+    });
   }
 
   async function connect() {
@@ -455,6 +535,11 @@
   });
   disconnectBtn.onclick = disconnect;
   muteBtn.onclick = toggleMute;
+  if (enableAudioBtn) {
+    enableAudioBtn.onclick = () => {
+      unlockRemoteAudio('user:enable-audio-tap').catch((e) => console.warn('[LiveKit] unlock click failed:', e));
+    };
+  }
 </script>
 
 </body>

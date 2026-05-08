@@ -8,7 +8,7 @@
  *   1. Copy .env.example to .env and fill in keys
  *   2. pnpm start
  *   3. In another terminal: pnpm tsx ../bodhi_realtime_agent/examples/web-client.ts
- *   4. Open http://localhost:8080 in Chrome and click Connect
+ *   4. Open http://localhost:7080 in Chrome and click Connect
  *
  * Environment:
  *   GEMINI_API_KEY       — Required: Google AI Studio API key (text LLM + vision + STT fallback)
@@ -17,7 +17,7 @@
  *                          (free-tier eligible) from paid-tier spend on a single key.
  *   ANTHROPIC_API_KEY   — Optional: only needed if not using claude CLI subscription auth
  *   WORKSPACE_DIR       — Claude's working directory (default: sutando/)
- *   PORT                — WebSocket port (default: 9900)
+ *   PORT                — WebSocket port (default: 7980)
  *   HOST                — Bind address (default: 0.0.0.0)
  */
 
@@ -90,7 +90,7 @@ if (process.env.GEMINI_VOICE_API_KEY) {
 	assertGeminiKey('GEMINI_VOICE_API_KEY', process.env.GEMINI_VOICE_API_KEY);
 }
 
-const PORT = Number(process.env.PORT) || 9900;
+const PORT = Number(process.env.PORT) || 7980;
 const HOST = process.env.HOST || '0.0.0.0';
 // Default to sutando/ so Claude Code subprocess picks up CLAUDE.md automatically
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || new URL('..', import.meta.url).pathname;
@@ -677,7 +677,7 @@ async function main() {
 				// switch to the slow-deep-swing signature. `source=tool` pins
 				// this to the tool track so the browser's 1s poll can't
 				// overwrite it back to listening.
-				fetch(`http://localhost:8080/mute-state?state=working&source=tool&label=${encodeURIComponent(e.toolName)}`).catch(() => {});
+				fetch(`http://localhost:7080/mute-state?state=working&source=tool&label=${encodeURIComponent(e.toolName)}`).catch(() => {});
 				// Auto-switch meeting mode on join/dismiss
 				if (['summon', 'join_zoom', 'join_gmeet'].includes(e.toolName)) {
 					meetingActive = true;
@@ -693,7 +693,7 @@ async function main() {
 				voiceEvents.push({ event: `tool_result:${toolName}:${e.durationMs}ms`, timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Tool] result: ${toolName} (${e.status}, ${e.durationMs}ms)`);
 				// Clear the tool track; browser track takes over immediately.
-				fetch('http://localhost:8080/mute-state?state=idle&source=tool').catch(() => {});
+				fetch('http://localhost:7080/mute-state?state=idle&source=tool').catch(() => {});
 			},
 			onSubagentStep: (e) => console.log(`${ts()} [Subagent] ${e.subagentName} #${e.stepNumber} [${e.toolCalls.join(',')}]`),
 			onError: (e) => {
@@ -1015,7 +1015,7 @@ async function main() {
 	console.log();
 	console.log('Start the web client:');
 	console.log('  pnpm tsx ../bodhi_realtime_agent/examples/web-client.ts');
-	console.log('Then open http://localhost:8080 and click Connect.');
+	console.log('Then open http://localhost:7080 and click Connect.');
 	console.log();
 	console.log('Try saying:');
 	console.log("  - 'What's on my schedule today?'");

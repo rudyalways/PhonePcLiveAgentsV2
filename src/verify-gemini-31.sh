@@ -144,7 +144,7 @@ echo ""
 echo "voice-agent transport state:"
 if python3 src/health-check.py --quiet 2>&1 | grep -q "voice-transport .*ok"; then
   pass "voice-transport probe: no recent abnormal closes"
-elif lsof -iTCP:9900 -sTCP:LISTEN >/dev/null 2>&1; then
+elif lsof -iTCP:7980 -sTCP:LISTEN >/dev/null 2>&1; then
   warn "voice-transport probe not green — check logs/voice-agent.log for recent 1007/1011/1006 close codes"
 else
   warn "voice-agent not running — start it before testing 3.1"
@@ -171,7 +171,7 @@ echo "       VOICE_NATIVE_AUDIO_MODEL=gemini-3.1-flash-live-preview"
 echo "       VOICE_GOOGLE_SEARCH=false"
 echo "  2. Restart voice-agent:"
 echo "     launchctl kickstart -k gui/\$(id -u)/com.sutando.voice-agent"
-echo "  3. Open http://localhost:8080, connect voice"
+echo "  3. Open http://localhost:7080, connect voice"
 echo "  4. Test audio-in: say 'hello'"
 echo "  5. Test tool call: say 'what time is it'"
 echo "  6. Test goodbye close: say 'bye' → should hear Gemini say 'Goodbye' and session closes cleanly"

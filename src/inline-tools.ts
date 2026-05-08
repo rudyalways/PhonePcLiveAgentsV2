@@ -337,7 +337,7 @@ export const toggleTasksTool: ToolDefinition = {
 			execSync(`osascript -e 'tell application "Google Chrome"
 				repeat with w in windows
 					repeat with t in tabs of w
-						if URL of t contains "localhost:8080" then
+						if URL of t contains "localhost:7080" then
 							execute t javascript "${js}"
 							return "ok"
 						end if

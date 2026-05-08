@@ -14,7 +14,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-PORT = int(os.environ.get("CLIENT_PORT", "8080"))
+PORT = int(os.environ.get("CLIENT_PORT", "7081"))
 TOKEN_PORT = int(os.environ.get("TOKEN_SERVER_PORT", "7850"))
 SRC_DIR = Path(__file__).resolve().parent
 STATE_DIR = SRC_DIR.parent / "state"

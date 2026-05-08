@@ -102,7 +102,7 @@ const TAB_ALIASES: Record<string, string> = {
 	'gmail': 'mail.google.com', 'email': 'mail.google.com', 'inbox': 'mail.google.com',
 	'calendar': 'calendar.google.com', 'gcal': 'calendar.google.com',
 	'twitter': 'x.com', 'x': 'x.com',
-	'dashboard': `localhost:${DASHBOARD_PORT}`, 'sutando': 'localhost:8080', 'web client': 'localhost:8080',
+	'dashboard': `localhost:${DASHBOARD_PORT}`, 'sutando': 'localhost:7080', 'web client': 'localhost:7080',
 	'gemini': 'gemini.google.com',
 };
 

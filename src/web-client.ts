@@ -4,7 +4,7 @@
  * Usage:
  *   1. Start the voice agent:  pnpm tsx examples/hello_world/agent.ts
  *   2. Start this client:      pnpm tsx examples/web-client.ts
- *   3. Open http://localhost:8080 in your browser
+ *   3. Open http://localhost:7080 in your browser
  *   4. Click "Connect" and allow microphone access
  */
 
@@ -13,9 +13,9 @@ import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { readTmuxStatus } from './tmux-status.js';
 import { AGENT_API_PORT, DASHBOARD_PORT } from './agent-dashboard-ports.js';
 
-const HTTP_PORT = Number(process.env.CLIENT_PORT) || 8080;
+const HTTP_PORT = Number(process.env.CLIENT_PORT) || 7080;
 const HTTP_HOST = process.env.CLIENT_HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces for EC2
-const WS_PORT = Number(process.env.PORT) || 9900;
+const WS_PORT = Number(process.env.PORT) || 7980;
 const DEFAULT_WS_URL = `ws://localhost:${WS_PORT}`;
 
 const HTML = /* html */ `<!DOCTYPE html>
@@ -1584,7 +1584,7 @@ function connectWs() {
         addSystem('Still trying to connect. Common causes:');
         addSystem('1. GEMINI_API_KEY not set — edit .env and add your key from ai.google.dev');
         addSystem('2. Voice agent not running — run: bash src/startup.sh');
-        addSystem('3. Port 9900 blocked — check: lsof -i :9900');
+        addSystem('3. Port 7980 blocked — check: lsof -i :7980');
         addSystem('You can type commands below while reconnecting.');
         addSystem('<a href="https://discord.gg/uZHWXXmrCS" target="_blank" style="color:#5865F2">Ask for help on Discord</a> · <a href="https://github.com/sonichi/sutando/issues" target="_blank" style="color:#4ecca3">Report an issue</a> · <span style="color:#8899a6;cursor:pointer;text-decoration:underline" onclick="copyLogs()">Copy logs</span>', true);
         setStatus('Reconnecting...', 'error');

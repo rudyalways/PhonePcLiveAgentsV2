@@ -316,7 +316,7 @@ def render_dashboard() -> str:
     cards.append(f"""<div class="card full">
 <h2>Quick Links</h2>
 <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px">
-<a href="http://localhost:8080" style="color:#4a8aaa;text-decoration:none">Voice UI :8080</a>
+<a href="http://localhost:7080" style="color:#4a8aaa;text-decoration:none">Voice UI :7080</a>
 <a href="http://localhost:7950" style="color:#4a8aaa;text-decoration:none">Task API :7950</a>
 <a href="http://localhost:7951" style="color:#4a8aaa;text-decoration:none">Dashboard :7951</a>
 <a href="http://localhost:7900" style="color:#4a8aaa;text-decoration:none">Screen Capture :7900</a>

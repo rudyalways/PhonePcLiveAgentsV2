@@ -50,7 +50,7 @@ Sutando 移动端远程控制功能允许用户通过手机 App 实时查看并�
 │  └─────────────────────────────────────────────────┘        │
 │                                                               │
 │  ┌─────────────────────────────────────────────────┐        │
-│  │ Screen Publisher Server (Port 8080, HTTPS)      │        │
+│  │ Screen Publisher Server (Port 7081, HTTPS)      │        │
 │  │ - 静态文件服务 (mobile.html)                     │        │
 │  │ - Token 代理                                     │        │
 │  └─────────────────────────────────────────────────┘        │
@@ -77,7 +77,7 @@ Sutando 移动端远程控制功能允许用户通过手机 App 实时查看并�
 - **认证**: 基于 `users.json` 的用户凭证验证
 
 #### 4. **Screen Publisher Server** (Python HTTPS)
-- **端口**: 8080
+- **端口**: 7081
 - **作用**: 提供 HTTPS 访问入口，代理 Token 请求
 - **证书**: 自签名证书 (开发环境)
 
@@ -371,7 +371,7 @@ bash src/start-livekit.sh
 这会启动：
 - Token Server (端口 7850)
 - Mobile Control Server (端口 7901)
-- Screen Publisher Server (端口 8080, HTTPS)
+- Screen Publisher Server (端口 7081, HTTPS)
 
 **方式 2: 单独启动**
 ```bash
@@ -420,7 +420,7 @@ flutter build ios  # iOS 发布包
    ```
 
 2. 在 App 中填写:
-   - 服务器地址: `https://192.168.1.100:8080`
+   - 服务器地址: `https://192.168.1.100:7081`
    - 用户名: `zqy`
    - 密码: `your_password`
 
@@ -429,7 +429,7 @@ flutter build ios  # iOS 发布包
 **远程连接 (通过 Tailscale VPN):**
 1. 在 Mac 和手机上安装 Tailscale
 2. 使用 Tailscale IP (例如 `100.x.x.x`)
-3. 服务器地址: `https://100.x.x.x:8080`
+3. 服务器地址: `https://100.x.x.x:7081`
 
 #### 3. 操作说明
 
@@ -460,7 +460,7 @@ flutter build ios  # iOS 发布包
 
 ### 1. 连接失败 (ERR_EMPTY_RESPONSE)
 
-**症状**: 浏览器访问 `https://192.168.1.x:8080/mobile` 显示 ERR_EMPTY_RESPONSE
+**症状**: 浏览器访问 `https://192.168.1.x:7081/mobile` 显示 ERR_EMPTY_RESPONSE
 
 **原因**: Token Server 超时或异常未捕获
 
