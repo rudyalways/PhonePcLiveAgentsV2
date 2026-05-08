@@ -333,7 +333,7 @@
     currentRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
       console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
       try {
-        const live = participant.sid ? currentRoom.remoteParticipants.get(participant.sid) : null;
+        const live = participant.identity ? currentRoom.remoteParticipants.get(participant.identity) : null;
         if (!live) {
           console.warn('[LiveKit] Skipping track attach — participant no longer in room', participant.sid);
           return;
