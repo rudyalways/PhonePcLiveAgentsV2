@@ -1,9 +1,11 @@
 #!/bin/bash
 # Manage all LiveKit services (start / stop / restart).
 # Usage:
-#   bash src/deploy.sh            # clean restart all services
-#   bash src/deploy.sh --stop     # stop all services
-#   bash src/deploy.sh --restart  # same as default: clean restart all services
+#   bash src/deploy.sh                         # clean restart all services
+#   bash src/deploy.sh --stop_service          # LiveKit / voice / web stack only
+#   bash src/deploy.sh --stop_core_and_background  # sutando-core (tmux + agent) + task watchers only
+#   bash src/deploy.sh --stop                  # --stop_service then --stop_core_and_background
+#   bash src/deploy.sh --restart               # same as default: clean restart all services
 # Add user: python3 src/add-user.py <username> <secret>
 
 set -e  # Exit on error
@@ -177,7 +179,47 @@ verify_port_service() {
 
 # ── Stop ──────────────────────────────────────────────────────────────────────
 
-do_stop() {
+# Returns 0 if watch-tasks stream, tmux sutando-core, and related PIDs are gone.
+verify_core_background_clear() {
+  local socket="/tmp/sutando-tmux.sock"
+  local fail=0
+  echo "After —"
+  if [ -n "$(process_pids "watch-tasks-stream.sh")" ]; then
+    echo "  ✗ watch-tasks stream: still running"
+    fail=1
+  else
+    echo "  ✓ watch-tasks stream: clear"
+  fi
+  if [ -n "$(process_pids "watch-tasks.sh")" ]; then
+    echo "  ✗ watch-tasks (poll): still running"
+    fail=1
+  else
+    echo "  ✓ watch-tasks (poll): clear"
+  fi
+  if command -v tmux > /dev/null 2>&1 && [ -S "$socket" ] &&
+     tmux -S "$socket" has-session -t sutando-core 2>/dev/null; then
+    echo "  ✗ tmux sutando-core: session still exists"
+    fail=1
+  else
+    echo "  ✓ tmux sutando-core: no session"
+  fi
+  if [ -n "$(process_pids "claude --name sutando-core")" ]; then
+    echo "  ✗ claude sutando-core: still running"
+    fail=1
+  else
+    echo "  ✓ claude sutando-core: clear"
+  fi
+  if [ -n "$(process_pids "mcp-server-macos-use")" ]; then
+    echo "  ✗ macOS GUI control MCP: still running"
+    fail=1
+  else
+    echo "  ✓ macOS GUI control MCP: clear"
+  fi
+  return "$fail"
+}
+
+do_stop_service() {
+  echo "Stopping LiveKit / voice / web services..."
   stop_process_strict "AI agent" "src/livekit-agent.py start"
   stop_process_strict "token server" "livekit-token-server.py"
   stop_process_strict "screen publisher server" "screen-publisher-server.py"
@@ -186,14 +228,109 @@ do_stop() {
   stop_process_strict "screen capture server" "screen-capture-server.py"
   stop_process_strict "voice agent / result watcher" "src/voice-agent.ts"
   stop_process_strict "web client" "src/web-client.ts"
+  echo "LiveKit / voice / web services stopped."
+}
+
+do_stop() {
+  do_stop_service
+  echo ""
+  do_stop_core_and_background
+  echo ""
+  echo "All Sutando services stopped."
+}
+
+do_stop_core_and_background() {
+  local socket="/tmp/sutando-tmux.sock"
+  local had_any=0
+  local wt_pids cl_pids mcp_pids
+
+  echo "sutando-core + task watchers (LiveKit stack unchanged)"
+  echo ""
+  echo "Before —"
+  wt_pids="$(process_pids "watch-tasks-stream.sh")"
+  if [ -n "$wt_pids" ]; then
+    echo "  ◆ watch-tasks stream: running (pid(s): $(echo "$wt_pids" | tr '\n' ',' | sed 's/,$//'))"
+    had_any=1
+  else
+    echo "  ○ watch-tasks stream: not running"
+  fi
+
+  local wt_poll_pids
+  wt_poll_pids="$(process_pids "watch-tasks.sh")"
+  if [ -n "$wt_poll_pids" ]; then
+    echo "  ◆ watch-tasks (poll): running (pid(s): $(echo "$wt_poll_pids" | tr '\n' ',' | sed 's/,$//'))"
+    had_any=1
+  else
+    echo "  ○ watch-tasks (poll): not running"
+  fi
+
+  if command -v tmux > /dev/null 2>&1 && [ -S "$socket" ] &&
+     tmux -S "$socket" has-session -t sutando-core 2>/dev/null; then
+    echo "  ◆ tmux sutando-core: session present ($socket)"
+    had_any=1
+  elif [ -S "$socket" ]; then
+    echo "  ○ tmux sutando-core: no session sutando-core (socket still present)"
+  else
+    echo "  ○ tmux sutando-core: no server on $socket"
+  fi
+
+  cl_pids="$(process_pids "claude --name sutando-core")"
+  if [ -n "$cl_pids" ]; then
+    echo "  ◆ claude sutando-core: running (pid(s): $(echo "$cl_pids" | tr '\n' ',' | sed 's/,$//'))"
+    had_any=1
+  else
+    echo "  ○ claude sutando-core: not running"
+  fi
+
+  mcp_pids="$(process_pids "mcp-server-macos-use")"
+  if [ -n "$mcp_pids" ]; then
+    echo "  ◆ macOS GUI control MCP: running (pid(s): $(echo "$mcp_pids" | tr '\n' ',' | sed 's/,$//')) (stopped with sutando-core)"
+    had_any=1
+  else
+    echo "  ○ macOS GUI control MCP: not running"
+  fi
+
+  if [ "$had_any" -eq 0 ]; then
+    echo ""
+    echo "Hint: nothing matched — already idle (no stop needed)."
+    echo ""
+    if ! verify_core_background_clear; then
+      echo ""
+      echo "Unexpected: reported idle but verification failed — check the items above."
+      exit 1
+    fi
+    echo ""
+    echo "OK — verified idle."
+    return 0
+  fi
+
+  echo ""
+  echo "Stopping..."
   stop_process_strict "watch-tasks stream" "watch-tasks-stream.sh"
   stop_process_strict "watch-tasks" "watch-tasks.sh"
   stop_sutando_core
-  echo "All Sutando services stopped."
+  echo ""
+  if ! verify_core_background_clear; then
+    echo ""
+    echo "Stop incomplete — fix the items above (or run bash src/deploy.sh --stop)."
+    exit 1
+  fi
+  echo ""
+  echo "OK — sutando-core + task watchers stopped and verified."
 }
 
 if [ "$1" = "--stop" ]; then
   do_stop
+  exit 0
+fi
+
+if [ "$1" = "--stop_service" ]; then
+  do_stop_service
+  exit 0
+fi
+
+if [ "$1" = "--stop_core_and_background" ]; then
+  do_stop_core_and_background
   exit 0
 fi
 
@@ -222,7 +359,7 @@ elif [ "${1:-}" = "" ]; then
   echo "Clean restarting LiveKit services..."
 else
   echo "Unknown option: $1"
-  echo "Usage: bash src/deploy.sh [--restart|--stop|--logs]"
+  echo "Usage: bash src/deploy.sh [--restart|--stop|--stop_service|--stop_core_and_background|--logs]"
   exit 1
 fi
 echo ""
@@ -448,4 +585,4 @@ else
 fi
 
 echo ""
-echo "Done. Logs in logs/. Stop with: bash src/deploy.sh --stop"
+echo "Done. Logs in logs/. Stop with: bash src/deploy.sh --stop (--stop_service / --stop_core_and_background for partial stops)"

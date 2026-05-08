@@ -31,8 +31,10 @@ from urllib.parse import urlparse
 
 REPO_DIR = Path(__file__).resolve().parent.parent.parent.parent
 PORT = int(os.environ.get("PIPELINE_TRACE_PORT", "7902"))
-POLL_INTERVAL = 2.0
-MAX_TRACES = 100
+POLL_INTERVAL = float(os.environ.get("PIPELINE_TRACE_POLL_INTERVAL", "10"))
+MAX_TRACES = int(os.environ.get("PIPELINE_TRACE_MAX_TRACES", "20"))
+HEALTH_POLL_INTERVAL = float(os.environ.get("PIPELINE_TRACE_HEALTH_INTERVAL", "10"))
+CORE_PEEK_INTERVAL = float(os.environ.get("PIPELINE_TRACE_CORE_PEEK_INTERVAL", "10"))
 HEARTBEAT_INTERVAL = 15
 STALE_ACTIVE_TRACE_AFTER = 15 * 60
 
@@ -122,6 +124,22 @@ _INLINE_TOOL_PATTERNS = [
 ]
 
 
+def _parse_iso_timestamp(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _normalize_task_id(task_id: str) -> str:
+    task_id = (task_id or "").strip()
+    if task_id.isdigit():
+        return f"task-{task_id}"
+    return task_id
+
+
 def _detect_inline_tool(assistant_text: str) -> str:
     for pattern, tool_name in _INLINE_TOOL_PATTERNS:
         if pattern.match(assistant_text):
@@ -146,8 +164,7 @@ def parse_agent_log() -> list[AgentEvent]:
 
     events = []
     try:
-        # Read last 5000 lines for efficiency
-        lines = log_path.read_text(errors="replace").splitlines()[-5000:]
+        lines = log_path.read_text(errors="replace").splitlines()
     except Exception:
         return []
 
@@ -274,44 +291,29 @@ def _parse_task_file(path: Path) -> dict | None:
 
 
 def load_task_archive() -> dict[str, dict]:
-    """Load task archive files indexed by task_id."""
+    """Load live and archived task files indexed by task_id."""
     cache = {}
     tasks_dir = REPO_DIR / "tasks"
     if not tasks_dir.exists():
         return cache
-    for user_dir in tasks_dir.iterdir():
-        if not user_dir.is_dir():
-            continue
-        now = datetime.now()
-        archive_dir = user_dir / "archive" / now.strftime("%Y-%m")
-        if not archive_dir.exists():
-            continue
-        for f in archive_dir.glob("task-*.txt"):
-            fields = _parse_task_file(f)
-            if fields and "id" in fields:
-                cache[fields["id"]] = fields
+    for f in tasks_dir.rglob("task-*.txt"):
+        fields = _parse_task_file(f)
+        if fields and "id" in fields:
+            cache[fields["id"]] = fields
     return cache
 
 
 def load_result_archive() -> dict[str, str]:
-    """Load result archive files indexed by task_id."""
+    """Load live and archived result files indexed by task_id."""
     cache = {}
     results_dir = REPO_DIR / "results"
     if not results_dir.exists():
         return cache
-    for user_dir in results_dir.iterdir():
-        if not user_dir.is_dir():
-            continue
-        now = datetime.now()
-        archive_dir = user_dir / "archive" / now.strftime("%Y-%m")
-        if not archive_dir.exists():
-            continue
-        for f in archive_dir.glob("task-*.txt"):
-            task_id = f.stem
-            try:
-                cache[task_id] = f.read_text(errors="replace").strip()
-            except Exception:
-                pass
+    for f in results_dir.rglob("task-*.txt"):
+        try:
+            cache[f.stem] = f.read_text(errors="replace").strip()
+        except Exception:
+            pass
     return cache
 
 
@@ -342,6 +344,7 @@ _HEARTBEAT_PROCESS_MAP = {
 }
 
 _PIPELINE_LOG = REPO_DIR / "logs" / "pipeline-task-events.jsonl"
+_CORE_PEEK_CACHE: tuple[float, dict] = (0.0, {})
 
 
 def _pgrep(pattern: str) -> bool:
@@ -355,13 +358,125 @@ def _pgrep(pattern: str) -> bool:
         return False
 
 
+def _claude_core_pid() -> str:
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-fl", "claude.*sutando-core"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except Exception:
+        return ""
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        pid, cmd = parts
+        if "tmux " in cmd:
+            continue
+        return pid
+    return ""
+
+
+def _tmux_core_pane() -> str:
+    try:
+        proc = subprocess.run(
+            ["tmux", "-S", "/tmp/sutando-tmux.sock", "capture-pane", "-p", "-t", "sutando-core:0.0", "-S", "-80"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except Exception:
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _core_visible_state(pane: str) -> dict:
+    lines = [line.strip() for line in pane.splitlines() if line.strip()]
+    interesting = ""
+    tool = ""
+    for line in reversed(lines):
+        if any(token in line for token in ("Hatching", "Bash(", "Read ", "Update(", "Monitor(", "Running scheduled task", "Task file detected")):
+            interesting = line
+            break
+    for line in reversed(lines):
+        if any(token in line for token in ("Bash(", "Read ", "Update(", "Edit(", "Apply", "Monitor(")):
+            tool = line
+            break
+    state = "unknown"
+    if "Hatching" in interesting:
+        state = "thinking"
+    elif "Bash(" in interesting or "Read " in interesting or "Update(" in interesting or "Monitor(" in interesting:
+        state = "tool"
+    elif any("❯" in line for line in lines[-6:]):
+        state = "idle_or_prompt"
+    return {
+        "state": state,
+        "line": interesting[:180],
+        "tool": tool[:180],
+    }
+
+
+def read_core_peek() -> dict:
+    """Cheap, cached view of the visible sutando-core Claude session."""
+    global _CORE_PEEK_CACHE
+    now = time.time()
+    cached_ts, cached = _CORE_PEEK_CACHE
+    if now - cached_ts < CORE_PEEK_INTERVAL:
+        return cached
+
+    pid = _claude_core_pid()
+    pane = _tmux_core_pane()
+    visible = _core_visible_state(pane)
+    data = {
+        "alive": bool(pid),
+        "pid": pid,
+        "tmux_alive": bool(pane),
+        "state": visible["state"],
+        "line": visible["line"],
+        "tool": visible["tool"],
+        "cpu": "",
+        "mem": "",
+        "elapsed": "",
+        "https_connected": False,
+    }
+
+    if pid:
+        try:
+            ps = subprocess.run(
+                ["ps", "-p", pid, "-o", "etime=,%cpu=,%mem=,state="],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            parts = ps.stdout.split()
+            if len(parts) >= 4:
+                data["elapsed"], data["cpu"], data["mem"], data["proc_state"] = parts[:4]
+        except Exception:
+            pass
+        try:
+            lsof = subprocess.run(
+                ["lsof", "-nP", "-p", pid, "-iTCP"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            data["https_connected"] = "->" in lsof.stdout and ":443" in lsof.stdout and "ESTABLISHED" in lsof.stdout
+        except Exception:
+            pass
+
+    _CORE_PEEK_CACHE = (now, data)
+    return data
+
+
 def load_pipeline_events_by_task() -> dict[str, list[dict]]:
     """Parse recent JSONL pipeline emits, grouped by task_id."""
     by_task: dict[str, list[dict]] = {}
     if not _PIPELINE_LOG.exists():
         return by_task
     try:
-        lines = _PIPELINE_LOG.read_text(errors="replace").splitlines()[-12000:]
+        lines = _PIPELINE_LOG.read_text(errors="replace").splitlines()
     except Exception:
         return by_task
     for line in lines:
@@ -372,9 +487,10 @@ def load_pipeline_events_by_task() -> dict[str, list[dict]]:
             row = json.loads(line)
         except Exception:
             continue
-        tid = row.get("task_id") or ""
+        tid = _normalize_task_id(row.get("task_id") or "")
         if not tid:
             continue
+        row["task_id"] = tid
         by_task.setdefault(tid, []).append(row)
     for evs in by_task.values():
         evs.sort(key=lambda r: r.get("ts", 0))
@@ -521,20 +637,46 @@ def build_traces() -> list[Trace]:
         ev for ev in agent_events if ev.event_type == "task_created"
     ]
     agent_task_by_ts.sort(key=lambda e: e.timestamp)
+    task_meta_by_ts: list[tuple[float, str, dict]] = []
+    for task_id, meta in task_archive.items():
+        task_ts = _parse_iso_timestamp(meta.get("timestamp"))
+        if task_ts > 0:
+            task_meta_by_ts.append((task_ts, task_id, meta))
+    task_meta_by_ts.sort(key=lambda row: row[0])
+    task_candidates: dict[str, tuple[float, str]] = {
+        task_id: (task_ts, meta.get("username", ""))
+        for task_ts, task_id, meta in task_meta_by_ts
+    }
+    for ev in agent_task_by_ts:
+        task_candidates.setdefault(ev.task_id, (ev.timestamp, ev.username))
+
+    conv_task_matches: dict[int, str] = {}
+    matched_conv_indexes: set[int] = set()
+    for task_id, (task_ts, task_user) in sorted(task_candidates.items(), key=lambda row: row[1][0]):
+        best_idx = -1
+        best_diff = 999.0
+        for idx, (user_ts, _user_text, _assistant_ts, _assistant_text, username) in enumerate(conv_entries):
+            if idx in matched_conv_indexes:
+                continue
+            if task_user and task_user != username:
+                continue
+            diff = abs(task_ts - user_ts)
+            if diff < 3.0 and diff < best_diff:
+                best_idx = idx
+                best_diff = diff
+        if best_idx >= 0:
+            conv_task_matches[best_idx] = task_id
+            matched_conv_indexes.add(best_idx)
 
     all_traces = []
+    traced_task_ids: set[str] = set()
 
-    for user_ts, user_text, assistant_ts, assistant_text, username in conv_entries:
+    for conv_idx, (user_ts, user_text, assistant_ts, assistant_text, username) in enumerate(conv_entries):
         trace_id = f"conv-{username}-{int(user_ts * 1000)}"
 
         # Match with agent event by timestamp (±3s window)
-        matched_task_id = ""
-        matched_events: list[AgentEvent] = []
-        for ev in agent_task_by_ts:
-            if abs(ev.timestamp - user_ts) < 3.0 and ev.username == username:
-                matched_task_id = ev.task_id
-                matched_events = agent_by_task.get(matched_task_id, [])
-                break
+        matched_task_id = conv_task_matches.get(conv_idx, "")
+        matched_events: list[AgentEvent] = agent_by_task.get(matched_task_id, [])
 
         # Determine execution path
         exec_path = ""
@@ -546,6 +688,7 @@ def build_traces() -> list[Trace]:
                 has_core_result = True
 
         if matched_task_id:
+            traced_task_ids.add(matched_task_id)
             if has_core_result:
                 exec_path = "core"
             elif assistant_ts > 0:
@@ -611,6 +754,90 @@ def build_traces() -> list[Trace]:
         )
         all_traces.append(trace)
 
+    candidate_task_ids = {
+        tid for tid in set(pipeline_by_task) | set(task_archive) | set(agent_by_task)
+        if tid.startswith("task-") and tid not in traced_task_ids
+    }
+    for task_id in sorted(candidate_task_ids):
+        task_meta = task_archive.get(task_id, {})
+        task_events = agent_by_task.get(task_id, [])
+        pipeline_events = pipeline_by_task.get(task_id, [])
+        created_event = next((ev for ev in task_events if ev.event_type == "task_created"), None)
+        result_event = next(
+            (ev for ev in reversed(task_events) if ev.event_type in {"result_core", "result_async"}),
+            None,
+        )
+
+        event_ts = [
+            float(ev.get("ts", 0) or 0)
+            for ev in pipeline_events
+            if float(ev.get("ts", 0) or 0) > 0
+        ]
+        user_ts = (
+            _parse_iso_timestamp(task_meta.get("timestamp"))
+            or (created_event.timestamp if created_event else 0.0)
+            or (min(event_ts) if event_ts else 0.0)
+        )
+        if user_ts <= 0:
+            continue
+
+        username = task_meta.get("username") or (created_event.username if created_event else "") or "unknown"
+        user_text = task_meta.get("task") or (created_event.text if created_event else "") or task_id
+        source = task_meta.get("source") or "livekit-voice"
+        tier = task_meta.get("access_tier", "owner")
+        full_result = result_archive.get(task_id, result_event.text if result_event else "")
+        delivered_event = (
+            _latest_event(pipeline_events, "agent_consumed_sync_result")
+            or _latest_event(pipeline_events, "agent_generate_reply_from_result")
+            or _latest_event(pipeline_events, "result_file_observed")
+        )
+        assistant_ts = float((delivered_event or {}).get("ts", 0) or 0)
+        assistant_text = full_result or (result_event.text if result_event else "")
+        duration = (assistant_ts - user_ts) if assistant_ts > 0 else 0.0
+        exec_path = "core"
+
+        checkpoints = _build_checkpoints(
+            user_ts=user_ts,
+            user_text=user_text,
+            assistant_ts=assistant_ts,
+            assistant_text=assistant_text,
+            matched_task_id=task_id,
+            exec_path=exec_path,
+            task_meta=task_meta,
+            full_result=full_result,
+            core_status=core_status,
+            duration=duration,
+            source=source,
+            tier=tier,
+            pipeline_events=pipeline_events,
+        )
+        last_progress_ts = _latest_progress_ts(
+            user_ts=user_ts,
+            assistant_ts=assistant_ts,
+            matched_task_id=task_id,
+            pipeline_events=pipeline_events,
+        )
+        _retire_stale_active_checkpoints(
+            checkpoints,
+            last_progress_ts=last_progress_ts,
+            now=time.time(),
+        )
+
+        all_traces.append(Trace(
+            trace_id=f"task-{task_id}",
+            source=source,
+            user=username,
+            text_preview=user_text[:80],
+            full_text=user_text,
+            result_text=full_result[:300] if full_result else assistant_text[:300],
+            task_id=task_id,
+            execution_path=exec_path,
+            checkpoints=checkpoints,
+            created_at=user_ts,
+            completed_at=assistant_ts,
+            duration=duration,
+        ))
+
     return all_traces
 
 
@@ -640,6 +867,15 @@ def _build_executor_bridge(
 
     watchers_proc = _pgrep("watch-tasks") or _pgrep("fswatch ")
     sutando_core_proc = _pgrep("claude.*sutando-core") or _pgrep("claude.*--name.*sutando-core")
+    core_peek = read_core_peek()
+    peek_state = core_peek.get("state") or "unknown"
+    peek_line = core_peek.get("line") or ""
+    peek_summary = (
+        f"Claude {peek_state}"
+        + (f" · {peek_line}" if peek_line else "")
+        + (f" · CPU {core_peek.get('cpu')}%" if core_peek.get("cpu") else "")
+        + (f" · HTTPS {'yes' if core_peek.get('https_connected') else 'no'}" if core_peek.get("alive") else "")
+    )
 
     # --- 1. File watcher → core queue ---
     b1_ts = (_latest_event(evs, "watcher_to_core_queue") or _latest_event(evs, "watcher_pickup") or {}).get(
@@ -671,8 +907,9 @@ def _build_executor_bridge(
     # --- 2. sutando-core session alive ---
     claim_ev = _latest_event(evs, "core_task_claim") or _latest_event(evs, "core_task_begin")
     if claim_ev is not None and claim_ev.get("ok", True):
-        b2_ts, b2_status, b2_content = claim_ev.get("ts", 0), "completed", claim_ev.get("detail") or "sutando-core 报告开始处理此 task"
-        b2_meta = {}
+        detail = claim_ev.get("detail") or "sutando-core 报告开始处理此 task"
+        b2_ts, b2_status, b2_content = claim_ev.get("ts", 0), "completed", f"{detail}\n{peek_summary}"
+        b2_meta = {"core_peek": core_peek}
     elif claim_ev is not None and claim_ev.get("ok") is False:
         b2_ts = float(claim_ev.get("ts", 0)) or user_ts
         b2_status, b2_content = (
@@ -683,10 +920,10 @@ def _build_executor_bridge(
     elif sutando_core_proc:
         b2_ts = float(core_status.get("ts", 0)) or user_ts
         if task_waiting and not claim_ev:
-            b2_status, b2_content = "active", "检测到 claude sutando-core 进程；等待 claim 打点（建议在处理 task 前后运行 pipeline_emit）"
+            b2_status, b2_content = "active", "检测到 claude sutando-core 进程；等待 claim 打点（建议在处理 task 前后运行 pipeline_emit）\n" + peek_summary
         else:
-            b2_status, b2_content = "completed", "检测到 claude sutando-core / tmux 会话进程"
-        b2_meta = {"peek_core_status_json": True, "peek_tmux_attach": True}
+            b2_status, b2_content = "completed", "检测到 claude sutando-core / tmux 会话进程\n" + peek_summary
+        b2_meta = {"peek_core_status_json": True, "peek_tmux_attach": True, "core_peek": core_peek}
     elif task_waiting:
         b2_ts = user_ts
         b2_status, b2_content = (
@@ -709,13 +946,15 @@ def _build_executor_bridge(
             sync_wait_timeout.get("detail")
             or "LiveKit 同步等待超时；task 保留在 tasks/ 中等待 sutando-core"
         )
-        b3_meta = {}
+        if core_peek.get("alive"):
+            b3_content += "\n" + peek_summary
+        b3_meta = {"core_peek": core_peek} if core_peek.get("alive") else {}
     elif task_waiting and cs_stat == "running":
         elapsed = max(0.0, now - user_ts)
         b3_ts = float(core_status.get("ts", 0)) or now
         b3_status = "active"
-        b3_content = f"进行中：core-status.step = {step or 'working…'} （已等待 {elapsed:.0f}s；含 proactive-loop 报告的 step）"
-        b3_meta = {"elapsed_s": round(elapsed, 1)}
+        b3_content = f"进行中：core-status.step = {step or 'working…'} （已等待 {elapsed:.0f}s；含 proactive-loop 报告的 step）\n{peek_summary}"
+        b3_meta = {"elapsed_s": round(elapsed, 1), "core_peek": core_peek}
     elif pulse := _latest_event(evs, "livekit_poll_core_pulse"):
         b3_ts = pulse.get("ts", 0)
         b3_status, b3_content = "completed", f"LiveKit 轮询心跳：{pulse.get('detail', '')}"
@@ -1043,7 +1282,8 @@ def collector_loop():
 
             # Sort newest first, limit
             trace_list.sort(key=lambda t: t.created_at, reverse=True)
-            trace_list = trace_list[:MAX_TRACES]
+            if MAX_TRACES > 0:
+                trace_list = trace_list[:MAX_TRACES]
 
             with traces_lock:
                 traces.clear()
@@ -1071,6 +1311,7 @@ def health_broadcast_loop():
                 "heartbeats": heartbeats,
                 "owner_activity": activity,
                 "core_status": core,
+                "core_peek": read_core_peek(),
                 "watcher_live": _pgrep("watch-tasks"),
                 "sutando_core_live": _pgrep("claude.*sutando-core")
                 or _pgrep("claude.*--name.*sutando-core"),
@@ -1078,7 +1319,7 @@ def health_broadcast_loop():
             broadcast("health", json.dumps(data, ensure_ascii=False))
         except Exception:
             pass
-        time.sleep(10)
+        time.sleep(HEALTH_POLL_INTERVAL)
 
 
 # --- HTML ---
@@ -1391,6 +1632,15 @@ function renderHealth(data) {
     const label = cs.status === 'running' ? 'Core: ' + (cs.step || 'working') : 'Core: idle';
     items.push('<div class="health-item"><div class="health-dot ' + cls + '"></div>' + label + '</div>');
   }
+  if (data.core_peek) {
+    const p = data.core_peek;
+    const cls = p.alive ? 'ok' : 'bad';
+    let label = 'Claude: ' + (p.alive ? (p.state || 'alive') : 'dead');
+    if (p.cpu) label += ' CPU ' + p.cpu + '%';
+    if (p.https_connected !== undefined) label += ' HTTPS ' + (p.https_connected ? 'yes' : 'no');
+    if (p.line) label += ' — ' + p.line;
+    items.push('<div class="health-item" title="' + escapeHtml(JSON.stringify(p)) + '"><div class="health-dot ' + cls + '"></div>' + escapeHtml(label) + '</div>');
+  }
   if (data.watcher_live !== undefined) {
     items.push('<div class="health-item"><div class="health-dot ' + (data.watcher_live ? 'ok' : 'bad') + '"></div>watch-tasks</div>');
     items.push('<div class="health-item"><div class="health-dot ' + (data.sutando_core_live ? 'ok' : 'bad') + '"></div>sutando-core</div>');
@@ -1505,6 +1755,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "heartbeats": heartbeats,
                 "owner_activity": activity,
                 "core_status": core,
+                "core_peek": read_core_peek(),
                 "watcher_live": _pgrep("watch-tasks"),
                 "sutando_core_live": _pgrep("claude.*sutando-core")
                 or _pgrep("claude.*--name.*sutando-core"),

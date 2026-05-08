@@ -76,6 +76,9 @@ RESULTS_DIR.mkdir(exist_ok=True)
 STATE_DIR.mkdir(exist_ok=True)
 
 TASK_TIMEOUT_S = 600  # 10 minutes
+RESULT_WATCHER_FALLBACK_S = float(os.environ.get("RESULT_WATCHER_FALLBACK_S", "0.5"))
+RESULT_WATCHER_HEARTBEAT_S = 5
+RESULT_WATCHER_HEARTBEAT = STATE_DIR / "livekit-result-watcher.heartbeat"
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +618,8 @@ class SutandoAgent(Agent):
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._pending_tasks: dict[str, float] = {}
+        self._delivered_results: set[str] = set()
+        self._result_watcher_tasks: set[asyncio.Task] = set()
         self._last_transcript: str = ""  # Most recent user transcription (for inline tool logging)
 
     def _is_session_healthy(self) -> bool:
@@ -649,6 +654,8 @@ class SutandoAgent(Agent):
         self._pending_tasks[task_id] = time.time()
         write_owner_activity("voice", task)
         log_conversation(self._username, "user", task)
+        if self._last_transcript:
+            self._last_transcript = ""
         logger.info("Task %s [%s]: %s", task_id, self._username, task[:100])
         _pipeline_emit(
             phase="task_enqueued",
@@ -667,9 +674,12 @@ class SutandoAgent(Agent):
             detail="polling results/ ≤10s for sutando-core",
             component="livekit-agent",
         )
-        for poll_i in range(10):
+        poll_interval_s = 0.5
+        poll_attempts = int(10 / poll_interval_s)
+        for poll_i in range(poll_attempts):
             if result_file.exists():
                 result_text = result_file.read_text().strip()
+                self._delivered_results.add(task_id)
                 _pipeline_emit(
                     phase="result_file_observed",
                     task_id=task_id,
@@ -690,15 +700,15 @@ class SutandoAgent(Agent):
                     component="livekit-agent",
                 )
                 return result_text
-            if poll_i in (4, 9):
+            if poll_i in (9, poll_attempts - 1):
                 _pipeline_emit(
                     phase="livekit_poll_core_pulse",
                     task_id=task_id,
                     ok=True,
-                    detail=f"still waiting sutando-core {poll_i + 1}/10s",
+                    detail=f"still waiting sutando-core {(poll_i + 1) * poll_interval_s:.1f}/10s",
                     component="livekit-agent",
                 )
-            await asyncio.sleep(1)
+            await asyncio.sleep(poll_interval_s)
 
         _pipeline_emit(
             phase="livekit_sync_wait_timeout",
@@ -709,67 +719,176 @@ class SutandoAgent(Agent):
         )
         return "I sent that to the core agent and it is still processing."
 
-    async def _poll_and_speak(
-        self, task_id: str, task_file: Path, result_file: Path, session: AgentSession
-    ) -> None:
-        """Background poller: waits for task result, then pushes it via generate_reply."""
+    def start_result_watcher(self, session: AgentSession) -> None:
+        """Watch results/ for delayed core results and speak them into this session."""
+        if self._result_watcher_tasks:
+            return
+
+        for coro in (
+            self._result_watcher_heartbeat(),
+            self._result_watcher_fswatch(session),
+            self._result_watcher_fallback_scan(session),
+        ):
+            task = asyncio.create_task(coro)
+            self._result_watcher_tasks.add(task)
+            task.add_done_callback(self._result_watcher_tasks.discard)
+
+        logger.info("Result watcher started for %s", self._username)
+        _pipeline_emit(
+            phase="livekit_result_watcher_started",
+            task_id=f"watcher-{self._username}",
+            ok=True,
+            detail="fswatch + fallback scan",
+            component="livekit-agent",
+        )
+
+    def _write_result_watcher_heartbeat(self, status: str = "running") -> None:
         try:
-            _pipeline_emit(
-                phase="livekit_async_wait_started",
-                task_id=task_id,
-                ok=True,
-                detail=f"background poll up to ~{TASK_TIMEOUT_S}s",
-                component="livekit-agent",
-            )
-            for pi in range(TASK_TIMEOUT_S - 8):
-                if result_file.exists():
-                    result_text = result_file.read_text().strip()
-                    _pipeline_emit(
-                        phase="result_file_observed",
-                        task_id=task_id,
-                        ok=True,
-                        detail="async poll: results/*.txt",
-                        component="livekit-agent",
-                    )
-                    archive_file(result_file, "results", task_id, self._username)
-                    archive_file(task_file, "tasks", task_id, self._username)
-                    self._pending_tasks.pop(task_id, None)
-                    log_conversation(self._username, "assistant", result_text[:200])
-                    logger.info("Result (async) %s: %s", task_id, result_text[:100])
-                    _pipeline_emit(
-                        phase="agent_generate_reply_from_result",
-                        task_id=task_id,
-                        ok=True,
-                        detail="session.generate_reply with result excerpt",
-                        component="livekit-agent",
-                    )
-                    try:
-                        await session.generate_reply(
-                            instructions=f"The task completed. Tell the user this result concisely: {result_text[:500]}"
-                        )
-                    except Exception as e:
-                        logger.warning("Failed to speak async result: %s", e)
-                    return
-                if pi % 45 == 0 and pi > 0:
-                    _pipeline_emit(
-                        phase="livekit_async_poll_pulse",
-                        task_id=task_id,
-                        ok=True,
-                        detail=f"async alive {pi}s waiting results/",
-                        component="livekit-agent",
-                    )
-                await asyncio.sleep(1)
-            self._pending_tasks.pop(task_id, None)
-            logger.warning("Task %s timed out in background poller", task_id)
-            _pipeline_emit(
-                phase="livekit_async_wait_timeout",
-                task_id=task_id,
-                ok=False,
-                detail=f"background poller exhausted ~{TASK_TIMEOUT_S}s",
-                component="livekit-agent",
+            payload = {
+                "ts": int(time.time()),
+                "pid": os.getpid(),
+                "username": self._username,
+                "status": status,
+                "pending": len(self._pending_tasks),
+            }
+            tmp = RESULT_WATCHER_HEARTBEAT.with_suffix(".heartbeat.tmp")
+            tmp.write_text(json.dumps(payload))
+            tmp.rename(RESULT_WATCHER_HEARTBEAT)
+        except Exception as e:
+            logger.debug("result watcher heartbeat failed: %s", e)
+
+    async def _result_watcher_heartbeat(self) -> None:
+        while True:
+            self._write_result_watcher_heartbeat()
+            await asyncio.sleep(RESULT_WATCHER_HEARTBEAT_S)
+
+    def _task_belongs_to_user(self, task_id: str) -> bool:
+        task_file = self._tasks_dir / f"{task_id}.txt"
+        if not task_file.exists():
+            return False
+        try:
+            body = task_file.read_text()
+        except Exception:
+            return False
+        return (
+            "channel_id: local-voice" in body
+            and f"username: {self._username}" in body
+        )
+
+    async def _deliver_result_file(self, result_file: Path, session: AgentSession, source: str) -> bool:
+        if not result_file.name.startswith("task-") or result_file.suffix != ".txt":
+            return False
+
+        task_id = result_file.stem
+        if task_id in self._delivered_results:
+            return False
+        submitted_at = self._pending_tasks.get(task_id)
+        if submitted_at and (time.time() - submitted_at) < 10:
+            # Let the synchronous work() path return fast results directly.
+            return False
+        if not self._task_belongs_to_user(task_id):
+            return False
+
+        try:
+            result_text = result_file.read_text().strip()
+        except Exception:
+            return False
+        if not result_text:
+            return False
+
+        self._delivered_results.add(task_id)
+        task_file = self._tasks_dir / f"{task_id}.txt"
+        _pipeline_emit(
+            phase="result_file_observed",
+            task_id=task_id,
+            ok=True,
+            detail=f"{source}: results/*.txt",
+            component="livekit-agent",
+        )
+        archive_file(result_file, "results", task_id, self._username)
+        archive_file(task_file, "tasks", task_id, self._username)
+        self._pending_tasks.pop(task_id, None)
+        log_conversation(self._username, "assistant", result_text[:200])
+        logger.info("Result watcher delivered %s: %s", task_id, result_text[:100])
+        _pipeline_emit(
+            phase="agent_generate_reply_from_result",
+            task_id=task_id,
+            ok=True,
+            detail="session.generate_reply with result excerpt",
+            component="livekit-agent",
+        )
+        try:
+            await session.generate_reply(
+                instructions=f"The task completed. Tell the user this result concisely: {result_text[:500]}"
             )
         except Exception as e:
-            logger.exception("Background poll error for %s: %s", task_id, e)
+            logger.warning("Failed to speak watched result %s: %s", task_id, e)
+            _pipeline_emit(
+                phase="agent_generate_reply_from_result",
+                task_id=task_id,
+                ok=False,
+                detail=f"generate_reply failed: {e}",
+                component="livekit-agent",
+            )
+        return True
+
+    async def _scan_result_files(self, session: AgentSession, source: str) -> None:
+        for result_file in sorted(self._results_dir.glob("task-*.txt")):
+            await self._deliver_result_file(result_file, session, source)
+
+    async def _result_watcher_fallback_scan(self, session: AgentSession) -> None:
+        while True:
+            await self._scan_result_files(session, "fallback scan")
+            await asyncio.sleep(RESULT_WATCHER_FALLBACK_S)
+
+    async def _result_watcher_fswatch(self, session: AgentSession) -> None:
+        if not shutil.which("fswatch"):
+            logger.warning("fswatch not found; result watcher using fallback scan only")
+            _pipeline_emit(
+                phase="livekit_result_watcher_fswatch_missing",
+                task_id=f"watcher-{self._username}",
+                ok=False,
+                detail="fswatch not found; fallback scan only",
+                component="livekit-agent",
+            )
+            return
+
+        while True:
+            proc = None
+            try:
+                await self._scan_result_files(session, "startup scan")
+                proc = await asyncio.create_subprocess_exec(
+                    "fswatch",
+                    "-0",
+                    str(self._results_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                logger.info("Result fswatch started for %s", self._username)
+                while True:
+                    assert proc.stdout is not None
+                    raw = await proc.stdout.readuntil(b"\0")
+                    changed = Path(raw.rstrip(b"\0").decode("utf-8", errors="ignore"))
+                    if changed.is_dir():
+                        await self._scan_result_files(session, "fswatch dir event")
+                    else:
+                        await self._deliver_result_file(changed, session, "fswatch")
+            except asyncio.CancelledError:
+                if proc and proc.returncode is None:
+                    proc.terminate()
+                raise
+            except Exception as e:
+                logger.warning("result fswatch loop restarting: %s", e)
+                _pipeline_emit(
+                    phase="livekit_result_watcher_restart",
+                    task_id=f"watcher-{self._username}",
+                    ok=False,
+                    detail=str(e)[:200],
+                    component="livekit-agent",
+                )
+                if proc and proc.returncode is None:
+                    proc.terminate()
+                await asyncio.sleep(2)
 
     def _log_inline_tool(self, result: str) -> None:
         """Log an inline tool call (non-work) to the conversation log using last transcription."""
@@ -777,6 +896,14 @@ class SutandoAgent(Agent):
             log_conversation(self._username, "user", self._last_transcript)
             self._last_transcript = ""
         log_conversation(self._username, "assistant", result)
+
+    def _log_direct_response(self, response_text: str) -> None:
+        """Log direct realtime answers that do not call work() or an inline tool."""
+        if not self._last_transcript or not response_text.strip():
+            return
+        log_conversation(self._username, "user", self._last_transcript)
+        self._last_transcript = ""
+        log_conversation(self._username, "assistant", response_text.strip())
 
     @function_tool()
     async def get_current_time(self, context: RunContext) -> str:
@@ -995,6 +1122,7 @@ async def entrypoint(ctx: JobContext):
             participant_identity="phone-user",
         ),
     )
+    agent.start_result_watcher(session)
 
     # Capture user transcriptions for inline tool logging (open_url, press_key, etc.)
     # These tools don't go through work(), so we hook the realtime session events.
@@ -1004,10 +1132,19 @@ async def entrypoint(ctx: JobContext):
         if realtime_sessions:
             realtime_session = realtime_sessions[0]
             def _capture_transcript(event: dict) -> None:
-                if event.get("type") == "conversation.item.input_audio_transcription.completed":
+                event_type = event.get("type")
+                if event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = event.get("transcript", "").strip()
                     if transcript:
                         agent._last_transcript = transcript
+                elif event_type in ("response.output_audio_transcript.done", "response.output_text.done"):
+                    response_text = (
+                        event.get("transcript")
+                        or event.get("text")
+                        or event.get("delta")
+                        or ""
+                    )
+                    agent._log_direct_response(response_text)
             realtime_session.on("openai_server_event_received", _capture_transcript)
             logger.info("Transcript capture hook attached to realtime session")
         else:
