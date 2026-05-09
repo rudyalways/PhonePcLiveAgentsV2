@@ -79,6 +79,7 @@
   // Optional URL flags on /mobile?... :
   //   micMeter=1   — mic RMS in console
   //   audioDebug=1 — verbose remote TTS trace (startAudio, AudioContext, subscriptions)
+  // Login: after a successful connect, username/password are stored in cookies (Path=/, Secure on HTTPS).
   import {
     Room,
     RoomEvent,
@@ -108,6 +109,43 @@
   const loginError = document.getElementById('login-error');
   const usernameInput = document.getElementById('username-input');
   const secretInput = document.getElementById('secret-input');
+
+  /** Same-origin cookies for https://localhost:7081/mobile (Path=/). Not httpOnly — readable by JS; avoid on shared devices. */
+  const AUTH_COOKIE_USER = 'sutando_mobile_user';
+  const AUTH_COOKIE_SECRET = 'sutando_mobile_secret';
+  const AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+
+  function _setCookie(name, value, maxAgeSec) {
+    const enc = encodeURIComponent(value);
+    let attrs = `${name}=${enc}; Path=/; Max-Age=${maxAgeSec}; SameSite=Lax`;
+    if (window.location.protocol === 'https:') attrs += '; Secure';
+    document.cookie = attrs;
+  }
+
+  function _getCookie(name) {
+    const pref = `${name}=`;
+    const parts = document.cookie.split(';');
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i].trim();
+      if (p.startsWith(pref)) return decodeURIComponent(p.slice(pref.length));
+    }
+    return '';
+  }
+
+  function saveAuthCookies(username, secret) {
+    if (!username) return;
+    _setCookie(AUTH_COOKIE_USER, username, AUTH_COOKIE_MAX_AGE);
+    if (secret) _setCookie(AUTH_COOKIE_SECRET, secret, AUTH_COOKIE_MAX_AGE);
+  }
+
+  function loadAuthCookiesIntoForm() {
+    const u = _getCookie(AUTH_COOKIE_USER);
+    const s = _getCookie(AUTH_COOKIE_SECRET);
+    if (u) usernameInput.value = u;
+    if (s) secretInput.value = s;
+  }
+
+  loadAuthCookiesIntoForm();
 
   let room = null;
   let micTrack = null;
@@ -497,6 +535,7 @@
 
     try {
       await connectWithCredentials(savedCredentials);
+      saveAuthCookies(username, secret);
     } catch (err) {
       console.error('Connect failed:', err);
       teardownRoom({ hideUi: true, closeAudio: true });
