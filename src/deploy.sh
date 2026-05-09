@@ -109,6 +109,34 @@ stop_sutando_core() {
   fi
 }
 
+# Reads sutando-core tmux scrollback; if Claude Code shows auth / Remote Control failure, prompt the operator.
+warn_if_sutando_core_needs_login() {
+  local socket="/tmp/sutando-tmux.sock"
+  local pane
+  if ! command -v tmux > /dev/null 2>&1 || [ ! -S "$socket" ]; then
+    return 0
+  fi
+  if ! tmux -S "$socket" has-session -t sutando-core 2>/dev/null; then
+    return 0
+  fi
+  pane="$(tmux -S "$socket" capture-pane -t sutando-core -p -S -150 2>/dev/null || true)"
+  if ! echo "$pane" | grep -qE 'Remote Control failed|Please run /login|API Error: 401|Invalid authentication credentials'; then
+    return 0
+  fi
+  echo ""
+  echo "⚠ sutando-core needs Claude Code login (or this tmux session has stale credentials)."
+  echo "  Detected in tmux scrollback: Remote Control failed, /login prompt, or API 401."
+  echo ""
+  echo "  Next steps:"
+  echo "    1) tmux -S $socket attach -t sutando-core"
+  echo "    2) Run  /login   (claude.ai — same account as the Claude app for Remote Control)"
+  echo "    3) Run  /proactive-loop"
+  echo ""
+  echo "  Or restart core after fixing auth:"
+  echo "    bash src/deploy.sh --stop_core_and_background && bash src/deploy.sh"
+  echo ""
+}
+
 wait_for_port_service() {
   local port="$1"
   local name="$2"
@@ -569,20 +597,27 @@ fi
 
 echo ""
 echo "Checking sutando-core..."
-if tmux -S /tmp/sutando-tmux.sock has-session -t sutando-core 2>/dev/null; then
+SUTANDO_SOCKET="/tmp/sutando-tmux.sock"
+SUTANDO_CORE_JUST_STARTED=0
+if tmux -S "$SUTANDO_SOCKET" has-session -t sutando-core 2>/dev/null; then
   echo "  ✓ sutando-core is running"
 else
   echo "  Starting sutando-core..."
   if command -v tmux > /dev/null 2>&1; then
-    tmux -S /tmp/sutando-tmux.sock new-session -d -s sutando-core \
+    tmux -S "$SUTANDO_SOCKET" new-session -d -s sutando-core \
       "cd '$REPO' && claude --name sutando-core --remote-control 'Sutando' --dangerously-skip-permissions --add-dir '$HOME' -- '/proactive-loop'"
     echo "  ✓ sutando-core started in background"
-    echo "    Attach with: tmux -S /tmp/sutando-tmux.sock attach -t sutando-core"
+    echo "    Attach with: tmux -S $SUTANDO_SOCKET attach -t sutando-core"
+    SUTANDO_CORE_JUST_STARTED=1
   else
     echo "  ✗ tmux not found — install with: brew install tmux"
     exit 1
   fi
 fi
+if [ "$SUTANDO_CORE_JUST_STARTED" -eq 1 ]; then
+  sleep 6
+fi
+warn_if_sutando_core_needs_login
 
 echo ""
 echo "Done. Logs in logs/. Stop with: bash src/deploy.sh --stop (--stop_service / --stop_core_and_background for partial stops)"
