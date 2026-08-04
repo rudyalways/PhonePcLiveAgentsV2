@@ -17,15 +17,72 @@ Usage:
   python3 src/github-webhook.py --port 7846  # custom port
 """
 
+import hashlib
+import hmac
 import json
+import os
 import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
+# Two separate concerns (per qingyun review on PR #775):
+# - REPO  = source tree (this file's parent.parent) — for loading .env from
+#           the checkout root. Stays anchored regardless of SUTANDO_WORKSPACE.
+# - WORKSPACE_DIR = runtime state (resolve_workspace()) — for tasks/ writes so
+#           the workspace-aware watcher picks them up.
 REPO = Path(__file__).resolve().parent.parent
-TASKS_DIR = REPO / "tasks"
-PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7901
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_default import resolve_workspace  # noqa: E402
+from task_body_guard import confine_user_content  # noqa: E402
+
+WORKSPACE_DIR = resolve_workspace()
+TASKS_DIR = WORKSPACE_DIR / "tasks"
+PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7847
+
+# Load .env from the repo root (not workspace) so launchctl / systemd managed
+# restarts pick up GITHUB_WEBHOOK_SECRET without needing it in the plist/unit
+# file. The .env lives in the checkout, not the runtime workspace.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(REPO / ".env")
+except ImportError:
+    print("⚠️ python-dotenv not installed — relying on shell env for GITHUB_WEBHOOK_SECRET")
+
+# GitHub webhook secret for payload signature verification.
+# Set GITHUB_WEBHOOK_SECRET in your .env to match the secret configured in
+# GitHub repo Settings → Webhooks → (your webhook) → Secret.
+# If not set, all webhook payloads are rejected (fail-closed).
+WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+
+# Track whether we've logged a successful verification (per process lifetime)
+_verification_confirmed = False
+
+# Warn at startup if no secret is configured
+if not WEBHOOK_SECRET:
+    print("⚠️  WARNING: GITHUB_WEBHOOK_SECRET not set — all webhooks will be rejected.")
+    print("   Set this in .env to match your GitHub webhook secret.")
+
+
+def verify_github_signature(body: bytes, signature_header: str) -> bool:
+    """Verify X-Hub-Signature-256 from GitHub webhook payload.
+
+    GitHub signs every webhook delivery with HMAC-SHA256 using the shared
+    webhook secret.  See:
+    https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
+
+    Returns True if the signature is valid, False otherwise.
+    """
+    if not WEBHOOK_SECRET:
+        return False
+    if not signature_header:
+        return False
+    if not signature_header.startswith("sha256="):
+        return False
+    expected = "sha256=" + hmac.new(
+        WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature_header)
 
 # Events we care about and how to summarize them
 def format_event(event_type: str, payload: dict):
@@ -61,10 +118,44 @@ def format_event(event_type: str, payload: dict):
     return None
 
 
+def _emit_github_telemetry() -> None:
+    """Fire-and-forget product telemetry: count `github` as a task source so
+    DAU/WAU includes webhook-driven activity. PR #2274 added `github` to the
+    telemetry allowlist but this writer never emitted, so the bucket could
+    never fire (CR by liususan091219). Mirrors the discord/slack/telegram
+    bridges + agent-api, which emit at their own accept points. Never blocks or
+    breaks task emission; no-op when telemetry is opted out. Never carries task
+    content or ids.
+    """
+    try:  # pragma: no cover — fire-and-forget glue; logic in tests/telemetry.test.py
+        from telemetry import task_processed  # sibling module (src/ on sys.path)
+
+        task_processed("github")
+    except Exception:  # pragma: no cover — telemetry must never break webhook handling
+        pass
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+
+        # Verify webhook signature — reject unauthenticated payloads
+        signature = self.headers.get("X-Hub-Signature-256", "")
+        if not verify_github_signature(body, signature):
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid signature"}).encode())
+            print(f"[{time.strftime('%H:%M:%S')}] REJECTED: invalid or missing webhook signature")
+            return
+
+        # Log first successful verification so operators can confirm auth is wired
+        global _verification_confirmed
+        if not _verification_confirmed:
+            print(f"[{time.strftime('%H:%M:%S')}] ✓ Webhook signature verified (first successful)")
+            _verification_confirmed = True
+
         event_type = self.headers.get("X-GitHub-Event", "unknown")
 
         try:
@@ -77,9 +168,28 @@ class WebhookHandler(BaseHTTPRequestHandler):
         task_text = format_event(event_type, payload)
         if task_text:
             task_id = f"task-gh-{int(time.time() * 1000)}"
-            task_content = f"id: {task_id}\ntimestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\ntask: {task_text}\nsource: github\n"
+            # confine_user_content defangs newlines (\n, \r\n, bare \r — all
+            # normalized to \n first) and zero-width-space-prefixes any line
+            # that looks like a task-file header key or an ===…=== fence.
+            # Mirrors the fix in PR #1743 applied to the other bridges; the
+            # prior approach only stripped \n, leaving bare \r intact — Python
+            # text-mode re-splits \r into a new line on read, enabling a forge.
+            safe_task = confine_user_content(task_text.strip())
+            # task: is last so the (multi-line) GitHub body can't forge the
+            # trusted fields below it even if confine_user_content is bypassed.
+            # access_tier: other is security-critical — external events must
+            # never be elevated to owner-tier processing.
+            task_content = (
+                f"id: {task_id}\n"
+                f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                f"source: github\n"
+                f"interaction_type: system_event\n"
+                f"access_tier: other\n"
+                f"task: {safe_task}\n"
+            )
             TASKS_DIR.mkdir(exist_ok=True)
             (TASKS_DIR / f"{task_id}.txt").write_text(task_content)
+            _emit_github_telemetry()
             print(f"[{time.strftime('%H:%M:%S')}] {event_type}/{payload.get('action', '')} → {task_id}")
 
         self.send_response(200)
@@ -98,6 +208,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    # NOTE: binds to all interfaces (0.0.0.0). For production, consider
+    # binding to 127.0.0.1 and placing behind a reverse proxy (nginx, ngrok)
+    # for defense-in-depth on top of the HMAC signature check.
     server = HTTPServer(("0.0.0.0", PORT), WebhookHandler)
     print(f"GitHub webhook bridge listening on port {PORT}")
     print(f"Events: issues.opened, pull_request.opened/merged, star.created, issue_comment.created")

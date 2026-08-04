@@ -7,10 +7,85 @@
 set -euo pipefail
 
 WINDOW="${1:-24h}"
-REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+# REPO resolution: prefer SUTANDO_ROOT env, then $PWD if it looks like a
+# Sutando repo (has CLAUDE.md), else walk up from $0 looking for CLAUDE.md
+# (handles invocation via the userSettings hardlink at ~/.claude/skills/...
+# where the original 3-level dirname-walk landed at ~/.claude/ instead of
+# the workspace). Caught 2026-05-05 when /self-diagnose silently ran against
+# ~/.claude/ on Mini, producing empty git-log/build_log/health.txt.
+# Marker file is CLAUDE.md (stable, identity-bearing). Previously build_log.md,
+# swapped 2026-05-18 when build_log.md moved to $SUTANDO_WORKSPACE.
+REPO=""
+if [ -n "${SUTANDO_ROOT:-}" ] && [ -f "${SUTANDO_ROOT}/CLAUDE.md" ]; then
+	REPO="$SUTANDO_ROOT"
+elif [ -f "$PWD/CLAUDE.md" ]; then
+	REPO="$PWD"
+else
+	# Walk up from $0 looking for CLAUDE.md (max 5 levels)
+	DIR="$(cd "$(dirname "$0")" && pwd)"
+	for _ in 1 2 3 4 5; do
+		if [ -f "$DIR/CLAUDE.md" ]; then
+			REPO="$DIR"
+			break
+		fi
+		DIR="$(dirname "$DIR")"
+		[ "$DIR" = "/" ] && break
+	done
+	# Last-resort fallback: original 3-level dirname-walk
+	[ -z "$REPO" ] && REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+fi
 TS="$(date +%s)"
 OUT="/tmp/sutando-diagnose-$TS"
 mkdir -p "$OUT"
+
+# Notes dir lives under $SUTANDO_WORKSPACE per the workspace contract (CLAUDE.md
+# "Workspace contract" section). Falls back to $REPO/notes if env unset, matching
+# the historic pre-workspace-contract behavior. Same precedence as
+# `src/workspace_default.py:resolve_workspace()` for Python callers.
+# TODO(post-2026-08-15): drop the $REPO/notes fallback once all known
+# installs are confirmed on the workspace contract. Tracked via Lucy's
+# #769 review obs 4. Dual-path was added so pre-#762 installs don't
+# silently lose cold-review-log access; safe to remove after every node
+# has resolved its workspace at least once.
+# Workspace resolution via the canonical M0 helper.
+WS="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
+# NOTES_DIR remains a dual-path: prefer workspace/notes, fall back to repo/notes
+# for pre-#762 installs (per Lucy's #769 obs 4, drop-after 2026-08-15).
+if [ -d "$WS/notes" ]; then
+	NOTES_DIR="$WS/notes"
+else
+	NOTES_DIR="$REPO/notes"
+fi
+
+# Per-host label for hosts/<host>/ paths. Canonical resolver is
+# src/util_paths.py:_host_label() via the `sutando-config.sh host-label` shim
+# (single source of truth; precedence $SUTANDO_HOST_LABEL > scutil LocalHostName
+# > short hostname — scutil before hostname because a DHCP lease can drift,
+# e.g. Comcast → Chis-MBP, splitting per-host paths; #1745). Falls back to the
+# inline precedence if the shim is unavailable, so this diagnostic never
+# hard-depends on python being importable.
+_sd_host() {
+	local h=""
+	h="$(bash "$REPO/scripts/sutando-config.sh" host-label 2>/dev/null)" || true
+	if [ -n "$h" ]; then
+		printf '%s\n' "$h"
+		return
+	fi
+	local env="${SUTANDO_HOST_LABEL:-${SUTANDO_HOST_OVERRIDE:-}}"
+	if [ -n "$env" ]; then
+		printf '%s\n' "$env"
+		return
+	fi
+	local lhn=""
+	if command -v scutil >/dev/null 2>&1; then
+		lhn="$(scutil --get LocalHostName 2>/dev/null)"
+	fi
+	if [ -n "$lhn" ]; then
+		printf '%s\n' "$lhn"
+	else
+		hostname | sed 's/\..*//'
+	fi
+}
 
 # Convert window to seconds for log filtering
 case "$WINDOW" in
@@ -30,24 +105,52 @@ git -C "$REPO" log --since="$SINCE_ISO" --pretty=format:'%h %ad %s' --date=short
 git -C "$REPO" status --short > "$OUT/git-status.txt" 2>/dev/null || true
 
 # 2) Open PRs + recently merged (last 14d) — cheap, already cached by gh
-if command -v gh >/dev/null; then
-	gh pr list --state open --limit 20 --json number,title,mergeable,headRefName,author,updatedAt \
+# Resolve the real GitHub CLI. On systems where another tool named `gh` (e.g.
+# miniconda's `gh v0.0.4`) precedes /opt/homebrew/bin/gh on PATH, plain
+# `command -v gh` returns the wrong binary and every invocation below would
+# silently fail through `|| true`, producing empty PR data with no error.
+GH=""
+for _gh_cand in $(/usr/bin/which -a gh 2>/dev/null); do
+	# Discriminator: real GitHub CLI prints "gh version 2.x.x (...)" with NO
+	# colon — distinct from miniconda's `gh v0.0.4` which prints "gh version:
+	# v0.0.4" (note colon). Require the literal " version N." form.
+	if "$_gh_cand" --version 2>/dev/null | grep -Eq '^gh version [0-9]+\.'; then
+		GH="$_gh_cand"
+		break
+	fi
+done
+[ -z "$GH" ] && [ -x /opt/homebrew/bin/gh ] && GH=/opt/homebrew/bin/gh
+if [ -n "$GH" ]; then
+	"$GH" pr list --state open --limit 20 --json number,title,mergeable,headRefName,author,updatedAt \
 		--jq '.[] | "#\(.number) \(.headRefName) [@\(.author.login)] \(.title) — \(.mergeable)"' \
 		> "$OUT/prs-open.txt" 2>/dev/null || true
-	gh pr list --state merged --search "merged:>$(date -v -14d +%Y-%m-%d 2>/dev/null || date -d '14 days ago' +%Y-%m-%d)" \
+	"$GH" pr list --state merged --search "merged:>$(date -v -14d +%Y-%m-%d 2>/dev/null || date -d '14 days ago' +%Y-%m-%d)" \
 		--limit 30 --json number,title,mergedAt,author \
 		--jq '.[] | "#\(.number) \(.mergedAt[:10]) [@\(.author.login)] \(.title)"' \
 		> "$OUT/prs-recent-merged.txt" 2>/dev/null || true
 fi
 
 # 3) Build log tail + pending questions + cold-review log (small files, copy whole)
-tail -150 "$REPO/build_log.md" > "$OUT/build_log-tail.md" 2>/dev/null || true
-cp "$REPO/pending-questions.md" "$OUT/pending-questions.md" 2>/dev/null || true
-cp "$REPO/notes/cold-review-log.md" "$OUT/cold-review-log.md" 2>/dev/null || true
+_bl="${WS}/build_log.md"; [ -f "$_bl" ] || _bl="${REPO}/build_log.md"
+tail -150 "$_bl" > "$OUT/build_log-tail.md" 2>/dev/null || true
+# pending-questions.md is per-host (hosts/<host>/, #1717 F1 convention); probe
+# there FIRST, then the flat workspace root and repo root (back-compat for
+# pre-revamp / un-migrated layouts). Mirrors personal_path()'s read-side probe
+# order (#1718) so self-diagnose reads the same file the writers target.
+_pq="${WS}/hosts/$(_sd_host)/pending-questions.md"
+[ -f "$_pq" ] || _pq="${WS}/pending-questions.md"
+[ -f "$_pq" ] || _pq="${REPO}/pending-questions.md"
+cp "$_pq" "$OUT/pending-questions.md" 2>/dev/null || true
+cp "$NOTES_DIR/cold-review-log.md" "$OUT/cold-review-log.md" 2>/dev/null || true
 
 # 4) Voice-agent log — filter to window, grep for signal lines, keep it bounded.
 # Signals: transport closes (1006/1011/1007/1008), errors, GoAway, setup complete, 1006/1011 numeric.
-VLOG="$REPO/logs/voice-agent.log"
+# Logs live under the WORKSPACE, not the repo (CLAUDE.md "Workspace contract").
+# `$REPO/logs` does not exist, so the `[ -f ]` guard below went false and this
+# whole block was skipped with no error — the diagnose report then read as
+# "no transport events" when nothing had been looked at. `WS` is already
+# resolved at the top of this script via `sutando-config.sh workspace`.
+VLOG="$WS/logs/voice-agent.log"
 if [ -f "$VLOG" ]; then
 	awk -v since="$SINCE_ISO" '
 		# Approximate filter: log lines start with HH:MM:SS — we can'"'"'t easily compare dates,
@@ -60,7 +163,7 @@ if [ -f "$VLOG" ]; then
 fi
 
 # 5) Discord bridge log — last 200 non-dm-fallback lines
-DLOG="$REPO/logs/discord-bridge.log"
+DLOG="$WS/logs/discord-bridge.log"
 if [ -f "$DLOG" ]; then
 	grep -v "\[dm-fallback\]" "$DLOG" 2>/dev/null | tail -200 > "$OUT/discord-bridge-recent.txt" || true
 fi
@@ -74,11 +177,12 @@ fi
 # Use -mmin against SECONDS_AGO (not `-newer meta.txt` — meta.txt was created
 # at gather-start, so that would only match files written DURING the gather,
 # not files in the last $WINDOW).
-find "$REPO/results" -maxdepth 1 -type f -name "*.txt" -mmin "-$((SECONDS_AGO/60))" 2>/dev/null | head -20 > "$OUT/results-recent-paths.txt" || true
+find "$WS/results" -maxdepth 1 -type f -name "*.txt" -mmin "-$((SECONDS_AGO/60))" 2>/dev/null | head -20 > "$OUT/results-recent-paths.txt" || true
 
 # 8) Quota state
-if [ -f "$HOME/.claude/skills/quota-tracker/scripts/read-quota.py" ]; then
-	python3 "$HOME/.claude/skills/quota-tracker/scripts/read-quota.py" 2>&1 | head -10 > "$OUT/quota.txt" || true
+_QUOTA_SCRIPT="$(bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/read-quota.py)"
+if [ -f "$_QUOTA_SCRIPT" ]; then
+	python3 "$_QUOTA_SCRIPT" 2>&1 | head -10 > "$OUT/quota.txt" || true
 fi
 
 # Print size summary to stderr and path to stdout

@@ -8,7 +8,10 @@
 
 set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BUNDLE="$HOME/Desktop/sutando-migration"
+# Bundle lives under ~/.sutando/ — NOT ~/Desktop/. The bundle carries .env
+# with real secrets; ~/Desktop is synced to iCloud on many Macs, which would
+# push unscrubbed credentials to the cloud. ~/.sutando/ is not sync-backed.
+BUNDLE="$HOME/.sutando/migration-bundle"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE"
 
@@ -53,10 +56,14 @@ if [ -f "$HOME/.claude.json" ]; then
   echo "  ✓ ~/.claude.json (MCP servers)"
 fi
 
-# 4. Gitignored runtime files
-for f in stand-identity.json stand-avatar.png tab-aliases.json PERSONAL_CLAUDE.md; do
+# 4. Gitignored runtime files. stand-avatar.png lives under assets/ (not repo
+# root); util_paths.py / personalPath() handles read-side, but bundle copy
+# uses the source path it actually exists at. Other files are at repo root.
+for f in stand-identity.json tab-aliases.json PERSONAL_CLAUDE.md; do
   [ -f "$REPO/$f" ] && cp "$REPO/$f" "$BUNDLE/" && echo "  ✓ $f"
 done
+# stand-avatar.png is at assets/stand-avatar.png in the public workspace.
+[ -f "$REPO/assets/stand-avatar.png" ] && cp "$REPO/assets/stand-avatar.png" "$BUNDLE/stand-avatar.png" && echo "  ✓ stand-avatar.png"
 # Gitignored repo files (inside subdirectories)
 for f in skills/schedule-crons/crons.json; do
   [ -f "$REPO/$f" ] && mkdir -p "$BUNDLE/repo-gitignored/$(dirname $f)" && cp "$REPO/$f" "$BUNDLE/repo-gitignored/$f" && echo "  ✓ $f"
@@ -91,7 +98,7 @@ fi
 # 8. Behavioral flywheel data (conversation history, call logs, build log)
 mkdir -p "$BUNDLE/flywheel"
 [ -f "$REPO/session-state.md" ] && cp "$REPO/session-state.md" "$BUNDLE/flywheel/" && echo "  ✓ session-state.md"
-[ -f "$REPO/conversation.log" ] && cp "$REPO/conversation.log" "$BUNDLE/flywheel/" && echo "  ✓ conversation.log"
+[ -f "$REPO/logs/conversation.log" ] && cp "$REPO/logs/conversation.log" "$BUNDLE/flywheel/" && echo "  ✓ conversation.log"
 [ -f "$REPO/build_log.md" ] && cp "$REPO/build_log.md" "$BUNDLE/flywheel/" && echo "  ✓ build_log.md"
 [ -d "$REPO/results/calls" ] && cp -r "$REPO/results/calls" "$BUNDLE/flywheel/calls" && echo "  ✓ call transcripts"
 # Task result history (recent)
@@ -197,8 +204,15 @@ echo ""
 # ── 6. Restore all bundle files ──
 echo "Step 6/7: Restoring files..."
 
-# Copy .env
-[ -f "$BUNDLE_DIR/.env" ] && cp "$BUNDLE_DIR/.env" "$REPO/.env" && echo "  ✓ .env restored"
+# Copy .env — non-destructive: back up any existing .env first, so a stale or
+# placeholder-key bundle .env can never silently wipe real keys (2026-05-21).
+if [ -f "$BUNDLE_DIR/.env" ]; then
+  if [ -f "$REPO/.env" ]; then
+    cp "$REPO/.env" "$REPO/.env.bak.$(date +%Y%m%d-%H%M%S)" \
+      && echo "  ✓ existing .env backed up (.env.bak.*)"
+  fi
+  cp "$BUNDLE_DIR/.env" "$REPO/.env" && echo "  ✓ .env restored"
+fi
 
 # Copy memory
 if [ -d "$BUNDLE_DIR/memory" ]; then
@@ -234,10 +248,16 @@ if [ -d "$BUNDLE_DIR/claude-config" ]; then
   echo "  ✓ claude config restored"
 fi
 
-# Copy gitignored files
-for f in stand-identity.json stand-avatar.png tab-aliases.json PERSONAL_CLAUDE.md; do
+# Copy gitignored files. stand-avatar.png target is assets/ (not root) to
+# match where the public workspace expects it; util_paths still resolves
+# correctly from either location.
+for f in stand-identity.json tab-aliases.json PERSONAL_CLAUDE.md; do
   [ -f "$BUNDLE_DIR/$f" ] && cp "$BUNDLE_DIR/$f" "$REPO/" && echo "  ✓ $f restored"
 done
+if [ -f "$BUNDLE_DIR/stand-avatar.png" ]; then
+  mkdir -p "$REPO/assets"
+  cp "$BUNDLE_DIR/stand-avatar.png" "$REPO/assets/stand-avatar.png" && echo "  ✓ stand-avatar.png restored to assets/"
+fi
 # Restore gitignored repo files (crons.json, etc.)
 if [ -d "$BUNDLE_DIR/repo-gitignored" ]; then
   cp -r "$BUNDLE_DIR/repo-gitignored/"* "$REPO/" 2>/dev/null && echo "  ✓ gitignored repo files restored (crons.json, etc.)"
@@ -272,7 +292,7 @@ fi
 # Restore flywheel data
 if [ -d "$BUNDLE_DIR/flywheel" ]; then
   [ -f "$BUNDLE_DIR/flywheel/session-state.md" ] && cp "$BUNDLE_DIR/flywheel/session-state.md" "$REPO/" && echo "  ✓ session-state.md restored"
-  [ -f "$BUNDLE_DIR/flywheel/conversation.log" ] && cp "$BUNDLE_DIR/flywheel/conversation.log" "$REPO/" && echo "  ✓ conversation.log restored"
+  [ -f "$BUNDLE_DIR/flywheel/conversation.log" ] && mkdir -p "$REPO/logs" && cp "$BUNDLE_DIR/flywheel/conversation.log" "$REPO/logs/" && echo "  ✓ conversation.log restored"
   [ -f "$BUNDLE_DIR/flywheel/build_log.md" ] && cp "$BUNDLE_DIR/flywheel/build_log.md" "$REPO/" && echo "  ✓ build_log.md restored"
   [ -d "$BUNDLE_DIR/flywheel/calls" ] && mkdir -p "$REPO/results" && cp -r "$BUNDLE_DIR/flywheel/calls" "$REPO/results/calls" && echo "  ✓ call transcripts restored"
   [ -d "$BUNDLE_DIR/flywheel/results" ] && mkdir -p "$REPO/results" && cp "$BUNDLE_DIR/flywheel/results/"* "$REPO/results/" 2>/dev/null && echo "  ✓ task results restored"
@@ -281,11 +301,11 @@ fi
 # Compile Sutando app
 echo "Compiling Sutando menu bar app..."
 cd "$REPO/src/Sutando"
-swiftc -O -o Sutando main.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null && echo "  ✓ Sutando compiled" || echo "  ⚠ Compile failed — run manually"
+swiftc -O -o Sutando main.swift SutandoConfig.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null && echo "  ✓ Sutando compiled" || echo "  ⚠ Compile failed — run manually"
 cd "$REPO"
 
 # Python deps
-pip3 install google-genai discord.py python-telegram-bot Pillow 2>/dev/null || true
+pip3 install google-genai discord.py python-telegram-bot slack_bolt Pillow 2>/dev/null || true
 
 # Install shared skills (external, not in repo)
 echo "Installing shared skills..."
@@ -305,9 +325,20 @@ fi
 echo "Step 7/7: mediar-ai MCP server (GUI control)..."
 if [ -f "$REPO/skills/macos-use/scripts/build.sh" ]; then
   echo "  Building mcp-server-macos-use (~35s Swift release build)..."
-  bash "$REPO/skills/macos-use/scripts/build.sh" 2>&1 | sed 's/^/  /' || {
-    echo "  ⚠ Build failed — run manually later: bash skills/macos-use/scripts/build.sh"
-  }
+  # `||` binds to the LAST command of a pipeline, and `sed` exits 0 whatever the
+  # build did — so the warning below was unreachable and a failed build produced
+  # no remediation line at all. Read PIPESTATUS instead, immediately after the
+  # pipeline (any intervening command clobbers it).
+  #
+  # Deliberately NOT `set -o pipefail`: this script runs under `set -e`, so
+  # pipefail would turn a failed optional build into an abort of the whole
+  # migration, losing the tarball. The point here is to warn and continue.
+  bash "$REPO/skills/macos-use/scripts/build.sh" 2>&1 | sed 's/^/  /'
+  _build_rc=${PIPESTATUS[0]}
+  if [ "$_build_rc" -ne 0 ]; then
+    echo "  ⚠ Build failed (exit $_build_rc) — run manually later: bash skills/macos-use/scripts/build.sh"
+  fi
+  unset _build_rc
   # Register the MCP server in Claude Code config
   if [ -f "$HOME/.macos-use-mcp/.build/release/mcp-server-macos-use" ]; then
     bash "$REPO/skills/macos-use/scripts/install-mcp.sh" 2>&1 | sed 's/^/  /' || true

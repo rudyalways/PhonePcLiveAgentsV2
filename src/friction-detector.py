@@ -13,55 +13,77 @@ Output: results/friction-{date}.txt
 
 import json
 import os
+import re
 import sys
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
-WORKSPACE = Path(__file__).parent.parent
+sys.path.insert(0, str(Path(__file__).parent))
+from util_paths import claude_home_path, personal_path, shared_personal_path  # noqa: E402
+from pending_questions_md import DIVIDER_OR_DONE_RE, active_region  # noqa: E402
+from workspace_default import resolve_workspace  # noqa: E402
+
+WORKSPACE = resolve_workspace()
 RESULTS_DIR = WORKSPACE / "results"
+
+
+# Prefix for "this probe did not run". A friction report that cannot distinguish
+# "checked, found nothing" from "could not check" will happily tell the owner
+# "Everything is clean" over probes that never executed — the same class of bug
+# as the morning briefing's all-clear (#2528). Marked items are real report
+# lines, so `all_issues` is non-empty and the all-clear is withheld.
+UNCHECKED = "COULD NOT CHECK: "
 
 
 def check_pending_questions():
     """Find questions unanswered for >24h.
 
-    pending-questions.md uses sections like:
-        ## Question Title
-        - **Asked:** 2026-04-06
-        - **Question:** ...
-        - **Status:** unanswered
-
-    A previous version of this parser looked for lines starting with `- [`
-    which never matched the actual format, so it always returned an empty
-    list and friction-detector silently missed every unanswered question.
+    pending-questions.md is free-form: sections start with ## Title and
+    may or may not carry **Status:** markers. Per the #1265 / #1404
+    convention: a section is open unless it is explicitly resolved.
+    Sections above a `# Resolved` divider are ignored entirely.
     """
-    pq = WORKSPACE / "pending-questions.md"
+    pq = Path(personal_path("pending-questions.md", WORKSPACE))
     if not pq.exists():
         return []
     content = pq.read_text()
     if "(No pending questions)" in content or not content.strip():
         return []
 
+    # Discard resolved section (below a `# Resolved` / `# Done` divider).
+    content = active_region(content, DIVIDER_OR_DONE_RE)
+
+    _RESOLVED_STATUS = re.compile(
+        r'\*\*Status:\*\*\s*(?:resolved|answered|done|complete)',
+        re.IGNORECASE,
+    )
+
     issues = []
     today = datetime.now().date()
+    current_title: Optional[str] = None
+    current_asked: Optional[str] = None
+    current_body_lines: list = []
 
-    # Walk sections — each starts with `## Title`. Inside the section, look
-    # for `Status: unanswered` and an `Asked:` date.
-    current_title = None
-    current_asked = None
-    current_status = None
-
-    def flush():
-        if current_title and current_status == "unanswered":
-            age_str = ""
-            if current_asked:
-                try:
-                    asked_date = datetime.fromisoformat(current_asked).date()
-                    age_days = (today - asked_date).days
-                    age_str = f" ({age_days}d old)"
-                except ValueError:
-                    pass
-            issues.append(f"Pending question unanswered{age_str}: {current_title[:80]}")
+    def flush() -> None:
+        if not current_title:
+            return
+        body = "\n".join(current_body_lines)
+        # Skip explicitly resolved sections.
+        if _RESOLVED_STATUS.search(body):
+            return
+        age_str = ""
+        if current_asked:
+            try:
+                asked_date = datetime.fromisoformat(current_asked).date()
+                age_days = (today - asked_date).days
+                if age_days < 1:
+                    return  # not stale yet
+                age_str = f" ({age_days}d old)"
+            except ValueError:
+                pass
+        issues.append(f"Pending question unanswered{age_str}: {current_title[:80]}")
 
     for line in content.split("\n"):
         stripped = line.strip()
@@ -69,33 +91,59 @@ def check_pending_questions():
             flush()
             current_title = stripped[3:].strip()
             current_asked = None
-            current_status = None
+            current_body_lines = []
             continue
-        # Match `- **Asked:** 2026-04-06`
-        if "**Asked:**" in stripped:
-            try:
-                current_asked = stripped.split("**Asked:**", 1)[1].strip().split()[0]
-            except IndexError:
-                pass
-        # Match `- **Status:** unanswered`
-        if "**Status:**" in stripped:
-            try:
-                current_status = stripped.split("**Status:**", 1)[1].strip().lower().split()[0]
-            except IndexError:
-                pass
-    flush()  # don't forget the last section
+        if current_title is not None:
+            current_body_lines.append(stripped)
+            if "**Asked:**" in stripped:
+                try:
+                    current_asked = stripped.split("**Asked:**", 1)[1].strip().split()[0]
+                except IndexError:
+                    pass
+    flush()
 
     return issues
 
 
 def check_stale_tasks():
-    """Find task files older than 1 hour (should be processed within minutes)."""
+    """Find task files older than 1 hour with no result anywhere.
+
+    A top-level task file can outlive a completed result when a consumer fails
+    to archive the pair.  Treating the task file alone as pending produced an
+    853-item false alarm (and repeated owner DMs) even though every task had a
+    matching result.  Mirror the queue health check's completion namespaces:
+    live results, bridge archives, and startup retention archives.
+    """
     issues = []
     tasks_dir = WORKSPACE / "tasks"
     if not tasks_dir.exists():
         return []
+
+    completed_names = set()
+
+    def record_result(path: Path) -> None:
+        if not path.is_file():
+            return
+        completed_names.add(path.name)
+        renamed = re.match(r"^(.+)-[0-9]+\.txt$", path.name)
+        if renamed:
+            completed_names.add(f"{renamed.group(1)}.txt")
+
+    for path in RESULTS_DIR.glob("task-*.txt"):
+        record_result(path)
+    for path in (RESULTS_DIR / "archive").glob("*.txt"):
+        record_result(path)
+    for path in (RESULTS_DIR / "archive").glob("*/*.txt"):
+        record_result(path)
+    for retention_dir in RESULTS_DIR.glob("archive-*"):
+        if retention_dir.is_dir():
+            for path in retention_dir.glob("*.txt"):
+                record_result(path)
+
     now = datetime.now().timestamp()
     for f in tasks_dir.glob("task-*.txt"):
+        if f.name in completed_names:
+            continue
         age_hours = (now - f.stat().st_mtime) / 3600
         if age_hours > 1:
             issues.append(f"Stale task unprocessed for {age_hours:.0f}h: {f.name}")
@@ -110,16 +158,21 @@ def check_github_issues():
             ["gh", "issue", "list", "--state", "open", "--json", "number,title,updatedAt"],
             capture_output=True, text=True, timeout=10
         )
-        if result.returncode == 0:
-            items = json.loads(result.stdout)
-            now = datetime.utcnow()
-            for item in items:
-                updated = datetime.fromisoformat(item["updatedAt"].replace("Z", "+00:00")).replace(tzinfo=None)
-                age_days = (now - updated).days
-                if age_days > 7:
-                    issues.append(f"GitHub issue #{item['number']} stale ({age_days}d): {item['title'][:60]}")
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-        pass
+        if result.returncode != 0:
+            # A failed probe is not an absence of stale issues. Saying nothing
+            # here lets `all_issues == []` render as "Everything is clean" over
+            # a question that was never answered.
+            return [UNCHECKED + "GitHub issues (gh exited "
+                    f"{result.returncode})"]
+        items = json.loads(result.stdout)
+        now = datetime.now(timezone.utc)
+        for item in items:
+            updated = datetime.fromisoformat(item["updatedAt"].replace("Z", "+00:00"))
+            age_days = (now - updated).days
+            if age_days > 7:
+                issues.append(f"GitHub issue #{item['number']} stale ({age_days}d): {item['title'][:60]}")
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+        return [UNCHECKED + f"GitHub issues ({type(e).__name__})"]
     return issues
 
 
@@ -127,9 +180,12 @@ def check_overdue_reminders():
     """Check macOS Reminders for overdue items."""
     issues = []
     try:
-        script = WORKSPACE.parent.parent / ".claude" / "skills" / "macos-tools" / "scripts" / "reminders.py"
+        script = claude_home_path("skills", "macos-tools", "scripts", "reminders.py")
         if not script.exists():
-            return []
+            # Absent probe, not an absent problem. This is also why the suite
+            # fails on a clean-install runner where macos-tools is not present:
+            # the early return skipped the exception handler entirely.
+            return [UNCHECKED + "overdue reminders (reminders.py not installed)"]
         # Use sys.executable: friction-detector runs via cron (launchd-managed);
         # bare `python3` can resolve to a different interpreter on minimal PATH.
         # See feedback_subprocess_sys_executable.md.
@@ -137,12 +193,14 @@ def check_overdue_reminders():
             [sys.executable, str(script), "list"],
             capture_output=True, text=True, timeout=10
         )
-        if result.returncode == 0:
-            for line in result.stdout.split("\n"):
-                if "overdue" in line.lower() or "past due" in line.lower():
-                    issues.append(f"Overdue reminder: {line.strip()[:80]}")
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        if result.returncode != 0:
+            return [UNCHECKED + f"overdue reminders (reminders.py exited "
+                    f"{result.returncode})"]
+        for line in result.stdout.split("\n"):
+            if "overdue" in line.lower() or "past due" in line.lower():
+                issues.append(f"Overdue reminder: {line.strip()[:80]}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return [UNCHECKED + f"overdue reminders ({type(e).__name__})"]
     return issues
 
 
@@ -155,7 +213,7 @@ def check_stale_results():
 def check_notes_without_follow_up():
     """Find notes tagged 'action' or 'todo' that are >7 days old."""
     issues = []
-    notes_dir = WORKSPACE / "notes"
+    notes_dir = Path(shared_personal_path("notes", WORKSPACE))
     if not notes_dir.exists():
         return []
     now = datetime.now().timestamp()
@@ -173,7 +231,18 @@ def check_notes_without_follow_up():
                 continue
             if body_start or not line.startswith("---"):
                 low = line.lower()
-                if any(marker in low for marker in ["- [ ]", "todo:", "action:", "follow-up:", "followup:"]):
+                # Match markers only at the start of the line (after optional
+                # leading whitespace and a list bullet). The previous "any
+                # marker anywhere in line" rule false-positived on
+                # documentation prose like "- Action: Get Contents of URL"
+                # in the Apple Shortcuts research note (the word "Action:"
+                # is shortcut-terminology, not a TODO directive).
+                stripped = low.lstrip(" \t-*")
+                # "action:" was dropped: too noisy. It's standard prose-label
+                # vocabulary (e.g. "Action: Get Contents of URL" in shortcut
+                # docs, "Action items:" as a section header, etc.). The other
+                # three are unambiguously directive.
+                if "- [ ]" in low or any(stripped.startswith(m) for m in ("todo:", "follow-up:", "followup:")):
                     has_todo = True
                     break
                 # Also match tags line with explicit 'todo' tag

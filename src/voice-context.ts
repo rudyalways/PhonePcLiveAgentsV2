@@ -4,17 +4,25 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveWorkspace } from './workspace_default.js';
+import { claudeHomePath } from './util_paths.js';
 
 function defaultMemoryDir(): string {
     const repo = resolve(join(import.meta.dirname, '..'));
     const slug = repo.replace(/\//g, '-');
-    return join(homedir(), '.claude', 'projects', slug, 'memory');
+    return claudeHomePath('projects', slug, 'memory');
 }
 
 const MEMORY_DIR = process.env.SUTANDO_MEMORY_DIR || defaultMemoryDir();
-const REPO_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+// fileURLToPath, never `.pathname`: URL.pathname stays percent-encoded, so on
+// the desktop-bundled install ("~/Library/Application Support/…") REPO_DIR
+// became ".../Application%20Support/..." and every join() below silently
+// pointed at a path that does not exist — no error, just an empty transcript
+// and missing CLAUDE.md context.
+const REPO_DIR = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
+const WORKSPACE_DIR = resolveWorkspace();
 
 function readMemory(filename: string): string | null {
 	const path = join(MEMORY_DIR, filename);
@@ -40,7 +48,7 @@ export function buildVoiceAgentContext(): string {
 	}
 
 	// Read build log summary
-	const buildLog = join(REPO_DIR, 'build_log.md');
+	const buildLog = join(WORKSPACE_DIR, 'build_log.md');
 	if (existsSync(buildLog)) {
 		try {
 			const content = readFileSync(buildLog, 'utf-8');

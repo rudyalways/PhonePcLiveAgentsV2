@@ -33,8 +33,15 @@ def load_env():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, val = line.split("=", 1)
+                    val = val.strip()
+                    # Strip matching surrounding quotes (mirrors python-
+                    # dotenv). Without this, `GEMINI_API_KEY="abc"` in
+                    # .env stores `"abc"` (with quotes) and Gemini's
+                    # Authorization header gets a malformed key.
+                    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                        val = val[1:-1]
                     # .env wins over stale shell env — see PR #416.
-                    os.environ[key.strip()] = val.strip()
+                    os.environ[key.strip()] = val
 
 
 def generate_image(client, args):
@@ -83,7 +90,7 @@ def generate_image(client, args):
     model = args.model or os.environ.get("IMAGE_MODEL", "gemini-3.1-flash-image-preview")
     print(f"  Model: {model}", file=sys.stderr)
     print(f"  Prompt: {args.prompt[:100]}{'...' if len(args.prompt) > 100 else ''}", file=sys.stderr)
-    print(f"  Generating image...", file=sys.stderr)
+    print("  Generating image...", file=sys.stderr)
 
     try:
         response = client.models.generate_content(
@@ -120,7 +127,7 @@ def generate_image(client, args):
                 text_response += part.text
 
     if not image_saved:
-        print(f"Error: No image in response.", file=sys.stderr)
+        print("Error: No image in response.", file=sys.stderr)
         if text_response:
             print(f"  Model said: {text_response}", file=sys.stderr)
         sys.exit(1)
@@ -171,7 +178,7 @@ def generate_video(client, args):
         img.save(buf, format="PNG")
         image = types.Image(image_bytes=buf.getvalue(), mime_type="image/png")
 
-    print(f"  Generating video (this may take 1-3 minutes)...", file=sys.stderr)
+    print("  Generating video (this may take 1-3 minutes)...", file=sys.stderr)
 
     try:
         if image:

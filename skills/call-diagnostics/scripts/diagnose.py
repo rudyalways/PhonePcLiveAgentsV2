@@ -17,33 +17,245 @@ Usage:
 """
 
 import json
+import os
 import re
+import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 
-# Default metrics path — override with --metrics <path>
+# Pure analysis policy lives in analysis.py; this module keeps loading, CLI,
+# terminal output and HTML rendering. Do not duplicate categorization or repair
+# logic in the renderer.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from analysis import (INLINE_KEYWORDS, HALLUCINATION_PHRASES, merge_timeline,  # noqa: E402
+                      parse_ts, _ts_short, diagnose, categorize_issue,
+                      _make_repair, _classify_repair, analyze_patterns_and_repair)
+
+# Default metrics source order:
+#   1. --metrics <path>           — explicit jsonl override (back-compat)
+#   2. data/conversation.sqlite   — primary as of #603 (sessions table)
+#   3. data/call-metrics.jsonl    — frozen archive fallback
 _cwd_path = Path.cwd() / "data" / "call-metrics.jsonl"
 _script_path = Path(__file__).resolve().parents[3] / "data" / "call-metrics.jsonl"
 METRICS_PATH = _cwd_path if _cwd_path.exists() else _script_path
 
-# Parse --metrics flag early so load_calls uses the right file
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+from workspace_default import resolve_workspace  # noqa: E402
+
+# conversation.sqlite lives under the resolved workspace (post-v0.8 default
+# `<repo>/workspace/`; configurable via `sutando.config.local.json`), the same
+# tree the runtime writers use — not the repo root.
+SQLITE_PATH = Path(os.environ.get(
+    "SUTANDO_CONVERSATION_DB",
+    resolve_workspace(migrate=False) / "data" / "conversation.sqlite"))
+
+# Parse early flags so load_calls picks the right source
+SOURCE_FILTER = "phone"   # 'voice' | 'phone' | 'all' — selectable via --source
+FORCE_JSONL = False       # set by --metrics
 for _i, _arg in enumerate(sys.argv):
     if _arg == "--metrics" and _i + 1 < len(sys.argv):
         METRICS_PATH = Path(sys.argv[_i + 1])
+        FORCE_JSONL = True
+        break
+for _i, _arg in enumerate(sys.argv):
+    if _arg == "--source" and _i + 1 < len(sys.argv):
+        SOURCE_FILTER = sys.argv[_i + 1]
         break
 
-INLINE_KEYWORDS = r"\b(record|recording|screen.?record|scroll.?and.?describe|play.?recording|screenshot|describe.?screen)\b"
-HALLUCINATION_PHRASES = [
-    "is currently playing", "it is playing", "I'm recording",
-    "recording is complete", "I've opened", "subtitled video is now playing",
-    "I'm unable to", "I can't find", "I can't seem to", "file isn't found",
-    "not found", "couldn't locate",
-    "I've closed the video", "closed the video", "making sure it's closed",
-]
+def _load_from_sqlite(call_sid=None, last_n=1):
+    """Query sessions table from conversation.sqlite. Returns dicts matching
+    the legacy jsonl shape (callSid/sessionId/timestamp/events/toolCalls).
+
+    Issue #1357 fix (2026-05-31): the previous SELECT referenced columns
+    `tool_calls`, `events` that don't exist on the current `sessions` schema
+    (a schema rev that never landed). Events live in the `session_events`
+    table joined by `session_id`; tool-call aggregation is reconstructed
+    from per-surface transcript tables (e.g. `phone` / `voice`)
+    where `kind='tool_call'` rows carry the tool name in `text` and the
+    duration in `duration_ms`. Mini's "minimum diff" suggestion from the
+    issue — keeps the downstream detector contract unchanged.
+    """
+    if not SQLITE_PATH.exists():
+        return None
+    try:
+        db = sqlite3.connect(str(SQLITE_PATH))
+        db.row_factory = sqlite3.Row
+        sql = (
+            "SELECT ts_unix, source, session_id, call_sid, caller, is_owner, is_meeting, "
+            "duration_ms, transcript_lines, tool_count, pending_tasks "
+            "FROM sessions "
+        )
+        params = []
+        wh = []
+        if SOURCE_FILTER != "all":
+            wh.append("source = ?")
+            params.append(SOURCE_FILTER)
+        if call_sid:
+            wh.append("(call_sid = ? OR session_id = ?)")
+            params.append(call_sid); params.append(call_sid)
+        if wh:
+            sql += "WHERE " + " AND ".join(wh) + " "
+        sql += "ORDER BY ts_unix ASC"
+        if not call_sid and last_n:
+            sql = "SELECT * FROM (" + sql + f") ORDER BY ts_unix DESC LIMIT {int(last_n)}"
+        rows = db.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["timestamp"] = datetime.fromtimestamp(d.pop("ts_unix")).isoformat() + "Z"
+            d["durationMs"] = d.pop("duration_ms")
+            d["transcriptLines"] = d.pop("transcript_lines")
+            d["toolCount"] = d.pop("tool_count")
+            d["pendingTasks"] = d.pop("pending_tasks")
+            d["callSid"] = d.pop("call_sid") or d.get("session_id") or "unknown"
+            d["sessionId"] = d.pop("session_id") or d["callSid"]
+            d["isOwner"] = bool(d.pop("is_owner")) if d.get("is_owner") is not None else None
+            d["isMeeting"] = bool(d.pop("is_meeting")) if d.get("is_meeting") is not None else None
+            # Normalize source for surface-table lookup: recordSession() may
+            # store a source with hyphens, but per-surface table names use
+            # underscores. (#1357 review — Echo)
+            source = (d.get("source") or "phone").replace("-", "_")
+            d["events"] = _load_session_events(db, source, d["sessionId"], d["callSid"])
+            d["toolCalls"] = _load_session_tool_calls(db, source, d["sessionId"], d["callSid"])
+            out.append(d)
+        db.close()
+        out.sort(key=lambda c: c.get("timestamp", ""))
+        if call_sid:
+            return out
+        return out[-last_n:] if last_n else out
+    except Exception as e:
+        print(f"  sqlite load failed: {e}", file=sys.stderr)
+        return None
+
+
+_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+_NON_SURFACE_TABLES = {"sessions", "session_events", "conversation", "tool_calls"}
+
+
+def _surface_table(db, source):
+    """Resolve `source` to its per-surface transcript table, plugin-agnostically.
+    Returns the table name iff `source` is a safe identifier naming a real table
+    with the surface schema (ts_unix/kind/text/session_id) — else None. Both
+    guards against SQL injection on the table name AND lets the tool diagnose any
+    plugin-registered surface without hardcoding one."""
+    if not source or not _IDENT_RE.match(source) or source in _NON_SURFACE_TABLES:
+        return None
+    try:
+        cols = {r[1] for r in db.execute(f"PRAGMA table_info({source})").fetchall()}
+    except Exception:
+        return None
+    return source if {"ts_unix", "kind", "text", "session_id"} <= cols else None
+
+
+def _load_session_events(db, source, session_id, call_sid):
+    """Ordered events for a session, in the legacy jsonl `events` shape
+    ({timestamp, event}). Combines two sources:
+
+      1. lifecycle events from `session_events` (event_name), and
+      2. reconstructed turn events from the per-source surface table
+         (e.g. `phone` / `voice`): `user` -> `caller:<text>`,
+         `agent` -> `sutando:<text>`, `tool_call` -> `tool_call:<name>`.
+
+    (2) is required because `session_events` deliberately omits the
+    user/agent/tool_call rows (conversation-store.ts) — but diagnose()'s
+    detectors key off exactly those `caller:` / `sutando:` / `tool_call:`
+    prefixes, so without the surface-table reconstruction every detector is
+    blind (#1357 review — Echo). Surface tables key on `session_id`, which for
+    phone holds the call_sid; we match either."""
+    rows = []
+    try:
+        cur = db.execute(
+            "SELECT ts_unix, event_name AS detail FROM session_events "
+            "WHERE session_id = ? OR call_sid = ?",
+            (session_id, call_sid),
+        )
+        rows.extend((r["ts_unix"], r["detail"]) for r in cur.fetchall())
+    except Exception:
+        pass
+    table = _surface_table(db, source)
+    if table:
+        try:
+            cur = db.execute(
+                f"SELECT ts_unix, kind, text, duration_ms FROM {table} "
+                "WHERE kind IN ('user','agent','tool_call') "
+                "AND (session_id = ? OR session_id = ?) "
+                "ORDER BY ts_unix ASC",
+                (session_id, call_sid),
+            )
+            for r in cur.fetchall():
+                kind, text = r["kind"], (r["text"] or "")
+                if kind == "user":
+                    rows.append((r["ts_unix"], "caller:" + text))
+                elif kind == "agent":
+                    rows.append((r["ts_unix"], "sutando:" + text))
+                elif kind == "tool_call":
+                    # Surface rows are written at tool *result* time (recordToolCall
+                    # on onToolResult) and carry duration_ms. Detectors read
+                    # `tool_call:` as execution START and look for `tool_result:` to
+                    # suppress hallucination warnings — so synthesize both from
+                    # (ts_unix, duration_ms): tool_call: at start, tool_result: at end
+                    # (#1357 review — Echo).
+                    end_ts = r["ts_unix"]
+                    start_ts = end_ts - (r["duration_ms"] or 0) / 1000.0
+                    rows.append((start_ts, "tool_call:" + text))
+                    rows.append((end_ts, "tool_result:" + text))
+        except Exception:
+            pass
+    rows.sort(key=lambda x: x[0])
+    return [
+        {"timestamp": datetime.fromtimestamp(ts).isoformat() + "Z", "event": detail}
+        for ts, detail in rows
+    ]
+
+
+def _load_session_tool_calls(db, source, session_id, call_sid):
+    """Fetch ordered tool_call rows for a session from the source-specific
+    transcript table (e.g. `phone` / `voice`).
+
+    Each row has `kind='tool_call'`, the tool name in `text`, and duration
+    in `duration_ms`. Returns a list of {timestamp, name, durationMs} dicts
+    matching the legacy jsonl `toolCalls` shape."""
+    # Only these source tables carry per-turn rows including tool_call kind.
+    # If the source is unrecognized, return empty rather than risking a SQL
+    # injection on the table name.
+    table = _surface_table(db, source)
+    if table is None:
+        return []
+    try:
+        # Surface tables key the per-turn rows on `session_id`, which for phone
+        # holds the call_sid; match either so phone calls (session_id null on the
+        # sessions row) still line up. (#1357 review — Echo)
+        cur = db.execute(
+            f"SELECT ts_unix, text, duration_ms FROM {table} "
+            "WHERE kind = 'tool_call' AND (session_id = ? OR session_id = ?) "
+            "ORDER BY ts_unix ASC",
+            (session_id, call_sid),
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "timestamp": datetime.fromtimestamp(row["ts_unix"]).isoformat() + "Z",
+                "name": row["text"] or "(unknown)",
+                "durationMs": row["duration_ms"] or 0,
+            }
+            for row in rows
+        ]
+    except Exception:
+        return []
 
 
 def load_calls(call_sid=None, last_n=1):
+    # Primary path: sqlite (#603), unless --metrics forced a jsonl file
+    if not FORCE_JSONL:
+        sqlite_rows = _load_from_sqlite(call_sid=call_sid, last_n=last_n)
+        if sqlite_rows is not None and sqlite_rows:
+            return sqlite_rows
+        # Empty sqlite result is fine — fall through only if file doesn't exist
+        if sqlite_rows is not None:
+            return []
     if not METRICS_PATH.exists():
         print(f"No metrics file: {METRICS_PATH}")
         return []
@@ -66,426 +278,6 @@ def load_calls(call_sid=None, last_n=1):
         return calls
     calls.sort(key=lambda c: c.get("timestamp", ""))
     return calls[-last_n:]
-
-
-def merge_timeline(call):
-    """Merge events and toolCalls into sorted timeline."""
-    items = []
-    for e in call.get("events", []):
-        items.append({"ts": e["timestamp"], "type": "event", "detail": e["event"]})
-    for t in call.get("toolCalls", []):
-        items.append({
-            "ts": t["timestamp"], "type": "toolCall",
-            "detail": f"{t['name']} ({t['durationMs']}ms)",
-            "name": t["name"], "durationMs": t["durationMs"],
-        })
-    items.sort(key=lambda x: x["ts"])
-    return items
-
-
-def parse_ts(ts_str):
-    try:
-        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _ts_short(ts):
-    return ts[11:19] if len(ts) > 19 else ts
-
-
-def diagnose(call):
-    """Run all diagnostics on a single call. Returns list of issues."""
-    timeline = merge_timeline(call)
-    issues = []
-    recent_tool_results = {}
-    last_recording_stop = None
-    pending_caller_requests = []
-
-    for i, item in enumerate(timeline):
-        ts = _ts_short(item["ts"])
-        detail = item["detail"]
-
-        # 1. Tool returned too fast
-        if item["type"] == "toolCall":
-            name = item.get("name", "")
-            dur = item.get("durationMs", 0)
-            if dur < 10 and name not in ("work", "hang_up"):
-                issues.append({"severity": "error", "time": ts,
-                    "issue": f"{name} returned in {dur}ms — likely failed silently",
-                    "detail": "Tool calls under 10ms usually mean the tool hit an early error return without doing work."})
-            recent_tool_results.setdefault(name, []).append(dur)
-            if name not in ("work", "hang_up"):
-                fast_count = sum(1 for d in recent_tool_results[name] if d < 10)
-                if fast_count >= 3 and fast_count == len([d for d in recent_tool_results[name] if d < 10]):
-                    issues.append({"severity": "error", "time": ts,
-                        "issue": f"{name} failed {fast_count} times in this call",
-                        "detail": "Repeated fast returns suggest a systematic issue, not a one-off."})
-
-        # 2. Hallucination
-        if item["type"] == "event" and detail.startswith("sutando:"):
-            text = detail[8:]
-            for phrase in HALLUCINATION_PHRASES:
-                if phrase.lower() in text.lower():
-                    recent_tools = [t for t in timeline[max(0, i - 5):i]
-                                    if t["type"] == "event" and t["detail"].startswith("tool_result:")]
-                    if not recent_tools:
-                        issues.append({"severity": "warn", "time": ts,
-                            "issue": f"Possible hallucination: \"{text[:60]}\"",
-                            "detail": "Gemini claimed an action state without a recent tool call/result."})
-                    break
-
-        # 3. Inline tool delegated via work
-        if item["type"] == "event" and detail.startswith("task_delegated:"):
-            task_desc = detail[15:]
-            # Only match keywords in the action text, not in file paths
-            task_text = re.split(r'[/\\]tmp[/\\]', task_desc)[0]
-            if re.search(INLINE_KEYWORDS, task_text, re.IGNORECASE):
-                issues.append({"severity": "error", "time": ts,
-                    "issue": f"Inline task delegated via work: \"{task_desc[:60]}\"",
-                    "detail": "Recording/screenshot/playback should use inline tools directly, not work."})
-
-        # 4. Auto-play after recording
-        if item["type"] == "event" and "auto-stop" in detail:
-            last_recording_stop = i
-        if item["type"] == "event" and detail == "tool_call:play_recording" and last_recording_stop is not None:
-            caller_between = any(
-                t["type"] == "event" and t["detail"].startswith("caller:")
-                for t in timeline[last_recording_stop:i]
-            )
-            if not caller_between:
-                issues.append({"severity": "warn", "time": ts,
-                    "issue": "Auto-play after recording — user didn't ask",
-                    "detail": "play_recording called immediately after recording stopped with no caller speech in between."})
-            last_recording_stop = None
-
-        # 5. Long delay between request and execution
-        if item["type"] == "event" and detail.startswith("caller:"):
-            text = detail[7:].lower()
-            if any(kw in text for kw in ["record", "play", "open the video", "open the record"]):
-                pending_caller_requests.append((item["ts"], text[:60]))
-        if item["type"] == "event" and detail.startswith("tool_call:"):
-            for req_ts, req_text in pending_caller_requests:
-                t1, t2 = parse_ts(req_ts), parse_ts(item["ts"])
-                if t1 and t2:
-                    delay = (t2 - t1).total_seconds()
-                    if delay > 30:
-                        issues.append({"severity": "warn", "time": ts,
-                            "issue": f"{delay:.0f}s delay from request to {detail[10:]}",
-                            "detail": f"User asked \"{req_text}\" at {req_ts[11:19]}, tool called at {ts}."})
-            pending_caller_requests = []
-
-        # 6. Tool call before caller speech (timestamp lag)
-        if item["type"] == "event" and detail.startswith("tool_call:"):
-            tool_name = detail[10:]
-            for j in range(i + 1, min(i + 5, len(timeline))):
-                if timeline[j]["type"] == "event" and timeline[j]["detail"].startswith("caller:"):
-                    t1, t2 = parse_ts(item["ts"]), parse_ts(timeline[j]["ts"])
-                    if t1 and t2:
-                        lag = (t2 - t1).total_seconds()
-                        if lag > 5:
-                            issues.append({"severity": "info", "time": ts,
-                                "issue": f"Caller speech logged {lag:.0f}s after {tool_name} tool call",
-                                "detail": "STT transcript committed after tool executed — caller timestamp unreliable."})
-                    break
-
-    # 7. Wrong tool for the request
-    WRONG_TOOL_PATTERNS = [
-        (["branch", "git", "commit", "repo"], "describe_screen",
-         "work", "Code/repo questions should use work, not screen description"),
-        (["branch", "git", "commit", "repo"], "scroll_and_describe",
-         "work", "Code/repo questions should use work, not recording"),
-        (["play", "open the video", "open the record", "open it"], "switch_tab",
-         "play_recording", "Video playback should use play_recording, not switch_tab"),
-        (["change the color", "change subtitle", "change the subtitle"], "describe_screen",
-         "work", "Code changes should use work, not screen description"),
-    ]
-    for i, item in enumerate(timeline):
-        if item["type"] != "event" or not item["detail"].startswith("tool_call:"):
-            continue
-        tool = item["detail"][10:]
-        ts = _ts_short(item["ts"])
-        recent_caller = []
-        for j in range(max(0, i - 10), i):
-            if timeline[j]["type"] == "event" and timeline[j]["detail"].startswith("caller:"):
-                t1, t2 = parse_ts(timeline[j]["ts"]), parse_ts(item["ts"])
-                if t1 and t2 and (t2 - t1).total_seconds() < 30:
-                    recent_caller.append(timeline[j]["detail"][7:].lower())
-        caller_context = " ".join(recent_caller)
-        for keywords, wrong, right, explanation in WRONG_TOOL_PATTERNS:
-            if tool == wrong and any(kw in caller_context for kw in keywords):
-                issues.append({"severity": "error", "time": ts,
-                    "issue": f"Wrong tool: {wrong} instead of {right}",
-                    "detail": f"{explanation}. Caller said: \"{caller_context[:80]}\""})
-                break
-
-    # 8. Unmet user expectations
-    FRUSTRATION_PATTERNS = [
-        "not asking you to", "i'm not asking", "no, ", "no no",
-        "that's not", "this is not", "it's not", "you're not",
-        "i said", "i just need", "i don't need", "can you just",
-        "why", "hello?", "are you there", "stuck",
-    ]
-    CORRECTION_PATTERNS = [
-        ("not asking you to record", "User corrected unwanted recording/description"),
-        ("this is not the subtitle", "Wrong video version opened"),
-        ("not the one with", "Wrong version of file"),
-        ("i just need this one", "User wants current file modified, not future"),
-        ("you should submit", "User had to explain how to use work tool"),
-        ("submit a task", "User had to explain how to use work tool"),
-        ("submit the task", "User had to explain how to use work tool"),
-    ]
-    for i, item in enumerate(timeline):
-        if item["type"] != "event" or not item["detail"].startswith("caller:"):
-            continue
-        text = item["detail"][7:].lower()
-        ts = _ts_short(item["ts"])
-        for pattern, explanation in CORRECTION_PATTERNS:
-            if pattern in text:
-                issues.append({"severity": "warn", "time": ts,
-                    "issue": f"User correction: \"{text[:60]}\"",
-                    "detail": explanation})
-                break
-        else:
-            for pattern in FRUSTRATION_PATTERNS:
-                if text.startswith(pattern) or f" {pattern}" in text:
-                    for j in range(i + 1, min(i + 6, len(timeline))):
-                        if timeline[j]["type"] == "event" and timeline[j]["detail"].startswith("caller:"):
-                            next_text = timeline[j]["detail"][7:].lower()
-                            if len(set(text.split()) & set(next_text.split())) >= 3:
-                                issues.append({"severity": "warn", "time": ts,
-                                    "issue": "Unmet expectation — user repeated request",
-                                    "detail": f"User: \"{text[:50]}\" then repeated: \"{next_text[:50]}\""})
-                            break
-                    break
-
-    # 9. Tool called without user request (auto-invocation)
-    AUTO_CHECK_TOOLS = {
-        "scroll_and_describe": ["record", "recording", "video", "capture"],
-        "screen_record": ["record", "recording", "video", "capture"],
-        "play_recording": ["play", "open", "video", "watch"],
-        "describe_screen": ["screen", "what's on", "describe", "see"],
-    }
-    for i, item in enumerate(timeline):
-        if item["type"] != "event" or not item["detail"].startswith("tool_call:"):
-            continue
-        tool = item["detail"][10:]
-        if tool not in AUTO_CHECK_TOOLS:
-            continue
-        ts = _ts_short(item["ts"])
-        keywords = AUTO_CHECK_TOOLS[tool]
-        caller_requested = False
-        for j in range(max(0, i - 8), i):
-            if timeline[j]["type"] == "event" and timeline[j]["detail"].startswith("caller:"):
-                t1, t2 = parse_ts(timeline[j]["ts"]), parse_ts(item["ts"])
-                if t1 and t2 and (t2 - t1).total_seconds() < 20:
-                    if any(kw in timeline[j]["detail"][7:].lower() for kw in keywords):
-                        caller_requested = True
-                        break
-        if not caller_requested:
-            issues.append({"severity": "warn", "time": ts,
-                "issue": f"Auto-invoked {tool} — no matching user request",
-                "detail": f"Gemini called {tool} without the user asking for it in the preceding 20s."})
-
-    return issues
-
-
-def categorize_issue(issue):
-    """Normalize an issue into a specific, tool-call-centric category."""
-    text = issue["issue"].lower()
-    detail = issue.get("detail", "").lower()
-
-    if "returned in" in text and "ms" in text:
-        return f"{text.split(' returned')[0].strip()} returned too fast (failed)"
-    if "wrong tool" in text:
-        return f"Wrong tool: {detail.split('.')[0]}" if detail else "Wrong tool called"
-    if "hallucination" in text:
-        if "playing" in text or "playing" in detail:
-            return "Hallucinated: 'video is playing'"
-        if "recording" in text or "complete" in text:
-            return "Hallucinated: 'recording is complete'"
-        if "unable" in text or "can't find" in detail:
-            return "Hallucinated: 'can't find file'"
-        if "branch" in detail or "develop" in detail:
-            return "Hallucinated: fabricated answer"
-        return f"Hallucinated: '{text[24:60]}'"
-    if "auto-invoked" in text or "auto-play" in text:
-        return "Auto-played video without user asking"
-    if "inline task delegated" in text:
-        task = detail.split('"')[1] if '"' in detail else "unknown"
-        if "record" in task:
-            return "Recording delegated via work (not inline)"
-        if "play" in task:
-            return "Playback delegated via work (not inline)"
-        return f"Inline task delegated via work: {task[:40]}"
-    if "user correction" in text:
-        if "submit" in text or "submit" in detail:
-            return "User had to explain 'submit task' = work tool"
-        if "not asking you to record" in text:
-            return "Gemini recorded when user didn't ask"
-        if "not the subtitle" in text or "not the one" in text:
-            return "Opened wrong video version"
-        if "just need this one" in text:
-            return "User wants existing file modified (not future)"
-        return f"User correction: {text[18:60]}"
-    if "unmet expectation" in text:
-        return "User repeated request (not understood)"
-    if "delay from request" in text:
-        return f"Long delay before calling {text.split(' to ')[-1] if ' to ' in text else 'tool'}"
-    if "failed" in text and "times" in text:
-        return f"{text.split(' failed')[0].strip()} failed repeatedly"
-    if "caller speech logged" in text:
-        return "STT timestamp lag"
-    return f"Other: {text[:50]}"
-
-
-def _make_repair(cat, freq, affected_calls, total_calls, trend, in_recent, repair_type, repair, priority):
-    pct = affected_calls * 100 // total_calls if total_calls > 0 else 0
-    return {
-        "problem": cat,
-        "evidence": f"{affected_calls}/{total_calls} calls ({pct}%), trend: {trend}",
-        "frequency": freq,
-        "trend": trend,
-        "repair_type": repair_type,
-        "repair": repair,
-        "priority": priority,
-    }
-
-
-def _classify_repair(cat, freq, affected_calls, total_calls, trend, in_recent, occurrences):
-    """Classify a persistent issue and recommend a specific repair."""
-    pct = affected_calls * 100 // total_calls if total_calls > 0 else 0
-    cat_lower = cat.lower()
-    mk = lambda rt, repair, priority: _make_repair(
-        cat, freq, affected_calls, total_calls, trend, in_recent, rt, repair, priority)
-
-    if "stt" in cat_lower and "lag" in cat_lower:
-        return mk("unsolvable",
-            "STT lag is inherent to the Gemini/Twilio pipeline. Timestamps in observability "
-            "are when STT commits the transcript, not when the user spoke. Treat caller "
-            "timestamps as approximate. Do not reorder events based on this.", "low")
-
-    if "auto-invoked" in cat_lower:
-        tool = cat.split("auto-invoked ")[-1].split(" —")[0] if "auto-invoked" in cat_lower else "unknown"
-        priority = "critical" if in_recent and trend != "improving" else "high"
-        if "scroll_and_describe" in cat_lower or "screen_record" in cat_lower:
-            return mk("prompt",
-                f"Gemini calls {tool} without the user asking. "
-                "Fix: add to scroll_and_describe/screen_record tool description: "
-                "'NEVER call this tool unless the user explicitly says record/recording/capture. "
-                "Do NOT start recording based on context or anticipation.'", priority)
-        if "play_recording" in cat_lower:
-            return mk("prompt",
-                "Gemini auto-plays video without user asking. "
-                "Fix: strengthen scroll_and_describe return message and play_recording description: "
-                "'NEVER call play_recording unless the user explicitly says play/open/watch.'", priority)
-        if "describe_screen" in cat_lower:
-            return mk("prompt",
-                "Gemini calls describe_screen without user asking for screen description. "
-                "Fix: add to describe_screen description: 'Only call when user explicitly asks "
-                "what is on the screen, to describe the screen, or to see something.'",
-                "medium" if not in_recent else "high")
-
-    if "hallucinated" in cat_lower:
-        if "playing" in cat_lower:
-            return mk("prompt",
-                "Gemini claims video is playing without checking. "
-                "Fix: add to voice agent prompt: 'NEVER claim a video is playing/paused/open "
-                "without calling play_recording(action:status) first to verify.'",
-                "high" if in_recent else "medium")
-        if "can't find" in cat_lower:
-            return mk("code",
-                "Gemini says 'can't find file' when file exists. "
-                "Fix: play_recording should return the actual file path in the result so Gemini "
-                "has concrete evidence. Also add retry logic (already done in play_recording fix).",
-                "high" if in_recent else "medium")
-        if "fabricated" in cat_lower:
-            return mk("prompt",
-                "Gemini fabricates answers while waiting for task results. "
-                "Fix: add to voice agent prompt: 'When a work task is pending, say ONLY "
-                "\"still working on it\" — NEVER guess or fabricate an answer.'",
-                "critical" if in_recent else "high")
-        return mk("prompt", "Gemini hallucinated — add specific anti-hallucination rule to prompt.", "medium")
-
-    if "user had to explain" in cat_lower or "submit task" in cat_lower:
-        return mk("prompt",
-            "User says 'submit a task' / 'send to core' but Gemini doesn't understand. "
-            "Fix: add aliases in voice agent prompt: 'submit a task', 'send to core', "
-            "'ask core' all mean: call the work tool. (Already added — verify deployed.)",
-            "high" if in_recent else "medium")
-    if "unwanted" in cat_lower or "gemini recorded" in cat_lower:
-        return mk("prompt",
-            "Gemini starts recording/describing when user didn't ask. "
-            "Same root cause as auto-invocation — tighten tool descriptions.",
-            "high" if in_recent else "medium")
-    if "wrong version" in cat_lower:
-        return mk("code",
-            "play_recording opens wrong version. Fix: findRecording should prefer "
-            "subtitled > narrated > raw (already fixed — verify deployed).", "medium")
-    if "modify existing" in cat_lower:
-        return mk("code",
-            "User wants to modify existing video (e.g. change subtitle color) but system "
-            "says 'only for future recordings'. Fix: when subtitle color change task arrives, "
-            "re-burn existing video with ffmpeg using the saved SRT file. No code change needed "
-            "in browser-tools — core agent can do this directly.", "medium")
-    if "long delay" in cat_lower:
-        return mk("prompt",
-            "Gemini takes >30s to call the right tool after user request. "
-            "Often caused by Gemini trying wrong approaches first. "
-            "Fix: strengthen 'when in doubt, call work' rule and add specific routing "
-            "hints for common requests.", "medium")
-    if "returned too fast" in cat_lower:
-        tool = cat.split(" returned")[0]
-        if "scroll_and_describe" in tool:
-            return mk("prompt",
-                f"{tool} returns instantly when already recording (duplicate guard — expected). "
-                f"The root cause is Gemini calling {tool} multiple times or without user asking. "
-                "Fix: tighten tool description to say 'NEVER call more than once per recording. "
-                "Do NOT call unless user explicitly says record/recording.'", "medium")
-        return mk("code",
-            f"{tool} returns in <10ms = early error return. "
-            "Fix: check if tool hits an early return path (file not found, cooldown). "
-            "Add retry/polling if the file may still be saving.",
-            "high" if in_recent and trend != "improving" else "medium")
-    if "failed repeatedly" in cat_lower:
-        return mk("code", "Tool fails multiple times in same call — indicates systematic issue, not transient.", "high")
-
-    if pct >= 20 or in_recent:
-        return mk("unknown", "Persistent issue — needs manual investigation.", "medium")
-    return None
-
-
-def analyze_patterns_and_repair(calls):
-    """Analyze persistent patterns across all calls and recommend systematic repairs."""
-    issue_history = {}
-    for idx, call in enumerate(calls):
-        first_ts = call.get("events", [{}])[0].get("timestamp", "")[:10]
-        for iss in diagnose(call):
-            cat = categorize_issue(iss)
-            issue_history.setdefault(cat, []).append({"idx": idx, "date": first_ts, "issue": iss})
-
-    total_calls = len(calls)
-    recent_5 = set(range(max(0, total_calls - 5), total_calls))
-    repairs = []
-
-    for cat, occurrences in issue_history.items():
-        freq = len(occurrences)
-        affected_calls = len(set(o["idx"] for o in occurrences))
-        pct = affected_calls * 100 // total_calls if total_calls > 0 else 0
-        mid = total_calls // 2
-        first_half = sum(1 for o in occurrences if o["idx"] < mid)
-        second_half = sum(1 for o in occurrences if o["idx"] >= mid)
-        trend = "worsening" if second_half > first_half * 1.5 else "improving" if second_half < first_half * 0.5 else "stable"
-        in_recent = any(o["idx"] in recent_5 for o in occurrences)
-        if pct < 10 and not in_recent:
-            continue
-        repair = _classify_repair(cat, freq, affected_calls, total_calls, trend, in_recent, occurrences)
-        if repair:
-            repairs.append(repair)
-
-    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    repairs.sort(key=lambda r: priority_order.get(r["priority"], 4))
-    return repairs
 
 
 def print_timeline(call):
@@ -651,9 +443,9 @@ def generate_tracker_html(calls, output_path, source_type="phone"):
 
     last_cd = call_data[-1] if call_data else {}
     parts = [
-        f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>TRACKER_TITLE_PLACEHOLDER</title>',
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title>TRACKER_TITLE_PLACEHOLDER</title>',
         f'<style>{_CSS}</style></head><body>',
-        f'<h1>TRACKER_TITLE_PLACEHOLDER</h1>',
+        '<h1>TRACKER_TITLE_PLACEHOLDER</h1>',
         f'<div class="summary"><strong>{len(calls)} calls total</strong> | Showing last 5 | '
         f'Issues in view: {len(table_cats)} | Last call: {last_cd.get("date","")} {last_cd.get("time","")}</div>',
     ]
@@ -745,7 +537,9 @@ if __name__ == "__main__":
 
     if "--tracker" in sys.argv:
         calls = load_calls(last_n=999)
-        source = "voice" if "voice-metrics" in str(METRICS_PATH) else "phone"
+        # Source selection now from SOURCE_FILTER (--source voice|phone|all),
+        # which sqlite path honors in WHERE clause. Default phone.
+        source = SOURCE_FILTER if SOURCE_FILTER in ("voice", "phone") else "phone"
         out_path = f"/tmp/{source}-diagnostics-tracker.html"
         out = generate_tracker_html(calls, out_path, source_type=source)
         content = Path(out).read_text()

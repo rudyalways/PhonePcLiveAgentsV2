@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""Tests for src/vault_intercept.py — bridge-level secret interception.
+
+All Keychain writes are mocked: no real 'security' subprocess is spawned,
+secrets never touch the test runner's Keychain.
+"""
+
+import importlib.util
+import os
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, call, patch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
+
+# vault_intercept imports cleanly without detect-secrets — but it FAILS CLOSED
+# at runtime: with no scanner available it refuses every unquoted `vault set`
+# rather than storing a value it cannot validate (see vault_intercept.py:266).
+#
+# That is correct production behaviour, but it means 15 of these 47 tests
+# assert outcomes that only hold when scanning actually works. Without the
+# package they report as ordinary failures, which reads like broken vault
+# logic instead of a missing dev dependency.
+#
+# Skipping the whole suite (rather than the 15) is deliberate: with no scanner
+# this file exercises a degraded configuration that never occurs in
+# production — CI and every real deployment have detect-secrets — so a partial
+# local pass would assert against a shape that does not ship.
+#
+# The guard does NOT apply under CI: if $CI is set the suite runs regardless,
+# so a silently broken install step fails the build instead of being papered
+# over as a skip.
+if importlib.util.find_spec("detect_secrets") is None and not os.environ.get("CI"):
+    print(
+        "SKIP tests/vault-intercept.test.py — detect-secrets not installed, so\n"
+        "      vault_intercept fails closed and 15 of 47 assertions cannot hold.\n"
+        "      Install the test dep to run this suite:\n"
+        f"          {sys.executable} -m pip install 'detect-secrets>=1.5.0'\n"
+        "      (if that fails with 'externally-managed-environment' (PEP 668),\n"
+        "       retry the same command with --break-system-packages)",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+import vault_intercept
+from vault_intercept import InterceptResult, intercept_vault_commands, redact_vault_commands
+
+
+def _mock_store(monkeypatch=None):
+    """Return a patcher for subprocess.run that always succeeds."""
+    return patch("vault_intercept.subprocess.run", return_value=MagicMock(returncode=0))
+
+
+class TestNoVaultCommands(unittest.TestCase):
+    def test_empty_string(self):
+        result = intercept_vault_commands("")
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.stored, [])
+
+    def test_plain_message_unchanged(self):
+        msg = "Hey, can you check my calendar?"
+        result = intercept_vault_commands(msg)
+        self.assertEqual(result.text, msg)
+        self.assertEqual(result.stored, [])
+
+    def test_partial_vault_word_unchanged(self):
+        msg = "add to vault tomorrow"
+        result = intercept_vault_commands(msg)
+        self.assertEqual(result.text, msg)
+        self.assertEqual(result.stored, [])
+
+
+class TestSingleVaultSet(unittest.TestCase):
+    def test_bare_value(self):
+        with _mock_store():
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            result = intercept_vault_commands(f"vault set MY_KEY {value}")
+        self.assertEqual(result.text, "vault set MY_KEY [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["MY_KEY"])
+
+    def test_double_quoted_value(self):
+        with _mock_store():
+            result = intercept_vault_commands('vault set API_KEY "secret value here"')
+        self.assertEqual(result.text, 'vault set API_KEY [STORED-IN-KEYCHAIN]')
+        self.assertEqual(result.stored, ["API_KEY"])
+
+    def test_single_quoted_value(self):
+        with _mock_store():
+            result = intercept_vault_commands("vault set TOKEN 'my token value'")
+        self.assertEqual(result.text, "vault set TOKEN [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["TOKEN"])
+
+    def test_backtick_quoted_value(self):
+        with _mock_store():
+            result = intercept_vault_commands("vault set API_KEY `my-secret-token`")
+        self.assertEqual(result.text, "vault set API_KEY [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["API_KEY"])
+
+    def test_backtick_quoted_value_with_spaces(self):
+        with _mock_store():
+            result = intercept_vault_commands("vault set TOKEN `value with spaces`")
+        self.assertEqual(result.text, "vault set TOKEN [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["TOKEN"])
+
+    def test_backtick_value_stored_without_backticks(self):
+        stored_value = []
+        def _capture_run(cmd, **kw):
+            if "add-generic-password" in cmd:
+                w_idx = cmd.index("-w")
+                stored_value.append(cmd[w_idx + 1])
+            return MagicMock(returncode=0)
+        with patch("vault_intercept.subprocess.run", side_effect=_capture_run), \
+             patch.object(vault_intercept, "_register_key"):
+            intercept_vault_commands("vault set K `secret`")
+        self.assertEqual(stored_value, ["secret"])  # no backticks in stored value
+
+    def test_empty_value_rejected(self):
+        result = intercept_vault_commands('vault set FOO ""')
+        self.assertIn("[VAULT-EMPTY-VALUE]", result.text)
+        self.assertEqual(result.stored, [])
+        self.assertIn("FOO", result.failed)
+
+    def test_case_insensitive(self):
+        with _mock_store():
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            result = intercept_vault_commands(f"VAULT SET FOO {value}")
+        # Replacement normalizes to lowercase 'vault set'; secret is sanitized.
+        self.assertEqual(result.text, "vault set FOO [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["FOO"])
+
+    # --- `=` separator (2026-06-22 leak: `vault set KEY=VALUE` was uncaught) ---
+    def test_equals_separator_bare(self):
+        with _mock_store():
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            result = intercept_vault_commands(f"vault set MY_KEY={value}")
+        self.assertEqual(result.text, "vault set MY_KEY [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["MY_KEY"])
+
+    def test_equals_separator_with_spaces(self):
+        with _mock_store():
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            result = intercept_vault_commands(f"vault set MY_KEY = {value}")
+        self.assertEqual(result.text, "vault set MY_KEY [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["MY_KEY"])
+
+    def test_equals_separator_quoted_value(self):
+        with _mock_store():
+            result = intercept_vault_commands('vault set API_KEY="secret value here"')
+        self.assertEqual(result.text, "vault set API_KEY [STORED-IN-KEYCHAIN]")
+        self.assertEqual(result.stored, ["API_KEY"])
+
+    def test_equals_first_only_value_keeps_rest(self):
+        # Only the FIRST `=` is the separator; `=` inside the value is kept.
+        stored_value = []
+        def _capture_run(cmd, **kw):
+            if "add-generic-password" in cmd:
+                stored_value.append(cmd[cmd.index("-w") + 1])
+            return MagicMock(returncode=0)
+        with patch("vault_intercept.subprocess.run", side_effect=_capture_run), \
+             patch.object(vault_intercept, "_register_key"):
+            intercept_vault_commands('vault set TOK="ab=cd=="')
+        self.assertEqual(stored_value, ["ab=cd=="])
+
+    def test_space_form_still_intercepts(self):
+        # Regression: the original space-separated form is unaffected.
+        with _mock_store():
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            result = intercept_vault_commands(f"vault set MY_KEY {value}")
+        self.assertEqual(result.stored, ["MY_KEY"])
+
+    def test_surrounded_by_prose(self):
+        with _mock_store():
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            result = intercept_vault_commands(
+                f"hey set this: vault set APOLLO_KEY {value} and use it for the integration"
+            )
+        self.assertIn("[STORED-IN-KEYCHAIN]", result.text)
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, ["APOLLO_KEY"])
+
+
+class TestUnrecognizedValueFailsClosed(unittest.TestCase):
+    """#2074: an unquoted value the FP guard doesn't recognize must not leak
+    to disk just because scan_secrets() missed it — only genuine prose (a
+    key that fullmatches a single plain lowercase word) should still pass
+    through untouched.
+
+    PR #2052 review history — two rounds of the same underlying mistake
+    (enumerating "deliberate" characters instead of excluding the much
+    smaller "plain prose word" set):
+    - qingyun-wu round 1 (2026-07-12): only SCREAMING_SNAKE_CASE keys were
+      treated as deliberate, so lowercase/camelCase/PascalCase/dash-separated
+      keys still leaked (`test_*_key_variant_not_leaked` below).
+    - qingyun-wu round 2 (2026-07-12): the round-1 fix's regex (`[A-Z0-9_-]`)
+      didn't actually implement its own documented rule ("not a single
+      all-lowercase word") — lowercase keys with OTHER punctuation
+      (`apikey.vault`, `user:id`, ...) still slipped through as "prose" and
+      leaked (`test_*_punctuation_key_*` below). Fixed by inverting the
+      test: prose is now defined as "key fullmatches `[a-z]+`", everything
+      else fails closed — a closed exclusion instead of an open-ended
+      allowlist.
+
+    All cases verified against PR head 72c2e52 with scan_secrets() stubbed
+    to return [], matching real behavior when detect-secrets doesn't
+    recognize the value's shape."""
+
+    def test_discord_client_secret_shaped_value_not_leaked(self):
+        # Real repro from #2074: a 32-char mixed dash/underscore client
+        # secret that scan_secrets() classifies as not-a-known-secret.
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set PR_TRIAGE_ACTIVITY_SECRET {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["PR_TRIAGE_ACTIVITY_SECRET"])
+        self.assertIn("unrecognized value", result.text)
+        self.assertIn("resend quoted", result.text.lower())
+
+    def test_pa_prefixed_key_not_leaked(self):
+        value = "pa-1234567890abcdefghijklmnopqrstuvwx"
+        result = intercept_vault_commands(f"vault set SOME_API_KEY {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["SOME_API_KEY"])
+
+    def test_al_prefixed_key_not_leaked(self):
+        value = "al-1234567890abcdefghijklmnopqrstuvwx"
+        result = intercept_vault_commands(f"vault set SOME_API_KEY {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["SOME_API_KEY"])
+
+    def test_lowercase_snake_case_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set pr_triage_activity_secret {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["pr_triage_activity_secret"])
+
+    def test_pascal_case_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set PrTriageActivitySecret {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["PrTriageActivitySecret"])
+
+    def test_camel_case_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set prTriageActivitySecret {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["prTriageActivitySecret"])
+
+    def test_dash_separated_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set SOME-KEY {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["SOME-KEY"])
+
+    def test_lowercase_dash_separated_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set some-key {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["some-key"])
+
+    def test_dotted_lowercase_key_not_leaked(self):
+        # qingyun-wu round 2 repro: an all-lowercase key with punctuation
+        # other than dash/underscore still looked like "prose" under the
+        # round-1 fix's [A-Z0-9_-] inclusion list.
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set apikey.vault {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["apikey.vault"])
+
+    def test_slash_separated_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set apikey/vault {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["apikey/vault"])
+
+    def test_colon_separated_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set user:id {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["user:id"])
+
+    def test_plus_separated_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set token+name {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["token+name"])
+
+    def test_at_prefixed_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set @token {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["@token"])
+
+    def test_does_not_call_subprocess_when_unrecognized(self):
+        # Fail-closed must mean "never even attempt to store" — no Keychain
+        # write for a value we couldn't validate.
+        with patch("vault_intercept.subprocess.run") as mock_run:
+            intercept_vault_commands("vault set SOME_API_KEY pa-1234567890abcdefghijklmnopqrstuvwx")
+            mock_run.assert_not_called()
+
+    def test_prose_with_non_env_shaped_key_still_unchanged(self):
+        # Regression guard for the original FP-skip behavior: ordinary
+        # sentences that happen to match the loose regex syntax (lowercase,
+        # non-conventional "key") must NOT be redacted just because the
+        # captured value isn't a known secret.
+        msg = "the vault set command works fine, thanks"
+        result = intercept_vault_commands(msg)
+        self.assertEqual(result.text, msg)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, [])
+
+    def test_lowercase_key_bare_word_value_unchanged(self):
+        msg = "vault set thing works"
+        result = intercept_vault_commands(msg)
+        self.assertEqual(result.text, msg)
+        self.assertEqual(result.failed, [])
+
+
+class TestMultipleVaultSets(unittest.TestCase):
+    def test_two_commands(self):
+        v1 = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+        v2 = "ghp_" + "x" * 36
+        msg = f"vault set KEY1 {v1}\nvault set KEY2 {v2}"
+        with _mock_store():
+            result = intercept_vault_commands(msg)
+        self.assertNotIn(v1, result.text)
+        self.assertNotIn(v2, result.text)
+        self.assertEqual(sorted(result.stored), ["KEY1", "KEY2"])
+        self.assertEqual(result.text.count("[STORED-IN-KEYCHAIN]"), 2)
+
+    def test_three_commands_inline(self):
+        v1 = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+        v2 = "ghp_" + "x" * 36
+        v3 = "AKIA" + "B"*16  # AWS Access Key shape
+        msg = f"vault set A {v1} vault set B {v2} vault set C {v3}"
+        with _mock_store():
+            result = intercept_vault_commands(msg)
+        self.assertEqual(sorted(result.stored), ["A", "B", "C"])
+        self.assertNotIn(v1, result.text)
+        self.assertNotIn(v2, result.text)
+        self.assertNotIn(v3, result.text)
+
+
+class TestKeychainInteraction(unittest.TestCase):
+    def test_calls_security_add_generic_password(self):
+        with patch("vault_intercept.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            intercept_vault_commands(f"vault set MYKEY {value}")
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        self.assertIn("security", args)
+        self.assertIn("add-generic-password", args)
+        self.assertIn("MYKEY", args)
+        self.assertIn(value, args)
+        self.assertIn("-U", args)   # update flag must be present
+
+    def test_account_is_sutando(self):
+        with patch("vault_intercept.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+            intercept_vault_commands(f"vault set K {value}")
+        args = mock_run.call_args[0][0]
+        idx = args.index("-a")
+        self.assertEqual(args[idx + 1], "sutando")
+
+    def test_key_and_value_passed_separately(self):
+        with patch("vault_intercept.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            intercept_vault_commands('vault set MY_SECRET "pa$$word"')
+        args = mock_run.call_args[0][0]
+        # -s KEY  and  -w VALUE  must be separate arguments (not concatenated)
+        self.assertIn("-s", args)
+        self.assertIn("-w", args)
+        s_idx = args.index("-s")
+        w_idx = args.index("-w")
+        self.assertEqual(args[s_idx + 1], "MY_SECRET")
+        self.assertEqual(args[w_idx + 1], "pa$$word")
+
+
+class TestRedactVaultCommands(unittest.TestCase):
+    """redact_vault_commands — scrubs vault patterns without touching Keychain."""
+
+    def test_empty_string_unchanged(self):
+        self.assertEqual(redact_vault_commands(""), "")
+
+    def test_plain_message_unchanged(self):
+        msg = "check my calendar"
+        self.assertEqual(redact_vault_commands(msg), msg)
+
+    def test_vault_set_redacted(self):
+        result = redact_vault_commands("vault set SECRET mysecret")
+        self.assertIn("[vault: non-owner tier — ignored]", result)
+        self.assertNotIn("mysecret", result)
+
+    def test_does_not_call_subprocess(self):
+        with patch("vault_intercept.subprocess.run") as mock_run:
+            redact_vault_commands("vault set K v")
+        mock_run.assert_not_called()
+
+    def test_multiple_commands_redacted(self):
+        msg = "vault set A x\nvault set B y"
+        result = redact_vault_commands(msg)
+        self.assertEqual(result.count("[vault: non-owner tier — ignored]"), 2)
+        self.assertNotIn(" x", result)
+        self.assertNotIn(" y", result)
+
+    def test_quoted_value_redacted(self):
+        result = redact_vault_commands('vault set KEY "secret value"')
+        self.assertNotIn("secret", result)
+        self.assertIn("[vault: non-owner tier — ignored]", result)
+
+
+class TestErrorHandling(unittest.TestCase):
+    def test_store_failure_still_redacts(self):
+        """Fail-closed: plaintext must never reach disk even when Keychain write fails."""
+        value = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+        failed_proc = MagicMock(returncode=1, stderr=b"boom")
+        with patch("vault_intercept.subprocess.run", return_value=failed_proc):
+            result = intercept_vault_commands(f"vault set K {value}")
+        self.assertNotIn(value, result.text)
+        self.assertIn("[VAULT-STORE-FAILED]", result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["K"])
+
+    def test_partial_failure_redacts_all(self):
+        """With N vault commands, a failure on command M must not expose 1..M-1 secrets."""
+        call_count = [0]
+        def _side_effect(cmd, **kw):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                return MagicMock(returncode=1, stderr=b"fail")
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        v1 = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
+        v2 = "ghp_" + "x" * 36
+        with patch("vault_intercept.subprocess.run", side_effect=_side_effect), \
+             patch.object(vault_intercept, "_register_key"):
+            result = intercept_vault_commands(f"vault set A {v1}\nvault set B {v2}")
+        self.assertNotIn(v1, result.text)
+        self.assertNotIn(v2, result.text)
+        self.assertIn("A", result.stored)
+        self.assertIn("B", result.failed)
+
+    def test_returns_namedtuple(self):
+        result = intercept_vault_commands("no vault command here")
+        self.assertIsInstance(result, InterceptResult)
+        self.assertIsInstance(result.text, str)
+        self.assertIsInstance(result.stored, list)
+        self.assertIsInstance(result.failed, list)
+
+
+if __name__ == "__main__":
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    # Explicit allowlist, not unittest.main() — a new TestCase class must be
+    # added here or it silently never runs (no error, just missing coverage).
+    for cls in [
+        TestNoVaultCommands,
+        TestSingleVaultSet,
+        TestUnrecognizedValueFailsClosed,
+        TestMultipleVaultSets,
+        TestKeychainInteraction,
+        TestRedactVaultCommands,
+        TestErrorHandling,
+    ]:
+        suite.addTests(loader.loadTestsFromTestCase(cls))
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)

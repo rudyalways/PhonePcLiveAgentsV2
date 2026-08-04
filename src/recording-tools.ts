@@ -3,11 +3,14 @@
  * Extracted from browser-tools.ts for readability.
  */
 
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { resolveCredential } from './credential-resolver.js';
 import { writeFileSync, unlinkSync, readFileSync, readlinkSync, existsSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { demoStateRef, narrationSpeakingRef, lastSpokenRef, nextDescRef, scrollPausedRef } from './recording-state.js';
+import { readCaptureToken } from './util_paths.js';
 import { SCREEN_CAPTURE_ORIGIN } from './screen-capture-origin.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -15,17 +18,44 @@ const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 /**
  * Auto-detect an ffmpeg binary that has the `subtitles` filter (requires libass).
  * Cached after first call so the probe only runs once per process lifetime.
- * Probe order: $FFMPEG_SUBTITLE_BIN env → system ffmpeg → homebrew narrow → homebrew full.
+ * Probe order: $FFMPEG_SUBTITLE_BIN env → system ffmpeg → homebrew narrow →
+ * homebrew full → bundled runtime.
+ *
+ * The bundled-runtime candidate is the fix for a real failure mode: when the
+ * voice-agent runs inside Sutando.app it executes under the bundled node at
+ * `…/Contents/Resources/runtime/bin/node`, and a libass-capable ffmpeg ships
+ * as its sibling (`…/runtime/bin/ffmpeg`). On an install with no ffmpeg on PATH
+ * and no Homebrew, all the earlier candidates miss and subtitles silently fail
+ * even though a perfectly capable ffmpeg sits right next to the running node.
+ * Deriving the path from `process.execPath` means we find it without any env
+ * wiring; in dev (system node) the sibling simply doesn't exist and the probe
+ * falls through harmlessly. Kept LAST so working installs are unaffected.
  */
+/**
+ * Ordered ffmpeg probe candidates for a given node exec path. Exported for
+ * testing. The final entry is the bundled runtime ffmpeg (sibling of the
+ * running node) — see findFfmpegWithSubtitles for why it's last.
+ */
+export function ffmpegSubtitleCandidates(execPath: string): string[] {
+	return [
+		'ffmpeg',
+		'/opt/homebrew/bin/ffmpeg',
+		'/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg',
+		join(dirname(execPath), 'ffmpeg'),
+	];
+}
+
 let _cachedSubtitleFfmpeg: string | null | undefined;
 function findFfmpegWithSubtitles(): string | null {
 	if (_cachedSubtitleFfmpeg !== undefined) return _cachedSubtitleFfmpeg;
 	const envBin = process.env.FFMPEG_SUBTITLE_BIN?.trim();
 	if (envBin) { _cachedSubtitleFfmpeg = envBin; console.log(`${ts()} [ffmpeg] using $FFMPEG_SUBTITLE_BIN: ${envBin}`); return envBin; }
-	const candidates = ['ffmpeg', '/opt/homebrew/bin/ffmpeg', '/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg'];
+	const candidates = ffmpegSubtitleCandidates(process.execPath);
 	for (const bin of candidates) {
 		try {
-			if (execSync(`${bin} -filters 2>&1`, { timeout: 5_000 }).toString().includes('subtitles')) {
+			// execFileSync argv array — bin is from env or hardcoded candidates, not user input (fixes #1451)
+			const filterOut = execFileSync(bin, ['-filters'], { timeout: 5_000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+			if (filterOut.includes('subtitles')) {
 				_cachedSubtitleFfmpeg = bin;
 				console.log(`${ts()} [ffmpeg] subtitle filter found in: ${bin}`);
 				return bin;
@@ -54,7 +84,7 @@ function injectText(session: any, text: string) {
 }
 
 // Vision model — override via .env (default: flash-lite for this trivial 20-word task)
-const VISION_MODEL = process.env.VISION_MODEL || 'gemini-3.1-flash-lite-preview';
+const VISION_MODEL = process.env.VISION_MODEL || 'gemini-3.1-flash-lite';
 
 // --- Shared recording state ---
 
@@ -71,7 +101,7 @@ export const recordingState = { muted: false };
 
 /** Stop any active screen recording */
 export function stopActiveRecording(): void {
-	try { execSync('python3 skills/screen-record/scripts/record.py stop', { timeout: 5_000 }); } catch {}
+	try { execFileSync('python3', ['skills/screen-record/scripts/record.py', 'stop'], { timeout: 5_000 }); } catch {}
 }
 
 /** Check if a recording is currently active */
@@ -90,8 +120,37 @@ export function isRecordingMuted(): boolean {
 // Symlink points to the active call's transcript (phone or voice agent)
 const LIVE_TRANSCRIPT_SYMLINK = '/tmp/sutando-live-transcript.txt';
 const LIVE_TRANSCRIPT_SRT_PATH = '/tmp/sutando-live-transcript-subtitle.srt';
+const VOICE_TRANSCRIPT_PATH = '/tmp/sutando-live-transcript-voice.txt';
 let liveTranscriptRecordingStart = 0;
 let liveTranscriptBaselineLines = 0;
+
+// Pick the freshest user-speech transcript (voice-agent or phone) and return
+// the last few user-spoken lines as lowercase. Returns '' if neither is
+// reasonably fresh (≥60s old) so callers fail-open rather than blocking on
+// stale data — e.g. a phone-call symlink left over from hours ago when the
+// current session is voice-agent.
+function getRecentUserSpeech(): string {
+	const candidates: string[] = [];
+	if (existsSync(VOICE_TRANSCRIPT_PATH)) candidates.push(VOICE_TRANSCRIPT_PATH);
+	try {
+		const phonePath = readlinkSync(LIVE_TRANSCRIPT_SYMLINK);
+		if (existsSync(phonePath)) candidates.push(phonePath);
+	} catch {}
+	let bestPath = '';
+	let bestMtime = 0;
+	for (const p of candidates) {
+		try {
+			const m = statSync(p).mtimeMs;
+			if (m > bestMtime) { bestMtime = m; bestPath = p; }
+		} catch {}
+	}
+	if (!bestPath || Date.now() - bestMtime > 60_000) return '';
+	try {
+		const lines = readFileSync(bestPath, 'utf8').split('\n');
+		const userLines = lines.filter(l => /\b(Caller|User):/i.test(l));
+		return userLines.slice(-3).join(' ').toLowerCase();
+	} catch { return ''; }
+}
 // Resolved path to the call-specific transcript file, captured at recording start.
 // A concurrent call (e.g. Zoom join) can overwrite the symlink, so we resolve it
 // once and use the resolved path for the entire recording lifecycle.
@@ -226,7 +285,7 @@ function isReadableFile(path: string): boolean {
 
 function findRecording(version?: 'raw' | 'narrated' | 'subtitled'): string | null {
 	try {
-		const files = execSync('ls -t /tmp/sutando-recording-*.mov 2>/dev/null | grep -v narrated | grep -v subtitled | head -1', { timeout: 3_000 }).toString().trim();
+		const files = execFileSync('/bin/sh', ['-c', 'ls -t /tmp/sutando-recording-*.mov 2>/dev/null | grep -v narrated | grep -v subtitled | head -1'], { timeout: 3_000 }).toString().trim();
 		if (files && isReadableFile(files)) {
 			if (version === 'raw') return files;
 			const narrated = files.replace('.mov', '-narrated.mov');
@@ -245,8 +304,10 @@ function findRecording(version?: 'raw' | 'narrated' | 'subtitled'): string | nul
 // --- Vision helpers ---
 
 async function describeScreenshot(imagePath: string, previousDescs: string[] = []): Promise<string> {
-	const apiKey = process.env.GEMINI_API_KEY;
-	if (!apiKey) return 'Vision description unavailable (no GEMINI_API_KEY)';
+	// Prefer free-tier voice key (gemini-3.1-flash-lite-preview is free-tier eligible on REST
+	// generateContent — verified 2026-05-14). Falls back to paid GEMINI_API_KEY if voice key absent.
+	const apiKey = resolveCredential('gemini-voice').key;
+	if (!apiKey) return 'Vision description unavailable (no GEMINI_VOICE_API_KEY or GEMINI_API_KEY)';
 	try {
 		// Fixes CodeQL #27 (js/command-line-injection): use execFileSync argv array instead of shell string
 		const safePath = imagePath.replace(/[^a-zA-Z0-9_\-./]/g, '');
@@ -299,7 +360,8 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 
 async function captureScreen(): Promise<string | null> {
 	try {
-		const res = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`);
+		const _capTok = readCaptureToken();
+		const res = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`, _capTok ? { headers: { 'X-Sutando-Capture-Token': _capTok } } : {});
 		const data = await res.json() as { status: string; path?: string };
 		return data.status === 'ok' && data.path ? data.path : null;
 	} catch { return null; }
@@ -313,13 +375,13 @@ export function scrollDown(pixels: number = 600) {
 	const js = `(function(){var best=document.scrollingElement||document.documentElement,bw=0;document.querySelectorAll('*').forEach(function(el){var d=el.scrollHeight-el.clientHeight;if(d>50&&el.clientHeight>200){var w=el.getBoundingClientRect().width;if(w>bw){best=el;bw=w}}});best.scrollBy(0,${pixels})})()`;
 	const tmpScroll = `/tmp/sutando-scroll-rec-${Date.now()}.scpt`;
 	writeFileSync(tmpScroll, `tell application "Google Chrome" to tell active tab of front window to execute javascript "${js.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
-	execSync(`osascript ${tmpScroll}`, { timeout: 5_000 });
+	execFileSync('/usr/bin/osascript', [tmpScroll], { timeout: 5_000 });
 	try { unlinkSync(tmpScroll); } catch {}
 	// Repaint trigger: Chrome defers visual repaints during Zoom screen share.
 	// CGEvent scroll wheel events force a repaint through the OS input pipeline
 	// without stealing focus (unlike keyboard fallback which breaks narration).
 	try {
-		execSync(`swift src/scroll-wheel.swift 1`, { timeout: 3_000 });
+		execFileSync('swift', ['src/scroll-wheel.swift', '1'], { timeout: 3_000 });
 	} catch { /* best-effort — scroll already happened via JS */ }
 }
 
@@ -333,7 +395,11 @@ export const scrollAndDescribeTool: ToolDefinition = {
 		'For plain screen recording WITHOUT narration, use screen_record instead. ' +
 		'Call ONCE with duration_seconds. SPEAK the returned description as your first words (do NOT announce "starting recording"). ' +
 		'New descriptions will be pushed as the page scrolls — speak each one. NEVER repeat earlier narration. ' +
-		'Recording auto-stops. Do NOT call this more than once per recording.',
+		'Recording auto-stops. Do NOT call this more than once per recording. ' +
+		'**Subtitles are attempted automatically** when both transcript text exists and a libass-capable ffmpeg is installed — you DO support subtitles, never refuse a "with subtitles" request, just call this tool (the burn may silently skip if transcript is empty or ffmpeg lacks libass; the subtitled_path field will then point at a non-existent file and the model should fall back to narrated_path). ' +
+		'After auto-stop, to play back or open the recording, call play_video — it auto-finds the file. ' +
+		'Or pass `subtitled_path` from the start result to open_file (the start result returns recording_path/narrated_path/subtitled_path; subtitled is the right one for "with subtitles"). ' +
+		'Do NOT invent file paths — only use the exact paths returned by this tool.',
 	parameters: z.object({
 		duration_seconds: z.number().optional().describe('Target duration in seconds (default 15, max 60). ALWAYS seconds, never minutes.'),
 	}),
@@ -351,18 +417,23 @@ export const scrollAndDescribeTool: ToolDefinition = {
 			demoStateRef.value = 'recording';
 
 			// Scroll to top and wait for it to take effect
-			execSync(`osascript -e 'tell application "Google Chrome" to activate' -e 'delay 0.3' -e 'tell application "System Events" to key code 126 using command down'`, { timeout: 5_000 });
+			execFileSync('/usr/bin/osascript', ['-e', 'tell application "Google Chrome" to activate', '-e', 'delay 0.3', '-e', 'tell application "System Events" to key code 126 using command down'], { timeout: 5_000 });
 			// Also use JS scroll as backup (keyboard may not work if Chrome isn't focused)
-			try { execSync(`osascript -e 'tell application "Google Chrome" to tell active tab of front window to execute javascript "window.scrollTo(0,0)"'`, { timeout: 3_000 }); } catch {}
+			try { execFileSync('/usr/bin/osascript', ['-e', 'tell application "Google Chrome" to tell active tab of front window to execute javascript "window.scrollTo(0,0)"'], { timeout: 3_000 }); } catch {}
 			await new Promise(r => setTimeout(r, 500)); // let scroll settle
 
 			// Capture + describe FIRST, then start recording.
 			// This way the vision API latency doesn't eat into recording time.
-			const captureRes = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`);
+			const _capTok2 = readCaptureToken();
+			const captureRes = await fetch(`${SCREEN_CAPTURE_ORIGIN}/capture`, _capTok2 ? { headers: { 'X-Sutando-Capture-Token': _capTok2 } } : {});
 			const captureData = await captureRes.json() as { status: string; path?: string };
 			const firstDesc = captureData.path ? await describeScreenshot(captureData.path) : '';
 			try { unlinkSync(LIVE_TRANSCRIPT_SRT_PATH); } catch {}
-			execSync('python3 skills/screen-record/scripts/record.py start', { timeout: 10_000 });
+			const startRaw = execFileSync('python3', ['skills/screen-record/scripts/record.py', 'start'], { timeout: 10_000 }).toString().trim();
+			let recordingPath = '';
+			try { recordingPath = JSON.parse(startRaw).path || ''; } catch {}
+			const narratedPath = recordingPath ? recordingPath.replace('.mov', '-narrated.mov') : '';
+			const subtitledPath = recordingPath ? recordingPath.replace('.mov', '-narrated-subtitled.mov') : '';
 			// Set subtitle baseline — pick whichever transcript was updated more recently.
 			// Voice agent writes to -voice.txt; phone conversation-server writes to -CA{sid}.txt via symlink.
 			const voiceTranscript = '/tmp/sutando-live-transcript-voice.txt';
@@ -383,7 +454,7 @@ export const scrollAndDescribeTool: ToolDefinition = {
 			// Description pushes happen via the narration controller at a separate cadence.
 			let pageHeight = 5000;
 			try {
-				pageHeight = parseInt(execSync(`osascript -e 'tell application "Google Chrome" to tell active tab of front window to execute javascript "document.body.scrollHeight - window.innerHeight"'`, { timeout: 3_000 }).toString().trim()) || 5000;
+				pageHeight = parseInt(execFileSync('/usr/bin/osascript', ['-e', 'tell application "Google Chrome" to tell active tab of front window to execute javascript "document.body.scrollHeight - window.innerHeight"'], { timeout: 3_000 }).toString().trim()) || 5000;
 			} catch {}
 			const viewportHeight = 900;
 			writeFileSync('/tmp/sutando-scroll-info.json', JSON.stringify({ pageHeight, viewportHeight, duration_seconds }));
@@ -400,7 +471,7 @@ export const scrollAndDescribeTool: ToolDefinition = {
 				scrollPausedRef.value = false;
 				let stopResult: any = {};
 				try {
-					const raw = execSync('python3 skills/screen-record/scripts/record.py stop', { timeout: 10_000 }).toString().trim();
+					const raw = execFileSync('python3', ['skills/screen-record/scripts/record.py', 'stop'], { timeout: 10_000 }).toString().trim();
 					stopResult = JSON.parse(raw);
 				} catch {}
 				// Explicitly flush narration-tee (it normally triggers on next audio chunk,
@@ -416,14 +487,25 @@ export const scrollAndDescribeTool: ToolDefinition = {
 					await new Promise(r => setTimeout(r, 2000));
 				}
 				// Burn live transcript subtitles on narrated version only
+				let subtitledPath = '';
 				if (liveTranscriptRecordingStart > 0 && narrated && isReadableFile(narrated)) {
 					const subtitled = burnLiveTranscriptSubtitles(narrated);
-					if (subtitled) console.log(`${ts()} [ScrollAndDescribe] subtitle burned: ${subtitled}`);
-					else console.log(`${ts()} [ScrollAndDescribe] subtitle burn failed (no transcript lines or ffmpeg error)`);
+					if (subtitled) {
+						subtitledPath = subtitled;
+						console.log(`${ts()} [ScrollAndDescribe] subtitle burned: ${subtitled}`);
+					} else console.log(`${ts()} [ScrollAndDescribe] subtitle burn failed (no transcript lines or ffmpeg error)`);
+				}
+				// Persist playback-path so play_video can replay this recording without
+				// the user (or model) knowing the absolute path. Matches the pattern in
+				// screen_record stop. Required after PR #546 made open_file generic
+				// (no longer falls back to findRecording).
+				const recommended = subtitledPath || (narrated && isReadableFile(narrated) ? narrated : (stopResult?.path || ''));
+				if (recommended) {
+					try { writeFileSync('/tmp/sutando-playback-path', recommended); } catch {}
 				}
 				if (liveTranscriptRecordingStart === myRecStart) liveTranscriptRecordingStart = 0;
 				demoStateRef.value = 'done';
-				console.log(`${ts()} [ScrollAndDescribe] auto-stop`);
+				console.log(`${ts()} [ScrollAndDescribe] auto-stop (playback-path=${recommended || 'none'})`);
 			}, duration_seconds * 1000);
 
 			console.log(`${ts()} [ScrollAndDescribe] recording started with first desc`);
@@ -439,7 +521,10 @@ export const scrollAndDescribeTool: ToolDefinition = {
 			return {
 				status: 'recording',
 				first_description: firstDesc,
-				message: `Recording started. IMMEDIATELY speak this narration — NO filler, NO "okay", NO "should I": "${firstDesc}". Auto-stops in ${duration_seconds}s.`,
+				recording_path: recordingPath,
+				narrated_path: narratedPath,
+				subtitled_path: subtitledPath,
+				message: `Recording started. IMMEDIATELY speak this narration — NO filler, NO "okay", NO "should I": "${firstDesc}". Auto-stops in ${duration_seconds}s. After auto-stop, three files will exist (best→worst): subtitled=${subtitledPath}, narrated=${narratedPath}, raw=${recordingPath}. When the user asks to open "the recording" or "the recording with subtitles", pass subtitled_path to open_file. Only fall back to narrated_path if subtitled doesn't exist (rare — subtitle burn failure on missing libass).`,
 			};
 		} catch (err) {
 			return { error: `record_screen_with_narration failed: ${err instanceof Error ? err.message : err}` };
@@ -447,76 +532,10 @@ export const scrollAndDescribeTool: ToolDefinition = {
 	},
 };
 
-// Video playback tools — split from a single polymorphic playRecordingTool into 6
-// single-purpose tools. Gemini selects more reliably with narrow descriptions than
-// with one tool that has an "action" enum. The old tool caused persistent confusion
-// between "open" and "play" (42% of calls in diagnostics had wrong action selection).
-export const openFileTool: ToolDefinition = {
-	name: 'open_file',
-	description:
-		'Open a file with the default macOS app. ALWAYS pass a `path` — get it from the recording tool\'s return value or ask the user. ' +
-		'Use for: "open the video/recording", "open the file", "open that", "can you open it". ' +
-		'If the user says "open the log" or similar, ASK which log they mean (voice-agent, discord-bridge, etc.) — do NOT default to a recording. ' +
-		'Do NOT call play_video after this — wait for user to explicitly say "play". ' +
-		'Known files: "diagnostic tracker" or "diagnostics" = /tmp/phone-diagnostics-tracker.html, ' +
-		'"voice diagnostics" = /tmp/voice-diagnostics-tracker.html. ' +
-		'If you need to find the latest recording but lost the path, pass find_recording=true.',
-	parameters: z.object({
-		path: z.string().optional().describe('File path to open. Get this from the recording tool result. Use known file aliases for diagnostic tracker etc.'),
-		find_recording: z.boolean().optional().describe('If true and no path given, find and open the latest screen recording. Only use as a fallback when you lost the recording path.'),
-	}),
-	execution: 'inline',
-	async execute(args) {
-		const { path: filePath, find_recording } = args as { path?: string; find_recording?: boolean };
-		console.log(`${ts()} [OpenFile] called (path=${filePath || 'none'}, find_latest=${find_recording || false})`);
-		demoStateRef.value = 'idle';
-		try {
-			let recPath = filePath ? filePath.replace(/^~/, process.env.HOME || '') : null;
-			if (recPath && !existsSync(recPath)) {
-				console.log(`${ts()} [OpenFile] path "${recPath}" does not exist`);
-				return { error: `File not found: ${recPath}. Ask the user for the correct path or use "work" to locate it.` };
-			}
-			// Only find latest recording if explicitly requested — not as a silent default.
-			// The recording tool should have already told you the path.
-			if (!recPath && find_recording) {
-				recPath = findRecording();
-			}
-			if (!recPath) {
-				return { error: 'No path provided. Pass the file path from the recording tool result, or set find_recording=true to search.' };
-			}
-			if (!isReadableFile(recPath)) {
-				return { error: `File not readable or too small: ${recPath}. It may still be writing — try again in a few seconds.` };
-			}
-			if (recPath.includes('sutando-recording')) {
-				writeFileSync('/tmp/sutando-playback-path', recPath);
-			}
-			// execFileSync — no shell interpolation of caller-controlled recPath
-			// (same CodeQL js/command-line-injection class as #27).
-			execFileSync('open', [recPath], { timeout: 5_000 });
-			try { execSync(`osascript -e 'tell application "QuickTime Player" to activate'`, { timeout: 3_000 }); } catch {}
-			const size = statSync(recPath).size;
-			let duration_seconds: number | null = null;
-			try {
-				const dur = execFileSync(
-					'/opt/homebrew/bin/ffprobe',
-					['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', recPath],
-					{ timeout: 5_000 }
-				).toString().trim();
-				duration_seconds = Math.round(parseFloat(dur));
-			} catch {}
-			console.log(`${ts()} [OpenFile] opened ${recPath} (${(size / 1024 / 1024).toFixed(1)}MB, ${duration_seconds ?? '?'}s)`);
-			return {
-				status: 'opened',
-				path: recPath,
-				size_mb: +(size / 1024 / 1024).toFixed(1),
-				duration_seconds,
-				instruction: 'File opened. When user says play, call play_video.',
-			};
-		} catch (err) {
-			return { error: `open_file failed: ${err instanceof Error ? err.message : err}` };
-		}
-	},
-};
+// openFileTool moved to ./inline-tools.ts — generic file open (with fullscreen=true
+// for QT present mode) is not recording-specific. Recording-flavored side effects
+// (playback-path write, demoStateRef reset) now live where they belong: in
+// `screenRecordTool` stop handler and `playVideoTool`/`startPlayback`.
 
 /** Helper: start QuickTime playback + stream audio to phone */
 async function startPlayback(seekSec: number = 0): Promise<{ status: string; path?: string; error?: string; instruction?: string }> {
@@ -526,18 +545,18 @@ async function startPlayback(seekSec: number = 0): Promise<{ status: string; pat
 	if (!recPath) return { status: 'error', error: 'No video to play. Open a video first with open_video.' };
 	let alreadyOpen = false;
 	try {
-		const c = execSync(`osascript -e 'tell application "QuickTime Player" to count of documents'`, { timeout: 2_000 }).toString().trim();
+		const c = execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player" to count of documents'], { timeout: 2_000 }).toString().trim();
 		alreadyOpen = parseInt(c) > 0;
 	} catch {}
 	if (!alreadyOpen) {
-		execSync(`open "${recPath}"`, { timeout: 5_000 });
+		execFileSync('open', [recPath], { timeout: 5_000 });
 		for (let i = 0; i < 10; i++) {
-			try { const c = execSync(`osascript -e 'tell application "QuickTime Player" to count of documents'`, { timeout: 2_000 }).toString().trim(); if (parseInt(c) > 0) break; } catch {}
+			try { const c = execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player" to count of documents'], { timeout: 2_000 }).toString().trim(); if (parseInt(c) > 0) break; } catch {}
 			await new Promise(r => setTimeout(r, 300));
 		}
 	}
 	if (seekSec === 0) {
-		try { execSync(`osascript -e 'tell application "QuickTime Player"' -e 'set d to document 1' -e 'set current time of d to 0' -e 'end tell'`, { timeout: 3_000 }); } catch {}
+		try { execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player"', '-e', 'set d to document 1', '-e', 'set current time of d to 0', '-e', 'end tell'], { timeout: 3_000 }); } catch {}
 	}
 	try { unlinkSync('/tmp/sutando-playback-pause'); } catch {}
 	fetch(`http://localhost:${process.env.PHONE_PORT || '3100'}/play-audio`, {
@@ -545,7 +564,7 @@ async function startPlayback(seekSec: number = 0): Promise<{ status: string; pat
 		body: JSON.stringify({ path: recPath, seekSec }),
 	}).catch(() => {});
 	await new Promise(r => setTimeout(r, 300));
-	try { execSync(`osascript -e 'tell application "QuickTime Player"' -e 'activate' -e 'play document 1' -e 'end tell'`, { timeout: 5_000 }); } catch {}
+	try { execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player"', '-e', 'activate', '-e', 'play document 1', '-e', 'end tell'], { timeout: 5_000 }); } catch {}
 	return { status: 'playing', path: recPath, instruction: 'Video is playing. Say NOTHING.' };
 }
 
@@ -570,25 +589,21 @@ export const resumeVideoTool: ToolDefinition = {
 	execution: 'inline',
 	async execute() {
 		console.log(`${ts()} [ResumeVideo] called`);
-		// Only resume if caller said "resume"/"continue"/"go on"/"play" in recent transcript
-		try {
-			const transcriptPath = readlinkSync('/tmp/sutando-live-transcript.txt');
-			const lines = readFileSync(transcriptPath, 'utf8').split('\n');
-			const callerLines = lines.filter(l => l.includes('Caller:'));
-			const recent = callerLines.slice(-3).join(' ').toLowerCase();
-			if (!/\b(resume|continue|go on|play it|play the)\b/.test(recent)) {
-				console.log(`${ts()} [ResumeVideo] BLOCKED — no resume keyword in recent caller speech: "${recent.slice(-80)}"`);
-				return { status: 'paused', instruction: 'Video is still paused. Only resume when user explicitly says "resume" or "play".' };
-			}
-		} catch {}
+		// Only resume if user said "resume"/"continue"/"go on"/"play" in recent transcript.
+		// Picks freshest of voice-agent vs phone transcript; fail-open if neither is fresh.
+		const recent = getRecentUserSpeech();
+		if (recent && !/\b(resume|continue|go on|play it|play the)\b/.test(recent)) {
+			console.log(`${ts()} [ResumeVideo] BLOCKED — no resume keyword in recent user speech: "${recent.slice(-80)}"`);
+			return { status: 'paused', instruction: 'Video is still paused. Only resume when user explicitly says "resume" or "play".' };
+		}
 		try {
 			try { unlinkSync('/tmp/sutando-playback-pause'); } catch {}
 			lastResumeTime = Date.now();
-			try { execSync(`osascript -e 'tell application "QuickTime Player"' -e 'activate' -e 'play document 1' -e 'end tell'`, { timeout: 5_000 }); } catch {}
+			try { execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player"', '-e', 'activate', '-e', 'play document 1', '-e', 'end tell'], { timeout: 5_000 }); } catch {}
 			// Restart audio stream to phone at current position
 			let seekSec = 0;
 			try {
-				seekSec = parseFloat(execSync(`osascript -e 'tell application "QuickTime Player" to get current time of document 1'`, { timeout: 3_000 }).toString().trim()) || 0;
+				seekSec = parseFloat(execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player" to get current time of document 1'], { timeout: 3_000 }).toString().trim()) || 0;
 			} catch {}
 			let recPath = '';
 			try { recPath = findRecording() || ''; } catch {}
@@ -631,21 +646,17 @@ export const pauseVideoTool: ToolDefinition = {
 			console.log(`${ts()} [PauseVideo] BLOCKED — ${sinceLast}ms since play/resume (cooldown 8s)`);
 			return { status: 'playing', instruction: 'Video is still playing. Do NOT pause unless user explicitly says "pause" or "stop".' };
 		}
-		// Mirror resume_video's runtime guard: only pause if the caller actually
+		// Mirror resume_video's runtime guard: only pause if the user actually
 		// said a pause keyword recently. Without this, a Gemini hallucination
 		// outside the 8s cooldown still fires (Susan's 2026-04-16 report).
-		try {
-			const transcriptPath = readlinkSync('/tmp/sutando-live-transcript.txt');
-			const lines = readFileSync(transcriptPath, 'utf8').split('\n');
-			const callerLines = lines.filter(l => l.includes('Caller:'));
-			const recent = callerLines.slice(-3).join(' ').toLowerCase();
-			if (!/\b(pause|stop|hold|wait)\b/.test(recent)) {
-				console.log(`${ts()} [PauseVideo] BLOCKED — no pause keyword in recent caller speech: "${recent.slice(-80)}"`);
-				return { status: 'playing', instruction: 'Video is still playing. Only pause when user explicitly says "pause" or "stop".' };
-			}
-		} catch {}
+		// Picks freshest of voice-agent vs phone transcript; fail-open if neither is fresh.
+		const recent = getRecentUserSpeech();
+		if (recent && !/\b(pause|stop|hold|wait)\b/.test(recent)) {
+			console.log(`${ts()} [PauseVideo] BLOCKED — no pause keyword in recent user speech: "${recent.slice(-80)}"`);
+			return { status: 'playing', instruction: 'Video is still playing. Only pause when user explicitly says "pause" or "stop".' };
+		}
 		try { writeFileSync('/tmp/sutando-playback-pause', '1'); } catch {}
-		try { execSync(`osascript -e 'tell application "QuickTime Player"' -e 'if (count of documents) > 0 then' -e 'pause document 1' -e 'end if' -e 'end tell'`, { timeout: 5_000 }); } catch {}
+		try { execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player"', '-e', 'if (count of documents) > 0 then', '-e', 'pause document 1', '-e', 'end if', '-e', 'end tell'], { timeout: 5_000 }); } catch {}
 		return { status: 'paused', instruction: 'Paused. When user says play/resume, call play_video.' };
 	},
 };
@@ -658,7 +669,7 @@ export const closeVideoTool: ToolDefinition = {
 	execution: 'inline',
 	async execute() {
 		console.log(`${ts()} [CloseVideo] called`);
-		try { execSync(`osascript -e 'tell application "QuickTime Player"' -e 'activate' -e 'end tell' -e 'delay 0.3' -e 'tell application "System Events" to keystroke "w" using command down'`, { timeout: 5_000 }); } catch {}
+		try { execFileSync('/usr/bin/osascript', ['-e', 'tell application "QuickTime Player"', '-e', 'activate', '-e', 'end tell', '-e', 'delay 0.3', '-e', 'tell application "System Events" to keystroke "w" using command down'], { timeout: 5_000 }); } catch {}
 		try { unlinkSync('/tmp/sutando-playback-pause'); } catch {}
 		try { unlinkSync('/tmp/sutando-playback-path'); } catch {}
 		return { status: 'closed' };
@@ -674,7 +685,8 @@ export const screenRecordTool: ToolDefinition = {
 	name: 'screen_record',
 	description:
 		'Start or stop PLAIN screen recording (no narration, no auto-scroll). ' +
-		'Use when user says "start recording", "record the screen", "screen record". ' +
+		'Use ONLY when user explicitly says "start recording", "record the screen", or "screen record". ' +
+		'Do NOT match on "fullscreen", "full screen", "play fullscreen", "make it full screen", or any cue with "screen" that is not preceded by "record" — those go to fullscreen_presenter or play_video. ' +
 		'Do NOT use record_screen_with_narration for plain recording requests. ' +
 		'Uses ffmpeg avfoundation for reliable .mov output. ' +
 		'When starting, ASK the user if they want live transcript subtitles burned into the recording.',
@@ -697,7 +709,7 @@ export const screenRecordTool: ToolDefinition = {
 		}
 		lastScreenRecordCall = now;
 		try {
-			const result = execSync(`python3 skills/screen-record/scripts/record.py ${action}`, { timeout: 10_000 }).toString().trim();
+			const result = execFileSync('python3', ['skills/screen-record/scripts/record.py', action], { timeout: 10_000 }).toString().trim();
 			// Auto-stop timer — cap at 60s regardless of what Gemini requests
 			if (action === 'start') {
 				demoStateRef.value = 'recording';
@@ -714,11 +726,19 @@ export const screenRecordTool: ToolDefinition = {
 				const capped = Math.min(duration_seconds || 20, 60);
 				setTimeout(() => {
 					try {
-						const stopResult = execSync('python3 skills/screen-record/scripts/record.py stop', { timeout: 10_000 }).toString().trim();
+						const stopResult = execFileSync('python3', ['skills/screen-record/scripts/record.py', 'stop'], { timeout: 10_000 }).toString().trim();
 						const stopParsed = JSON.parse(stopResult);
-						if (liveTranscriptRecordingStart > 0 && stopParsed.path && stopParsed.exists) {
+						if (stopParsed.path && stopParsed.exists) {
 							const narrated = stopParsed.path.replace('.mov', '-narrated.mov');
-							burnLiveTranscriptSubtitles(isReadableFile(narrated) ? narrated : stopParsed.path);
+							const burnedSubtitled = liveTranscriptRecordingStart > 0
+								? burnLiveTranscriptSubtitles(isReadableFile(narrated) ? narrated : stopParsed.path)
+								: null;
+							// Persist playback-path so play_video can find this recording without
+							// depending on open_file (which is now generic / not recording-specific).
+							const recommended = burnedSubtitled || (isReadableFile(narrated) ? narrated : stopParsed.path);
+							if (recommended) {
+								try { writeFileSync('/tmp/sutando-playback-path', recommended); } catch {}
+							}
 						}
 					} catch {}
 					demoStateRef.value = 'done';
@@ -732,6 +752,7 @@ export const screenRecordTool: ToolDefinition = {
 				// Build explicit file list so the model knows exactly what's available.
 				// The model should pass the recommended path to open_file — no findRecording guessing.
 				const files: { raw?: string; narrated?: string; subtitled?: string; recommended?: string } = {};
+				let duration_seconds: number | null = null;
 				if (parsed.path && parsed.exists) {
 					files.raw = parsed.path;
 					const narrated = parsed.path.replace('.mov', '-narrated.mov');
@@ -746,14 +767,29 @@ export const screenRecordTool: ToolDefinition = {
 					}
 					// Recommend best available: subtitled > narrated > raw
 					files.recommended = files.subtitled || files.narrated || files.raw;
+					// Persist playback-path so play_video can find this recording without
+					// depending on open_file (which is now generic / not recording-specific).
+					if (files.recommended) {
+						try { writeFileSync('/tmp/sutando-playback-path', files.recommended); } catch {}
+					}
+					// Probe duration once here so open_file (now generic) doesn't need to.
+					try {
+						const dur = execFileSync(
+							'/opt/homebrew/bin/ffprobe',
+							['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', files.recommended!],
+							{ timeout: 5_000 }
+						).toString().trim();
+						duration_seconds = Math.round(parseFloat(dur));
+					} catch {}
 				}
 				liveTranscriptRecordingStart = 0;
-				console.log(`${ts()} [ScreenRecord] ${action}: ${JSON.stringify({ ...parsed, files })}`);
+				console.log(`${ts()} [ScreenRecord] ${action}: ${JSON.stringify({ ...parsed, files, duration_seconds })}`);
 				return {
 					...parsed,
 					files,
+					duration_seconds,
 					instruction: files.recommended
-						? `Recording stopped. Available files: ${Object.entries(files).map(([k,v]) => `${k}=${v}`).join(', ')}. To open, call open_file with path="${files.recommended}". If user wants a different version, use the appropriate path from the list.`
+						? `Recording stopped (${duration_seconds ?? '?'}s). Available files: ${Object.entries(files).map(([k,v]) => `${k}=${v}`).join(', ')}. To open, call open_file with path="${files.recommended}". To open + fullscreen present mode, call open_file with path="${files.recommended}", fullscreen=true. If user wants a different version, use the appropriate path from the list.`
 						: 'Recording stopped but no files found.',
 				};
 			}
@@ -893,11 +929,10 @@ export function startRecordingNarration(session: any): void {
 			return;
 		}
 		// Inject the pre-captured description
-		let desc = nextDescRef.value!;
+		const desc = nextDescRef.value!;
 		nextDescRef.value = null;
 		lastDesc = desc;
 		previousDescs.push(desc);
-		const remaining = Math.round((durationMs - (Date.now() - startTime)) / 1000);
 		const lastSaid = lastSpokenRef.value || '(first description)';
 		narrationSpeakingRef.value = true;
 		lastPushTime = Date.now();
