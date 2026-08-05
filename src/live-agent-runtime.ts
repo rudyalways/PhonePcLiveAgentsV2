@@ -196,6 +196,8 @@ export interface SessionRecorder {
  */
 export interface SessionRecorderOptions {
 	tickerFactory?: (model: string) => TickerControl;
+	/** Telemetry provider id, e.g. gemini-live | dashscope-omni */
+	provider?: string;
 }
 
 export function createSessionRecorder(
@@ -214,6 +216,7 @@ export function createSessionRecorder(
 	const makeTicker = opts.tickerFactory ?? ((model: string) => startVoiceTicker({
 		sessionId,
 		model,
+		provider: opts.provider,
 		toolCallsGetter: () => toolCalls.length,
 	}));
 

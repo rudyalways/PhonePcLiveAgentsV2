@@ -3666,13 +3666,28 @@ function probeAgentApi(): boolean {
 	}
 }
 
+function readVoiceAgentRuntime(): Record<string, unknown> | null {
+	try {
+		const p = statusReadPath('voice-agent.json', WORKSPACE_DIR);
+		return JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
 function buildActivityLogSnapshot(): Record<string, unknown> {
 	const core = readCoreStatus();
 	const tmux = readTmuxStatus();
 	const supervisor = readCoreSupervisor();
 	const vs = readVoiceState();
+	const va = readVoiceAgentRuntime();
+	const rt = (va?.realtime as Record<string, unknown> | undefined) ?? {};
 	return {
-		realtimeProvider: (process.env.REALTIME_PROVIDER || 'gemini').toLowerCase(),
+		realtimeProvider: (rt.provider as string) || (process.env.REALTIME_PROVIDER || 'gemini').toLowerCase(),
+		realtimeModel: (rt.model as string) || null,
+		realtimeTelemetryProvider: (rt.telemetryProvider as string) || null,
+		realtimeCapabilities: rt.capabilities ?? null,
+		realtimeVisionAdapter: rt.visionAdapter ?? false,
 		core: {
 			running: core.running,
 			step: core.step,

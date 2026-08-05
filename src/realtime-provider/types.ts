@@ -60,6 +60,24 @@ export interface RealtimeSessionDescriptor {
 	surface?: string;
 }
 
+export type FailureCategory =
+	| 'quota_exceeded'
+	| 'credits_depleted'
+	| 'auth_invalid'
+	| 'model_not_found'
+	| 'rate_limit'
+	| 'transient'
+	| 'unknown';
+
+export interface ClassifiedClose {
+	category: FailureCategory;
+	retryable: boolean;
+	userMessage: string;
+	userActionUrl?: string;
+	rawCode?: number;
+	rawReason: string;
+}
+
 export interface VisionInjectResult {
 	ok: boolean;
 	error?: string;

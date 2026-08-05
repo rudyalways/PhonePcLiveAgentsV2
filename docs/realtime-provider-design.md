@@ -750,8 +750,8 @@ REALTIME_VISION_ADAPTER=0
 
 - [x] Vendor compatibility audit (§4.4–4.6)
 - [x] Run `scripts/test-qwen-realtime-tools.py` (vendor-layer tool calling OK 2026-08-05)
-- [ ] Run `scripts/test-qwen-realtime-audio.py`
-- [ ] Add `scripts/test-qwen-realtime-vision.py` (audio-first → JPEG append)
+- [x] Run `scripts/test-qwen-realtime-audio.py` (VAD/transcription OK 2026-08-05)
+- [x] Add `scripts/test-qwen-realtime-vision.py` (audio-first → image append OK 2026-08-05)
 - [ ] Document region/workspace URL format from Alibaba docs
 
 ### Phase 1 — Factory extraction (no default change)
@@ -764,16 +764,19 @@ REALTIME_VISION_ADAPTER=0
 
 ### Phase 2 — Vision adapter + observability
 
-- [x] Stub `vision-adapter.ts`; `vision-tools.ts` gates Qwen Watch until `REALTIME_VISION_ADAPTER=1`
-- [ ] Full Qwen `input_image_buffer.append` wire-up in vision-adapter
-- [ ] Pass `provider` through all usage tickers and session recorder
-- [ ] Pipeline phases + activity log vision/provider fields
-- [ ] Provider-dispatch error classifier
+- [x] Stub + wire `vision-adapter.ts`; Qwen Watch gated on `REALTIME_VISION_ADAPTER=1`
+- [x] Provider-dispatch error classifier (`realtime-provider/errors/`)
+- [x] Pass `provider` through usage tickers (`createSessionRecorder`)
+- [x] Activity log: `voice-agent.json` realtime fields + `/activity-log` snapshot
+- [ ] Pipeline phases (`realtime_provider_selected`, vision_frame_sent, …)
+- [ ] Full bodhi `sendEvent` validation on live Qwen web voice session
 
 ### Phase 3 — Qwen/Omni as opt-in production path
 
 - [x] `.env.example` update
-- [ ] End-to-end test: web voice + Watch + tool call + task result on `REALTIME_PROVIDER=qwen`
+- [x] `scripts/test-realtime-provider-e2e.sh` + `tests/realtime-provider-e2e.test.ts`
+- [x] Vendor E2E: tools + audio + config resolution (with `DASHSCOPE_API_KEY`)
+- [ ] Live web voice round-trip with `REALTIME_PROVIDER=qwen` (manual / post-restart)
 - [ ] LiveKit parity check on same env block
 
 ### Phase 4 — Phone + cleanup

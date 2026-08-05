@@ -33,7 +33,7 @@ import { z } from 'zod';
 import { existsSync, readFileSync, readdirSync, unlinkSync, mkdirSync, copyFileSync, appendFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { inlineTools } from './inline-tools.js';
-import { setVisionSession, startVisionControlServer, stopVisionControlServer, setSessionToolUpdater, setRealtimeVisionPolicy } from './vision-tools.js';
+import { setVisionSession, startVisionControlServer, stopVisionControlServer, setSessionToolUpdater, setRealtimeVisionPolicy, markRealtimeAudioSent } from './vision-tools.js';
 import { clearActiveArtifact } from './artifact-cache-tools.js';
 import { injectText } from './browser-tools.js';
 import { join, dirname } from 'node:path';
@@ -797,7 +797,9 @@ async function main() {
 	// live-agent-runtime's SessionRecorder (step 5a-3); the callbacks below
 	// push into recorder.events/toolCalls/transcript exactly as they pushed
 	// into the old module-level arrays.
-	const recorder = createSessionRecorder('voice', SESSION_ID);
+	const recorder = createSessionRecorder('voice', SESSION_ID, {
+		provider: rtSession.descriptor.telemetryProvider,
+	});
 	const voiceToolIdMap = new Map<string, string>();
 
 	// Authoritative voice-connection state. web-client reads this file
@@ -841,7 +843,24 @@ async function main() {
 		try {
 			writeFileSync(
 				statusPath('voice-agent.json', WORKSPACE_DIR),
-				JSON.stringify({ voice_ws: `ws://127.0.0.1:${PORT}`, port: PORT, pid: process.pid, ts: Math.floor(Date.now() / 1000) })
+				JSON.stringify({
+					voice_ws: `ws://127.0.0.1:${PORT}`,
+					port: PORT,
+					pid: process.pid,
+					ts: Math.floor(Date.now() / 1000),
+					realtime: {
+						provider: rtSession.config.provider,
+						telemetryProvider: rtSession.descriptor.telemetryProvider,
+						model: rtSession.config.model,
+						voice: rtSession.config.voice,
+						capabilities: {
+							vision: rtSession.config.capabilities.vision,
+							googleSearch: rtSession.config.capabilities.googleSearch,
+							toolCalling: rtSession.config.capabilities.toolCalling,
+						},
+						visionAdapter: rtSession.config.phaseFlags.visionAdapter,
+					},
+				}),
 			);
 		} catch (err) {
 			console.error(`${ts()} [VoiceRuntime] state write failed:`, err);
@@ -869,7 +888,7 @@ async function main() {
 				userTurnCount = 0; userHasInterrupted = false; sessionEnding = false;
 				recorder.reset();
 				recorder.events.push({ event: 'session_started', timestamp: new Date().toISOString() });
-				recorder.startTicker(VOICE_NATIVE_AUDIO_MODEL);
+				recorder.startTicker(rtSession.config.model);
 				console.log(`${ts()} [Session] Started: ${e.sessionId}`);
 			},
 			onSessionEnd: (e) => {
@@ -1000,7 +1019,7 @@ async function main() {
 				}
 			}
 			try {
-				const c = classifyTransportClose(code, reason);
+				const c = classifyTransportClose(code, reason, rtSession.config.provider);
 				handleClose(c);
 			} catch (e) {
 				console.error(`${ts()} [VoiceFailure] classifier threw: ${(e as Error)?.message ?? e}`);
@@ -1205,10 +1224,11 @@ async function main() {
 				recorder.events.push({ event: 'session_started:client_connect', timestamp: new Date().toISOString() });
 				// bodhi's onSessionStart won't re-fire (#1372 above), so start the
 				// usage ticker here too — otherwise this reconnect session emits no usage.
-				recorder.startTicker(VOICE_NATIVE_AUDIO_MODEL);
+				recorder.startTicker(rtSession.config.model);
 				console.log(`${ts()} [Session] Client connected after prior flush — reset metrics buffer`);
 			}
 			writeVoiceState(true);
+			markRealtimeAudioSent();
 			origConnect();
 		};
 	}

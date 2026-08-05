@@ -41,6 +41,7 @@ export {
 export { resolveRealtimeConfig, resolvePhaseFlags, useFactoryEnabled, validateRealtimeConfig } from './config.js';
 export { buildOpenAICompatTransport } from './openai-compat.js';
 export { injectVisionFrame } from './vision-adapter.js';
+export { classifyTransportClose, classifyGeminiTransportClose, classifyQwenTransportClose } from './errors/index.js';
 export {
 	initMigrationStateIfMissing,
 	markPhase,

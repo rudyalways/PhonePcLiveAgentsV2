@@ -111,16 +111,25 @@ PY
         else
           PY=python3
         fi
+        echo "=== Phase 0: tools ==="
         "$PY" "$REPO/scripts/test-qwen-realtime-tools.py" --timeout-s 45
+        echo "=== Phase 0: audio ==="
+        "$PY" "$REPO/scripts/test-qwen-realtime-audio.py" --timeout-s 45
+        echo "=== Phase 0: vision ==="
+        "$PY" "$REPO/scripts/test-qwen-realtime-vision.py" --timeout-s 45
         ;;
       1)
         npm run typecheck --prefix "$REPO" 2>/dev/null || (cd "$REPO" && npx tsc --noEmit)
-        cd "$REPO" && npx tsx --test tests/realtime-provider-config.test.ts
+        cd "$REPO" && npx tsx --test tests/realtime-provider-config.test.ts tests/realtime-provider-vision-adapter.test.ts tests/realtime-provider-errors.test.ts
         python3 "$REPO/tests/realtime-provider-factory.test.py"
         ;;
       2)
-        echo "Phase 2: set REALTIME_VISION_ADAPTER=1 and run vision smoke (planned test-qwen-realtime-vision.py)"
-        exit 0
+        cd "$REPO" && npx tsx --test tests/realtime-provider-vision-adapter.test.ts tests/realtime-provider-errors.test.ts
+        if [[ -x "$REPO/.venv-livekit/bin/python" ]]; then PY="$REPO/.venv-livekit/bin/python"; else PY=python3; fi
+        "$PY" "$REPO/scripts/test-qwen-realtime-vision.py" --timeout-s 45
+        ;;
+      3)
+        bash "$REPO/scripts/test-realtime-provider-e2e.sh"
         ;;
       *)
         echo "No automated verify for phase $phase"
