@@ -781,9 +781,9 @@ REALTIME_VISION_ADAPTER=0
 
 ### Phase 4 — Phone + cleanup
 
-- [ ] Phone transport injection
-- [ ] Remove inline `buildQwenVoiceTransportLegacy` dead code (after Phase 3 stable)
-- [ ] Gemini-specific guards (`googleSearch`, geo-block) gated on capabilities
+- [x] Phone transport injection (`bootstrapPhoneRealtimeSession` in conversation-server)
+- [x] Remove inline `buildQwenVoiceTransportLegacy` dead code
+- [x] Gemini-specific guards (`googleSearch`, `switch_voice_config`, geo-block) gated on capabilities
 
 ---
 

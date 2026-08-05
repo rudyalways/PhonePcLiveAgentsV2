@@ -131,6 +131,10 @@ PY
       3)
         bash "$REPO/scripts/test-realtime-provider-e2e.sh"
         ;;
+      4)
+        npm run typecheck --prefix "$REPO" 2>/dev/null || (cd "$REPO" && npx tsc --noEmit)
+        cd "$REPO" && npx tsx --test tests/phone-realtime-provider.test.ts tests/phone-behavior-anchors.test.ts
+        ;;
       *)
         echo "No automated verify for phase $phase"
         exit 0
@@ -146,7 +150,7 @@ PY
     echo "  REALTIME_USE_FACTORY=1"
     echo "  REALTIME_VISION_ADAPTER=0"
     echo ""
-    echo "Legacy inline Qwen (pre-factory): REALTIME_USE_FACTORY=0 REALTIME_PROVIDER=qwen"
+    echo "Legacy inline Qwen (pre-factory): removed in Phase 4 — use REALTIME_USE_FACTORY=1 REALTIME_PROVIDER=qwen"
     echo "Then restart voice-agent / livekit-agent."
     bash "$0" mark 1 rolled_back "operator rollback $(ts)" 2>/dev/null || true
     ;;

@@ -53,6 +53,8 @@ import { fileURLToPath } from 'node:url';
 import { voiceApiKey } from '../../../src/voice-key.js';
 import { loadVoiceConfig } from '../../../src/voice-config.js';
 import { resolveWorkspace } from '../../../src/workspace_default.js';
+import { bootstrapPhoneRealtimeSession } from '../../../src/realtime-provider/index.js';
+import { classifyTransportClose } from '../../../src/voice-error-classifier.js';
 
 import { execSync, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { isAllowedAudioPath } from './audio_path_guard.js';
@@ -158,7 +160,16 @@ if (!existsSync(PHONE_VOICE_CONFIG_PATH)) {
 }
 const PHONE_VOICE_CONFIG = loadVoiceConfig(PHONE_VOICE_CONFIG_PATH);
 const VOICE_NATIVE_AUDIO_MODEL = PHONE_VOICE_CONFIG.model;
-const PHONE_GOOGLE_SEARCH = PHONE_VOICE_CONFIG.googleSearch;
+const rtSession = bootstrapPhoneRealtimeSession({
+	voiceConfig: PHONE_VOICE_CONFIG,
+	geminiNativeAudioModel: VOICE_NATIVE_AUDIO_MODEL,
+	geminiSpeechVoice: 'Aoede',
+	workspace: WORKSPACE_DIR,
+});
+const PHONE_GOOGLE_SEARCH = rtSession.config.googleSearch;
+const PHONE_INLINE_TOOLS = rtSession.config.provider === 'gemini'
+	? inlineTools
+	: inlineTools.filter(t => t.name !== 'switch_voice_config');
 
 /** Normalize phone number to digits only for comparison (strips +, -, spaces, parens) */
 function normalizePhone(num: string): string {
@@ -182,7 +193,11 @@ const VERIFIED_MEETINGS = new Set(
 );
 
 if (!GEMINI_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
-	console.error('Error: GEMINI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER required');
+	console.error('Error: GEMINI_API_KEY (text subagent), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER required');
+	process.exit(1);
+}
+if (rtSession.config.provider === 'qwen' && !rtSession.sessionApiKey) {
+	console.error('Error: DASHSCOPE_API_KEY required when REALTIME_PROVIDER=qwen');
 	process.exit(1);
 }
 if (!NGROK_AUTHTOKEN && !process.env.TWILIO_WEBHOOK_URL) {
@@ -654,7 +669,7 @@ function buildAgent(callSession: CallSession): MainAgent {
 		// (2.5 silently accepted them). getCurrentTimeTool is in both anyCallerTools
 		// and inlineTools, so pushing both creates a duplicate that causes 1011.
 		const seen = new Set(tools.map(t => t.name));
-		for (const t of inlineTools) {
+		for (const t of PHONE_INLINE_TOOLS) {
 			if (!seen.has(t.name)) { tools.push(t); seen.add(t.name); }
 		}
 		tools.push({
@@ -715,11 +730,13 @@ async function createCallSession(params: {
 	// seconds as `voice.session`. toolCallsGetter reads recorder.toolCalls so the
 	// per-tick count matches what finalize records.
 	const recorder = createSessionRecorder('phone', params.callSid, {
+		provider: rtSession.descriptor.telemetryProvider,
 		tickerFactory: (model) => startPhoneTicker({
 			callSid: params.callSid,
 			model,
 			isOwner: params.isOwner,
 			isMeeting: params.isMeeting,
+			modelProvider: rtSession.descriptor.telemetryProvider,
 			toolCallsGetter: () => recorder.toolCalls.length,
 		}),
 	});
@@ -739,7 +756,7 @@ async function createCallSession(params: {
 	};
 	// Start the usage ticker now (call is live). Matches the pre-5b-2 inline
 	// startPhoneTicker at CallSession creation; recorder.flush() stops it.
-	recorder.startTicker(VOICE_MODEL);
+	recorder.startTicker(rtSession.config.model);
 
 	// Start live transcript file
 	const liveTranscriptPath = `/tmp/sutando-live-transcript-${params.callSid}.txt`;
@@ -755,17 +772,20 @@ async function createCallSession(params: {
 
 	const agent = buildAgent(callSession);
 
+	const altTransport = rtSession.transport;
 	const session = new VoiceSession({
 		sessionId: `phone_${params.callSid}`,
 		userId: 'phone_user',
-		apiKey: GEMINI_API_KEY,
+		apiKey: rtSession.sessionApiKey,
 		agents: [agent],
 		initialAgent: 'phone',
 		port: bodhiPort,
 		host: '127.0.0.1',
 		model: google(VOICE_MODEL),
-		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
-		speechConfig: { voiceName: 'Aoede' },
+		...(altTransport ? { transport: altTransport } : {
+			geminiModel: VOICE_NATIVE_AUDIO_MODEL,
+			speechConfig: { voiceName: rtSession.config.voice || 'Aoede' },
+		}),
 		hooks: {
 			onToolCall: (e) => {
 				console.log(`${ts()} [Tool] ${e.toolName} (${e.execution})`);
@@ -939,14 +959,16 @@ async function createCallSession(params: {
 	// gets re-bound when transport.connect() is called during reconnection.
 	const origHandleTransportClose = sessionAny.handleTransportClose.bind(sessionAny);
 	sessionAny.handleTransportClose = (code?: number, reason?: string) => {
-		console.log(`${ts()} [Phone] transport closed: code=${code} reason=${reason}`);
+		const classified = classifyTransportClose(code, reason, rtSession.config.provider);
+		console.log(`${ts()} [Phone] transport closed: code=${code} reason=${reason} (${classified.category})`);
 		// Call original (transitions state to CLOSED)
 		origHandleTransportClose(code, reason);
 		// Trigger reconnect
 		if (!callSession.hangingUp && activeCalls.has(callSession.callSid)) {
 			setTimeout(() => {
 				if (!callSession.hangingUp && activeCalls.has(callSession.callSid)) {
-					console.log(`${ts()} [Phone] reconnecting Gemini for ${callSession.callSid}`);
+					const providerLabel = rtSession.config.provider === 'qwen' ? 'Qwen' : 'Gemini';
+					console.log(`${ts()} [Phone] reconnecting ${providerLabel} for ${callSession.callSid}`);
 					isReplaying = true; // mute audio while Gemini replays history
 					turnCountBeforeDisconnect = session.conversationContext.items.length;
 					console.log(`${ts()} [Phone] replay suppression: ${turnCountBeforeDisconnect} turns to replay`);
@@ -1865,6 +1887,7 @@ async function start(): Promise<void> {
 		}
 		console.log(`\n╔════════════════════════════════════════════════════╗`);
 		console.log(`║  Phone Server (bodhi VoiceSession)                 ║`);
+		console.log(`║  Realtime: ${rtSession.config.provider} (${rtSession.config.model})`.padEnd(53) + '║');
 		console.log(`╠════════════════════════════════════════════════════╣`);
 		console.log(`║  Local:    http://localhost:${String(PORT).padEnd(27)}║`);
 		console.log(`║  Tunnel:   ${WEBHOOK_BASE_URL.slice(0, 40).padEnd(40)}║`);

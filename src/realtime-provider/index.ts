@@ -1,7 +1,7 @@
 /**
  * Realtime provider factory — single entry for voice / phone / observability.
  * Default: REALTIME_PROVIDER=gemini (unchanged behavior).
- * Rollback: REALTIME_PROVIDER=gemini REALTIME_USE_FACTORY=0
+ * Rollback: REALTIME_PROVIDER=gemini REALTIME_USE_FACTORY=1 REALTIME_VISION_ADAPTER=0
  */
 
 import { capabilitiesForProvider, isOpenAICompatProvider, telemetryProviderId } from './capabilities.js';
@@ -132,4 +132,21 @@ export function completePhase1Bootstrap(workspace?: string): void {
 		workspace,
 	);
 	markPhase(1, 'complete', 'voice-agent bound transport via factory', workspace);
+}
+
+/** Phone server bootstrap (Phase 4). */
+export function bootstrapPhoneRealtimeSession(
+	opts: CreateRealtimeSessionOptions & { workspace?: string },
+): RealtimeTransportResult {
+	initMigrationStateIfMissing(opts.workspace);
+	markPhase(4, 'in_progress', 'phone server startup', opts.workspace);
+	const session = createRealtimeSession({ ...opts, surface: 'phone' });
+	recordRollbackSnapshot(
+		session.config.provider,
+		session.config.useFactory,
+		session.config.phaseFlags.visionAdapter,
+		opts.workspace,
+	);
+	markPhase(4, 'complete', 'phone transport factory wired', opts.workspace);
+	return session;
 }

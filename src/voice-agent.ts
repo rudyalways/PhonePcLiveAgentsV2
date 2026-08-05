@@ -38,16 +38,13 @@ import { clearActiveArtifact } from './artifact-cache-tools.js';
 import { injectText } from './browser-tools.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { VoiceSession, OpenAIRealtimeTransport } from 'bodhi-realtime-agent';
-import type { MainAgent, ToolDefinition, LLMTransport } from 'bodhi-realtime-agent';
+import { VoiceSession } from 'bodhi-realtime-agent';
+import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
 import {
 	completePhase1Bootstrap,
 	createRealtimeSession,
 	initMigrationStateIfMissing,
 	markPhase,
-	resolveRealtimeConfig,
-	useFactoryEnabled,
-	validateRealtimeConfig,
 	type RealtimeTransportResult,
 } from './realtime-provider/index.js';
 function assertMacOS() { if (process.platform !== 'darwin') { console.error('Sutando requires macOS'); process.exit(1); } }
@@ -94,27 +91,6 @@ function assertGeminiKey(name: string, value: string): void {
 		);
 		process.exit(1);
 	}
-}
-
-/** Legacy inline Qwen transport — used only when REALTIME_USE_FACTORY=0. */
-function buildQwenVoiceTransportLegacy(): LLMTransport {
-	process.env.OPENAI_API_KEY = process.env.DASHSCOPE_API_KEY || '';
-	process.env.OPENAI_BASE_URL = process.env.REALTIME_BASE_URL || 'https://dashscope.aliyuncs.com/api-ws/v1';
-	const disableTx = (process.env.QWEN_DISABLE_INPUT_TRANSCRIPTION || '').toLowerCase();
-	return new OpenAIRealtimeTransport({
-		apiKey: process.env.DASHSCOPE_API_KEY || '',
-		model: process.env.REALTIME_MODEL || 'qwen3.5-omni-plus-realtime',
-		voice: process.env.QWEN_REALTIME_VOICE || 'Ethan',
-		transcriptionModel: disableTx === '1' || disableTx === 'true' || disableTx === 'yes'
-			? null
-			: (process.env.QWEN_INPUT_AUDIO_TRANSCRIPTION_MODEL || 'qwen3-asr-flash-realtime'),
-		turnDetection: {
-			type: process.env.QWEN_TURN_DETECTION_TYPE || 'semantic_vad',
-			threshold: Number(process.env.QWEN_SERVER_VAD_THRESHOLD || '0.1'),
-			prefix_padding_ms: Number(process.env.QWEN_SERVER_VAD_PREFIX_MS || '500'),
-			silence_duration_ms: Number(process.env.QWEN_SERVER_VAD_SILENCE_MS || '900'),
-		},
-	});
 }
 
 import { resolveCredential } from './credential-resolver.js';
@@ -233,83 +209,34 @@ if (!existsSync(VOICE_AGENT_CONFIG_PATH)) {
 }
 const VOICE_AGENT_CONFIG = loadVoiceConfig(VOICE_AGENT_CONFIG_PATH);
 const VOICE_NATIVE_AUDIO_MODEL = VOICE_AGENT_CONFIG.model;
-const VOICE_GOOGLE_SEARCH = VOICE_AGENT_CONFIG.googleSearch;
 const VOICE_NAME = process.env.VOICE_NAME || 'Puck';
 
 function resolveVoiceRealtimeSession(): RealtimeTransportResult {
-	const sessionOpts = {
-		voiceConfig: VOICE_AGENT_CONFIG,
-		geminiNativeAudioModel: VOICE_NATIVE_AUDIO_MODEL,
-		geminiSpeechVoice: VOICE_NAME,
-	};
-	if (useFactoryEnabled()) {
-		initMigrationStateIfMissing(WORKSPACE_DIR);
-		markPhase(1, 'in_progress', 'voice-agent startup', WORKSPACE_DIR);
-		try {
-			return createRealtimeSession(sessionOpts);
-		} catch (e) {
-			console.error(`Error: ${e instanceof Error ? e.message : e}`);
-			process.exit(1);
-		}
-	}
-	const config = resolveRealtimeConfig(sessionOpts);
-	const err = validateRealtimeConfig(config);
-	if (err) {
-		console.error(`Error: ${err}`);
-		process.exit(1);
-	}
-	if (config.provider === 'gemini') {
-		assertGeminiKey(
-			voiceCredential.source === 'managed'
-				? 'managed credentials (state/auth)'
-				: process.env.GEMINI_VOICE_API_KEY ? 'GEMINI_VOICE_API_KEY' : 'GEMINI_API_KEY',
-			GEMINI_VOICE_API_KEY,
-		);
-		return {
-			transport: undefined,
-			config,
-			descriptor: {
-				provider: 'gemini',
-				telemetryProvider: 'gemini-live',
-				model: VOICE_NATIVE_AUDIO_MODEL,
-				voice: VOICE_NAME,
-				capabilities: config.capabilities,
-			},
-			sessionApiKey: GEMINI_VOICE_API_KEY,
+	initMigrationStateIfMissing(WORKSPACE_DIR);
+	markPhase(1, 'in_progress', 'voice-agent startup', WORKSPACE_DIR);
+	try {
+		return createRealtimeSession({
+			voiceConfig: VOICE_AGENT_CONFIG,
 			geminiNativeAudioModel: VOICE_NATIVE_AUDIO_MODEL,
 			geminiSpeechVoice: VOICE_NAME,
-		};
+		});
+	} catch (e) {
+		console.error(`Error: ${e instanceof Error ? e.message : e}`);
+		process.exit(1);
 	}
-	if (config.provider === 'qwen') {
-		console.warn(`${new Date().toISOString().slice(11, 23)} [voice-agent] REALTIME_USE_FACTORY=0 — legacy inline Qwen transport`);
-		return {
-			transport: buildQwenVoiceTransportLegacy(),
-			config,
-			descriptor: {
-				provider: 'qwen',
-				telemetryProvider: 'dashscope-omni',
-				model: config.model,
-				voice: config.voice,
-				capabilities: config.capabilities,
-			},
-			sessionApiKey: process.env.DASHSCOPE_API_KEY || '',
-		};
-	}
-	console.error(`Error: REALTIME_USE_FACTORY=0 supports only gemini or qwen, got ${config.provider}`);
-	process.exit(1);
 }
 
 const rtSession = resolveVoiceRealtimeSession();
-const USE_QWEN_VOICE = rtSession.config.provider === 'qwen';
-if (USE_QWEN_VOICE) {
-	console.log(`${new Date().toISOString().slice(11, 23)} [voice-agent] REALTIME_PROVIDER=qwen — DashScope Qwen realtime (factory=${useFactoryEnabled()})`);
-} else if (!useFactoryEnabled()) {
+const VOICE_GOOGLE_SEARCH = rtSession.config.googleSearch;
+if (rtSession.config.provider === 'gemini') {
 	assertGeminiKey(
 		voiceCredential.source === 'managed'
 			? 'managed credentials (state/auth)'
 			: process.env.GEMINI_VOICE_API_KEY ? 'GEMINI_VOICE_API_KEY' : 'GEMINI_API_KEY',
 		GEMINI_VOICE_API_KEY,
 	);
+} else if (rtSession.config.provider === 'qwen') {
+	console.log(`${new Date().toISOString().slice(11, 23)} [voice-agent] REALTIME_PROVIDER=qwen — DashScope Qwen realtime`);
 }
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY || '';
 
@@ -649,7 +576,13 @@ function resolveCurrentMode(): ModeState {
 	return resolveCurrentModeImpl({ meetingActive, presenterActive });
 }
 
-const mainAgentTools: ToolDefinition[] = [workTool, getTaskStatus, switchModeTool, saveMeetingNoteTool, ...inlineTools];
+const mainAgentTools: ToolDefinition[] = [
+	workTool,
+	getTaskStatus,
+	switchModeTool,
+	saveMeetingNoteTool,
+	...inlineTools.filter(t => rtSession.config.provider === 'gemini' || t.name !== 'switch_voice_config'),
+];
 
 // Injection seam for the tuned factories in voice-agent-config.ts: this
 // module owns the session-gate + mode state; the config module owns the
@@ -1345,7 +1278,7 @@ async function main() {
 	console.log(`  Realtime:      ${rtSession.descriptor.telemetryProvider} (${rtSession.config.provider}, factory=${rtSession.config.useFactory})`);
 	console.log(`  Models:`);
 	console.log(`    Voice LLM:       ${VOICE_MODEL}`);
-	if (USE_QWEN_VOICE) {
+	if (rtSession.config.provider === 'qwen') {
 		console.log(`    Native audio:    ${rtSession.config.model} (voice=${rtSession.config.voice})`);
 		console.log(`    STT:             Qwen input transcription${rtSession.config.transcriptionModel ? '' : ' (disabled)'}`);
 	} else {
