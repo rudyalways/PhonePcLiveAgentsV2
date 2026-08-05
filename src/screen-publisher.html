@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sutando — Screen Publisher</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a12; color: #c0c0d0;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; gap: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 500; color: #e0e0f0; }
+  .status {
+    font-size: 14px; padding: 8px 16px; border-radius: 20px;
+    background: #1a1a2e; border: 1px solid #2a2a4e;
+  }
+  .status.connected { border-color: #2a6e2a; color: #6fbf6f; }
+  .status.publishing { border-color: #2a6e6e; color: #6fbfbf; }
+  .status.error { border-color: #6e2a2a; color: #bf6f6f; }
+  button {
+    padding: 12px 32px; font-size: 16px; border: none; border-radius: 8px;
+    cursor: pointer; font-weight: 500; transition: all 0.2s;
+  }
+  #share-btn { background: #2563eb; color: white; }
+  #share-btn:hover { background: #1d4ed8; }
+  #share-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  #stop-btn { background: #dc2626; color: white; display: none; }
+  #stop-btn:hover { background: #b91c1c; }
+  .preview {
+    max-width: 640px; max-height: 360px; border-radius: 8px;
+    border: 1px solid #2a2a4e; display: none;
+  }
+  .info { font-size: 12px; color: #666; max-width: 400px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Sutando Screen Publisher</h1>
+<div id="status" class="status">Disconnected</div>
+<div class="login-row" id="login-row" style="display:flex;flex-direction:column;gap:8px;width:100%;max-width:320px">
+  <input id="username" type="text" placeholder="Username (same as phone/voice)" autocomplete="username"
+    style="padding:10px 12px;border-radius:8px;background:#1a1a2e;border:1px solid #2a2a4e;color:#e0e0f0;width:100%" />
+  <input id="secret" type="password" placeholder="Password" autocomplete="current-password"
+    style="padding:10px 12px;border-radius:8px;background:#1a1a2e;border:1px solid #2a2a4e;color:#e0e0f0;width:100%" />
+  <button id="connect-btn" type="button" style="padding:12px;border-radius:8px;background:#2563eb;color:#fff;border:none;font-weight:600;cursor:pointer">Join room</button>
+</div>
+<div>
+  <button id="share-btn" disabled>Share Screen</button>
+  <button id="stop-btn">Stop Sharing</button>
+</div>
+<video id="preview" class="preview" autoplay muted></video>
+<div class="info">
+  Open this page via your screen publisher URL (same origin as <code>/mobile</code>) so <code>/token</code> can be proxied.
+  Use the same username/password as <code>users.json</code>. Optional bookmark:
+  <code>?user=YOU&amp;secret=PRIVATE</code>
+</div>
+
+<script type="module">
+  import {
+    Room,
+    RoomEvent,
+    Track,
+    createLocalScreenTracks,
+  } from 'https://esm.sh/livekit-client@2.9.7';
+
+  /** Same origin as this page so HTTPS UI can reach token server via screen-publisher-server proxy (avoids mixed content). */
+  const TOKEN_SERVER = window.location.origin;
+
+  const statusEl = document.getElementById('status');
+  const shareBtn = document.getElementById('share-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  const preview = document.getElementById('preview');
+  const connectBtn = document.getElementById('connect-btn');
+  const usernameEl = document.getElementById('username');
+  const secretEl = document.getElementById('secret');
+
+  let room = null;
+  let screenTrack = null;
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = `status ${cls}`;
+  }
+
+  function getCookie(name) {
+    const prefix = `${encodeURIComponent(name)}=`;
+    const cookie = document.cookie
+      .split('; ')
+      .find((part) => part.startsWith(prefix));
+    return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : '';
+  }
+
+  function setCookie(name, value) {
+    const maxAge = 60 * 60 * 24 * 90;
+    const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; SameSite=Lax${secure}`;
+  }
+
+  function saveCredentials(username, secret) {
+    setCookie('screenPublisherUser', username);
+    setCookie('screenPublisherSecret', secret);
+  }
+
+  async function connect() {
+    try {
+      const username = (usernameEl?.value || '').trim();
+      const secret = secretEl?.value || '';
+      if (!username || !secret) {
+        setStatus('Enter username and password (from users.json)', 'error');
+        return;
+      }
+      if (room) {
+        try {
+          await room.disconnect();
+        } catch {}
+        room = null;
+      }
+      setStatus('Fetching token...', '');
+      const resp = await fetch(
+        `${TOKEN_SERVER}/token?user=${encodeURIComponent(username)}&secret=${encodeURIComponent(secret)}&identity=screen-publisher&name=${encodeURIComponent('PC Screen')}`
+      );
+      if (!resp.ok) throw new Error(`Token server error: ${resp.status}`);
+      const { jwt, url } = await resp.json();
+      if (!url) throw new Error('LIVEKIT_URL not set on token server');
+      saveCredentials(username, secret);
+
+      setStatus('Connecting to LiveKit...', '');
+      room = new Room({ adaptiveStream: false, dynacast: false });
+
+      room.on(RoomEvent.Connected, () => {
+        setStatus('Connected — click Share Screen', 'connected');
+        shareBtn.disabled = false;
+        connectBtn.disabled = true;
+      });
+      room.on(RoomEvent.Disconnected, () => {
+        setStatus('Disconnected', '');
+        cleanup();
+      });
+      room.on(RoomEvent.ParticipantConnected, (p) =>
+        console.log(`[LiveKit] Participant joined: ${p.identity}`)
+      );
+      room.on(RoomEvent.ParticipantDisconnected, (p) =>
+        console.log(`[LiveKit] Participant left: ${p.identity}`)
+      );
+
+      await room.connect(url, jwt);
+    } catch (err) {
+      console.error('Connection failed:', err);
+      setStatus(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  async function startSharing() {
+    try {
+      if (!room || room.state !== 'connected') {
+        setStatus('Not connected to room — click Join room first', 'error');
+        return;
+      }
+      const tracks = await createLocalScreenTracks({
+        resolution: { width: 1920, height: 1080, frameRate: 15 },
+        audio: false,
+      });
+      screenTrack = tracks[0];
+
+      preview.srcObject = new MediaStream([screenTrack.mediaStreamTrack]);
+      preview.style.display = 'block';
+
+      await room.localParticipant.publishTrack(screenTrack, {
+        name: 'screen',
+        source: Track.Source.ScreenShare,
+        videoEncoding: { maxBitrate: 3_000_000, maxFramerate: 15 },
+        screenShareEncoding: { maxBitrate: 3_000_000, maxFramerate: 15 },
+      });
+
+      setStatus('Publishing screen', 'publishing');
+      shareBtn.style.display = 'none';
+      stopBtn.style.display = 'inline-block';
+
+      screenTrack.mediaStreamTrack.onended = () => stopSharing();
+    } catch (err) {
+      console.error('Screen share failed:', err);
+      setStatus(
+        err.name === 'NotAllowedError'
+          ? 'Screen sharing denied — try again'
+          : `Error: ${err.message}`,
+        'error'
+      );
+    }
+  }
+
+  async function stopSharing() {
+    if (screenTrack && room?.localParticipant) {
+      await room.localParticipant.unpublishTrack(screenTrack);
+      screenTrack.stop();
+      screenTrack = null;
+    }
+    preview.style.display = 'none';
+    preview.srcObject = null;
+    shareBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+    setStatus('Connected — click Share Screen', 'connected');
+  }
+
+  function cleanup() {
+    screenTrack?.stop();
+    screenTrack = null;
+    preview.style.display = 'none';
+    preview.srcObject = null;
+    shareBtn.disabled = true;
+    shareBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+    connectBtn.disabled = false;
+  }
+
+  shareBtn.onclick = startSharing;
+  stopBtn.onclick = stopSharing;
+  connectBtn.onclick = connect;
+  [usernameEl, secretEl].forEach((input) => {
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        connect();
+      }
+    });
+  });
+
+  const qs = new URLSearchParams(window.location.search);
+  usernameEl.value = getCookie('screenPublisherUser');
+  secretEl.value = getCookie('screenPublisherSecret');
+  if (qs.get('user')) usernameEl.value = qs.get('user');
+  if (qs.get('secret')) secretEl.value = qs.get('secret');
+  if (usernameEl.value.trim() && secretEl.value) connect();
+</script>
+
+</body>
+</html>

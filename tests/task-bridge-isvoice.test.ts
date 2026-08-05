@@ -1,0 +1,122 @@
+import { describe, it, afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { resolveWorkspace } from '../src/workspace_default.js';
+import { _isVoiceTask } from '../src/task-bridge.js';
+
+// Regression for the archive-path drift bug flagged by VasiliyRad 2026-05-06:
+// `archiveFile()` writes to `tasks/archive/YYYY-MM/<taskId>.txt`, but
+// `_isVoiceTask()` only checked the legacy flat path `tasks/archive/<taskId>.txt`.
+// That meant the offline-forwarding gate in the result watcher misclassified
+// every archived voice task as non-voice, suppressing DM-fallback delivery.
+//
+// These tests lock in: live + processed + legacy-flat-archive + month-partitioned-
+// archive lookup all surface a voice task; non-voice content stays false; missing
+// task files stay false.
+
+// Task dir is wherever the bridge looks — `resolveWorkspace()/tasks/`. Was
+// `<REPO_ROOT>/tasks/` pre-#821, when the bridge fell back to repo root.
+const TASK_DIR = join(resolveWorkspace(), 'tasks');
+const ARCHIVE_DIR = join(TASK_DIR, 'archive');
+
+// Field order: `task:` LAST, per the writer convention enforced in PR #1023.
+// `_isVoiceTask` stops scanning at the first `task:` line (closes the body-
+// forging vector), so any header that lands AFTER `task:` is invisible to it.
+// Pre-#1023 these fixtures had `task:` first — that worked by accident with
+// the old `.some()` over all lines; post-#1023 it silently breaks the test.
+const VOICE_BODY = `id: task-isvoice-test-aaa
+timestamp: 2026-05-06T00:00:00Z
+source: voice
+channel_id: local-voice
+task: hello world
+`;
+const NON_VOICE_BODY = `id: task-isvoice-test-bbb
+timestamp: 2026-05-06T00:00:00Z
+source: discord
+channel_id: 1490906927675474030
+task: hello world
+`;
+// interaction-model 4D step 1.5 (scope A): voice tasks now carry a
+// `media_form: live_stream` header BEFORE `task:`. The stamp is additive —
+// _isVoiceTask keys on source/channel_id, so the verdict must stay true.
+const VOICE_BODY_LIVESTREAM = `id: task-isvoice-test-ls-aaa
+timestamp: 2026-07-07T00:00:00Z
+source: voice
+interaction_type: realtime_audio
+media_form: live_stream
+channel_id: local-voice
+task: hello world
+`;
+
+const created: string[] = [];
+function writeTask(path: string, body: string) {
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, body);
+	created.push(path);
+}
+
+describe('_isVoiceTask — archive-path coverage', () => {
+	afterEach(() => {
+		for (const p of created.splice(0)) {
+			try { unlinkSync(p); } catch {}
+		}
+	});
+
+	it('returns true for a voice task in the live tasks/ dir', () => {
+		const id = 'task-isvoice-test-live-aaa';
+		writeTask(join(TASK_DIR, `${id}.txt`), VOICE_BODY);
+		assert.equal(_isVoiceTask(id), true);
+	});
+
+	it('returns true for a scope-A voice task carrying media_form: live_stream (stamp is additive)', () => {
+		const id = 'task-isvoice-test-ls-aaa';
+		writeTask(join(TASK_DIR, `${id}.txt`), VOICE_BODY_LIVESTREAM);
+		assert.equal(_isVoiceTask(id), true);
+	});
+
+	it('returns true for a voice task in tasks/processed/', () => {
+		const id = 'task-isvoice-test-proc-aaa';
+		writeTask(join(TASK_DIR, 'processed', `${id}.txt`), VOICE_BODY);
+		assert.equal(_isVoiceTask(id), true);
+	});
+
+	it('returns true for a voice task in legacy flat tasks/archive/', () => {
+		const id = 'task-isvoice-test-flat-aaa';
+		writeTask(join(ARCHIVE_DIR, `${id}.txt`), VOICE_BODY);
+		assert.equal(_isVoiceTask(id), true);
+	});
+
+	it('returns true for a voice task in month-partitioned tasks/archive/YYYY-MM/ — the bug fix', () => {
+		const id = 'task-isvoice-test-month-aaa';
+		writeTask(join(ARCHIVE_DIR, '2026-05', `${id}.txt`), VOICE_BODY);
+		assert.equal(_isVoiceTask(id), true);
+	});
+
+	it('finds a voice task across multiple month subdirs', () => {
+		// The taskId may live in any historical month; the function must scan
+		// all month-shaped subdirs, not just the current month.
+		const id = 'task-isvoice-test-old-month-aaa';
+		writeTask(join(ARCHIVE_DIR, '2026-01', `${id}.txt`), VOICE_BODY);
+		assert.equal(_isVoiceTask(id), true);
+	});
+
+	it('returns false for a non-voice task in month-partitioned archive', () => {
+		const id = 'task-isvoice-test-nonvoice-aaa';
+		writeTask(join(ARCHIVE_DIR, '2026-05', `${id}.txt`), NON_VOICE_BODY);
+		assert.equal(_isVoiceTask(id), false);
+	});
+
+	it('ignores non-month-shaped subdirs (e.g. "done", "tmp")', () => {
+		// Stray subdirs under tasks/archive/ shouldn't trip the regex; they
+		// won't be scanned. Negative-control: a voice task placed under a
+		// non-month-shaped subdir is NOT found, confirming the regex gate.
+		const id = 'task-isvoice-test-stray-subdir-aaa';
+		writeTask(join(ARCHIVE_DIR, 'done', `${id}.txt`), VOICE_BODY);
+		assert.equal(_isVoiceTask(id), false);
+	});
+
+	it('returns false when the task file is missing entirely', () => {
+		assert.equal(_isVoiceTask('task-isvoice-test-no-such-file'), false);
+	});
+});

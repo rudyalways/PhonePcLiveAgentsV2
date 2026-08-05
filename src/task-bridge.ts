@@ -1,0 +1,1078 @@
+/**
+ * Voice → Claude Code session bridge.
+ *
+ * work writes task file directly (inline, no subagent).
+ * The main Claude Code session picks it up via fswatch, executes with
+ * full permissions, and writes result file.
+ * The voice agent's node process watches for result file and
+ * injects the result into the Gemini conversation.
+ */
+
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, appendFileSync, renameSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join, resolve } from 'node:path';
+import { z } from 'zod';
+import type { ToolDefinition } from 'bodhi-realtime-agent';
+import { resolveWorkspace } from './workspace_default.js';
+import { claudeHomePath } from './util_paths.js';
+import { recordConversation, recordSessionBoundary } from './conversation-store.js';
+import {
+	emitTaskProcessed,
+	selectBackend,
+	type TaskDelegationService,
+} from './task-delegation.js';
+import { AGENT_API_PORT } from './agent-dashboard-ports.js';
+
+const REPO_DIR = resolveWorkspace();
+const TASK_DIR = join(REPO_DIR, 'tasks');
+const RESULT_DIR = join(REPO_DIR, 'results');
+const STATE_DIR = join(REPO_DIR, 'state');
+const CONVERSATION_LOG = join(REPO_DIR, 'logs', 'conversation.log');
+const OWNER_ACTIVITY_FILE = join(STATE_DIR, 'last-owner-activity.json');
+
+/** Record that the owner was active on <channel> right now. Atomic write
+ * via tmp-then-rename. Read by the proactive-loop status-aware-pivot rule.
+ * See notes/team-proposal-coord-loop-2026-04-20.md. */
+function writeOwnerActivity(channel: string, summary: string): void {
+	try {
+		mkdirSync(STATE_DIR, { recursive: true });
+		const payload = {
+			ts: Math.floor(Date.now() / 1000),
+			channel,
+			summary: summary.slice(0, 80),
+		};
+		// Per-PID staging: last-owner-activity.json is written by five processes
+		// (this task-bridge + the sparrow/discord/slack/telegram bridges). A shared
+		// '.tmp' name lets two concurrent writers truncate and interleave the same
+		// temp file, so the rename can publish torn JSON. A per-PID temp is never
+		// shared; renameSync maps to an atomic rename(2). (sonichi/sutando#2222)
+		const tmp = `${OWNER_ACTIVITY_FILE}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(payload));
+		renameSync(tmp, OWNER_ACTIVITY_FILE);
+	} catch (e) {
+		// Non-fatal — activity-state is best-effort
+		console.log(`${ts()} [TaskBridge] owner-activity write failed: ${e}`);
+	}
+}
+
+/** Archive a task/result file into archive/<kind>/YYYY-MM/ instead of
+ * deleting. Chi's 2026-04-18 ask: "instead of deleting we should archive
+ * the tasks. It can be useful for self-improving". Silent on failure;
+ * fall back to unlink so the system never leaves stale files behind. */
+function archiveFile(srcPath: string, kind: 'tasks' | 'results', taskId: string): void {
+	try {
+		if (!existsSync(srcPath)) return;
+		const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
+		const destDir = join(REPO_DIR, kind, 'archive', ym);
+		mkdirSync(destDir, { recursive: true });
+		renameSync(srcPath, join(destDir, `${taskId}.txt`));
+	} catch {
+		try { unlinkSync(srcPath); } catch { /* ignore */ }
+	}
+}
+
+// TaskDelegationService seam (#1947): CORE_API_URL set → relay to the core
+// host's agent-api (explicit positive config, Codex P1); otherwise local file
+// I/O, byte-identical to the pre-seam writes. Local dirs are created by the
+// LOCAL selection path only — a relay-mode voice host doesn't grow empty
+// tasks/ + results/ dirs it will never use. Failure is loud (selectBackend).
+const _delegation: TaskDelegationService = selectBackend(TASK_DIR, RESULT_DIR, archiveFile);
+
+function ts(): string { return new Date().toISOString().slice(11, 23); }
+
+function pipelineEmit(
+	phase: string,
+	taskId: string,
+	ok: boolean,
+	detail: string,
+	component: string,
+): void {
+	try {
+		const script = join(REPO_DIR, 'src', 'pipeline_emit.py');
+		const args = [script, phase, taskId || ''];
+		args.push(ok ? '--ok' : '--fail', '--detail', detail, '--component', component);
+		execFileSync('python3', args, { timeout: 4000, stdio: ['ignore', 'ignore', 'ignore'] });
+	} catch {
+		// best-effort observability
+	}
+}
+
+/** U+200B — zero-width space; not whitespace, so it survives .trimStart(). */
+const _ZWSP = '​';
+// Kept in lockstep with local_task_protocol.KNOWN_HEADER_KEYS (the Python
+// guard's source of truth). TS can't import the Python tuple, so this list is
+// the mirror; injection-guard-sweep asserts parity so drift fails CI. Synced to
+// the full 34-key set on the 2026-07-13 main merge (main widened the Python side
+// from 14 → 34; the TS guard must defang the same keys or forged interaction_type:
+// / attachments: / media_form: lines slip through here).
+const _HEADER_KEYS = [
+	'id', 'timestamp', 'task', 'source', 'access_tier', 'user_id',
+	'channel_id', 'priority', 'interaction_type', 'source_message_id',
+	'channel_name', 'guild_name', 'attempts', 'sender_name', 'room_name',
+	'parent_message_id', 'reply_chain_ids', 'reminder', 'author_name', 'author_id', 'chat_id',
+	'thread_ts', 'reply_to_event', 'reply_to_me', 'callSid', 'caller',
+	'from', 'call_sid', 'hint', 'instructions', 'transcript',
+	'content_modalities', 'media_form', 'attachments', 'platform_card',
+];
+const _HEADER_RE = new RegExp(`^(?:${_HEADER_KEYS.join('|')})\\s*:`, 'i');
+const _FENCE_RE = /^={3,}/;
+// Every separator str.splitlines() / universal-newline readers treat as a
+// line boundary — fold ALL to '\n' so the guard's line-set matches the
+// reader's (else \v \f \x1c-\x1e \x85 \u2028 \u2029 smuggle a forged line past it).
+const _LINE_SEP_RE = /\r\n|[\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/g;
+
+/**
+ * Defang user-supplied content before embedding in a task file.
+ *
+ * Prefixes any line that looks like a task-file header field or a
+ * ===FENCE=== with U+200B so structural injection (access_tier forge,
+ * system-instruction fence) cannot succeed. Idempotent; folds every str.splitlines() separator (not just CR/CRLF).
+ * TypeScript mirror of src/task_body_guard.py:confine_user_content().
+ */
+function confineUserContent(text: string): string {
+	if (!text) return text;
+	const normalized = text.replace(_LINE_SEP_RE, '\n');
+	return normalized.split('\n').map(line => {
+		const probe = line.trimStart();
+		if ((_HEADER_RE.test(probe) || _FENCE_RE.test(probe)) && !line.startsWith(_ZWSP)) {
+			return _ZWSP + line;
+		}
+		return line;
+	}).join('\n');
+}
+
+/**
+ * Write a chat-path task file so the dashboard tracks chat-originated work.
+ * Called by the core agent (Claude Code) when it accepts a non-trivial task from chat.
+ * Reuses the same tasks/ directory and file format as voice/Discord/Telegram paths.
+ *
+ * Note: access_tier is hardcoded to "owner" because chat is local to the operator.
+ * Revisit if /chat ever opens to non-owner users (team/other tier).
+ */
+export function writeChatTask(taskDescription: string): string {
+	const taskId = `task-chat-${Date.now()}`;
+	const timestamp = new Date().toISOString();
+	// Field order: `task:` LAST so the user-supplied multi-line body
+	// can't forge header fields below it. Same shape as agent-api.py's
+	// /task endpoint after PR #982; consumers (`_isVoiceTask`,
+	// `parse_priority_from_text`) stop scanning at the first `task:`.
+	const content = [
+		`id: ${taskId}`,
+		`timestamp: ${timestamp}`,
+		`source: chat`,
+		`interaction_type: tool_initiated`,
+		`channel_id: local-chat`,
+		`user_id: ${process.env.SUTANDO_DM_OWNER_ID || 'chat-local'}`,
+		`access_tier: owner`,
+		`priority: normal`,
+		`task: ${confineUserContent(taskDescription)}`,
+		'',
+	].join('\n');
+	// Local mode: same synchronous write as always. Relay mode: fire-and-log —
+	// this function's sync contract predates the seam, and chat-task tracking
+	// is best-effort bookkeeping, not the delegation critical path.
+	const submitted = _delegation.submitTask(taskId, content);
+	if (submitted instanceof Promise) {
+		submitted.catch(e => console.error(`${ts()} [TaskBridge] chat-task relay submit failed: ${e}`));
+	}
+	console.log(`${ts()} [TaskBridge] Chat task: ${taskId}: ${taskDescription.slice(0, 100)}`);
+	return taskId;
+}
+
+// ---------------------------------------------------------------------------
+// Task status notifications — sent to the web client
+// ---------------------------------------------------------------------------
+
+let _sendTaskStatus: ((taskId: string, status: string, text: string, result?: string) => void) | null = null;
+const _deliveredResults = new Set<string>();
+
+const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes default
+// Per-task pending state: submission epoch, timeout (ms), and whether to
+// emit a Discord DM to the owner if this task hits its timeout. dm_on_timeout
+// defaults to false (silent timeout — Susan's PR #578 contract). Voice agent
+// can flip it true on critical tasks to get a fallback notification.
+type PendingTask = { submittedAt: number; timeoutMs: number; dmOnTimeout: boolean; taskText: string };
+const _pendingTasks = new Map<string, PendingTask>();
+
+// Dedup window: identical task text within 2 minutes → return existing taskId.
+const DEDUP_WINDOW_MS = 2 * 60 * 1000;
+const normalizeTask = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 150);
+
+/** True if the task file (in tasks/, tasks/processed/, or tasks/archive/
+ * — including month-partitioned subdirs `tasks/archive/YYYY-MM/`) is
+ * voice-originated (channel_id: local-voice). Used by the result watcher
+ * to decide whether to forward an unsent result to Discord DM when voice is
+ * offline. Returns false on missing file or parse error — bias toward not
+ * forwarding to keep Susan-rejected always-DM behavior off by default for
+ * non-voice tasks. */
+export function _isVoiceTask(taskId: string): boolean {
+	const candidates: string[] = [
+		join(TASK_DIR, `${taskId}.txt`),
+		join(TASK_DIR, 'processed', `${taskId}.txt`),
+		// Legacy flat-archive location — kept for any task archived before
+		// the YYYY-MM partitioning (PR #591) was introduced.
+		join(TASK_DIR, 'archive', `${taskId}.txt`),
+	];
+	// Active archive layout: tasks/archive/YYYY-MM/<taskId>.txt. Glob the
+	// month subdirs rather than rebuild the YYYY-MM from the task's mtime —
+	// the writer's archive month and current month can differ around month
+	// boundaries.
+	const archiveRoot = join(TASK_DIR, 'archive');
+	if (existsSync(archiveRoot)) {
+		try {
+			for (const entry of readdirSync(archiveRoot)) {
+				// Only month-shaped names (YYYY-MM); skip stray files.
+				if (!/^\d{4}-\d{2}$/.test(entry)) continue;
+				candidates.push(join(archiveRoot, entry, `${taskId}.txt`));
+			}
+		} catch {}
+	}
+	for (const p of candidates) {
+		if (!existsSync(p)) continue;
+		try {
+			const body = readFileSync(p, 'utf-8');
+			// Stop scanning at the first `task:` delimiter. The task-file
+			// format puts `task:` last on the line preceding the user-
+			// supplied multi-line task body (see agent-api.py and the
+			// /meeting handler). Without this stop, a body of
+			// `do thing\nchannel_id: local-voice` would forge a voice-
+			// task classification — the residual half of the PR #982
+			// fix Qingyun flagged. Stop-at-`task:` makes consumers
+			// honor the delimiter PR #982 already established.
+			const headerLines: string[] = [];
+			for (const l of body.split('\n')) {
+				if (l.startsWith('task:')) break;
+				headerLines.push(l);
+			}
+			return headerLines.some(l => l.startsWith('channel_id: local-voice') || l.startsWith('source: voice'));
+		} catch {}
+	}
+	return false;
+}
+
+/** Belt-suspenders guard for the result-watcher's unconditional fallthrough
+ * (issue #1035, follow-up to PR #1033). Returns true iff the filename is one
+ * that task-bridge legitimately delivers via `onResult()`. Rejects everything
+ * else — most importantly, the new `<channel-key>.task-{id}.txt` namespace
+ * PR #1033 introduced for the per-channel pull path (phone / plugin surfaces),
+ * which the per-channel scanner consumes itself.
+ *
+ * `proactive-*` IS allowed: per the long-standing proactive-voice rule,
+ * proactive messages are spoken by the voice agent when the client is
+ * connected (in parallel to discord-bridge's poll_proactive DM-delivery).
+ * That delivery has no explicit handler upstream in this watcher — the
+ * fallthrough IS the path — so blocking `proactive-*` here would silently
+ * disable voice-spoken proactive messages.
+ *
+ * Exported for unit testing — the watcher's setInterval body is otherwise
+ * awkward to exercise in isolation. */
+export function _shouldFallthrough(file: string): boolean {
+	return file.startsWith('task-') || file.startsWith('voice-') || file.startsWith('proactive-');
+}
+
+/**
+ * Whether a result file should REGISTER a row in the Task list — i.e. fire
+ * `_sendTaskStatus` (live web-socket task card) and POST `/task-done`
+ * (agent-api `task_history`). Only genuine `task-*.txt` results are tasks.
+ *
+ * `proactive-*` notification files also pass `_shouldFallthrough` so they get
+ * SPOKEN by the voice agent (the proactive-voice delivery path), but they are
+ * NOT tasks: registering them keys a `task_history` row by the file stem, so
+ * every re-fire of a proactive notification (e.g. the hourly pending-question
+ * reminder) lands a fresh `proactive-<ts>` id as a DUPLICATE Task row. This is
+ * the general fix for that class (#1786); the narrow #1784 only stabilized the
+ * pending-question filename so its duplicate rows collapsed to one. `voice-*`
+ * files are short-circuited earlier in the watcher and never reach this path.
+ *
+ * Exported for unit testing alongside `_shouldFallthrough`. */
+export function _shouldRegisterTaskRow(file: string): boolean {
+	return file.startsWith('task-');
+}
+
+const _apiToken = process.env.SUTANDO_API_TOKEN || '';
+function _apiHeaders(): Record<string, string> {
+	const h: Record<string, string> = { 'Content-Type': 'application/json' };
+	if (_apiToken) h['Authorization'] = `Bearer ${_apiToken}`;
+	return h;
+}
+
+/** Register a callback to send task status to the web client. */
+export function setTaskStatusCallback(fn: (taskId: string, status: string, text: string, result?: string) => void): void {
+	_sendTaskStatus = fn;
+}
+
+// ---------------------------------------------------------------------------
+// Main agent tool — writes task file directly, no subagent needed
+// ---------------------------------------------------------------------------
+
+export const workTool: ToolDefinition = {
+	name: 'work',
+	description:
+		'Do the work. Call this for anything beyond simple greetings — questions, actions, ' +
+		'research, writing, translation, file changes, system queries, explanations, analysis. ' +
+		'This is how Sutando thinks and acts. Results are spoken back when ready.',
+	parameters: z.object({
+		task: z.string().describe('Full description of the task to perform'),
+		timeout_minutes: z
+			.number()
+			.optional()
+			.describe(
+				'Per-task timeout in minutes. Default 10. Pass a larger value (e.g. 30) for ' +
+				'multi-step jobs like rendering, batch encoding, or long research. Pass 0 for ' +
+				'no timeout — use sparingly, only when the user explicitly asks for a long ' +
+				'autonomous job that may legitimately take hours.'
+			),
+		dm_on_timeout: z
+			.boolean()
+			.optional()
+			.describe(
+				'If true, send a Discord DM to the owner when this task hits its timeout. ' +
+				'Default false (silent UI-only timeout, per Susan PR #578). Use only for ' +
+				'tasks the user has explicitly flagged as critical. The Chi-override to ' +
+				'default-true (2026-05-03 06:00 PT) was reverted at 06:47 PT after Chi flagged ' +
+				'a timeout DM that shouldn\'t have gone through.'
+			),
+	}),
+	execution: 'inline',
+	async execute(args) {
+		const { task, timeout_minutes, dm_on_timeout } = args as {
+			task: string;
+			timeout_minutes?: number;
+			dm_on_timeout?: boolean;
+		};
+
+		// Redirect pure screen-viewing tasks to inline tools (faster, no round-trip)
+		// Narrow match: only "describe/look at my screen" — not scroll, screenshot,
+		// or screen-related tasks that the brain should handle.
+		const screenViewOnly = /\b(describe\s+(my\s+)?screen|what.s on\s+(my\s+)?screen|look at\s+(my\s+)?screen)\b/i;
+		if (screenViewOnly.test(task)) {
+			return { status: 'rejected', message: 'Use describe_screen inline tool directly for screen viewing.' };
+		}
+
+		// Fast path: handle known patterns inline for ~3s vs ~15s via file bridge.
+		// Same pattern as conversation-server's tryFastPath.
+		const concatMatch = /\b(prepend|concatenat|concat|image.*video|video.*image)\b/i.test(task);
+		if (concatMatch) {
+			try {
+				const { execFileSync } = await import('node:child_process');
+				// ls globs need shell for wildcard expansion — command strings are static literals (fixes #1451)
+				const image = execFileSync('/bin/sh', ['-c', 'ls -t /tmp/discord-inbox/*.jpg /tmp/discord-inbox/*.png 2>/dev/null | head -1'], { timeout: 3000 }).toString().trim();
+				const video = execFileSync('/bin/sh', ['-c', 'ls -t /tmp/sutando-recording-*-narrated-subtitled.mov /tmp/sutando-recording-*-narrated.mov /tmp/sutando-recording-*.mov 2>/dev/null | head -1'], { timeout: 3000 }).toString().trim();
+				if (image && video) {
+					// execFileSync argv array bypasses shell — image/video paths are separate args, no interpolation (fixes #1451)
+					const scriptPath = resolve(claudeHomePath('skills', 'video-concat', 'scripts', 'prepend-image.sh'));
+					const result = execFileSync('bash', [scriptPath, image, video, '3'], { timeout: 60000 }).toString().trim();
+					const parsed = JSON.parse(result);
+					return { status: 'done', result: `Video with image prepended: ${parsed.output} (${parsed.size_mb}MB)` };
+				}
+			} catch (e) { console.log(`${ts()} [TaskBridge] fast path concat failed: ${e}`); }
+		}
+
+		// Check if the watcher (Claude Code brain) is running
+		let watcherOnline = false;
+		try {
+			const { execFileSync } = await import('node:child_process');
+			// execFileSync argv array — no shell interpolation (fixes #1451)
+			const watcherRunning = execFileSync('pgrep', ['-f', 'watch-tasks'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+			watcherOnline = !!watcherRunning;
+		} catch {
+			// pgrep returns exit code 1 if no match
+		}
+		if (!watcherOnline) {
+			console.log(`${ts()} [TaskBridge] WARNING: watcher offline — task will be queued for next cron pass`);
+		}
+
+		// Dedup: if the same task text is already pending (within DEDUP_WINDOW_MS),
+		// return the existing taskId instead of writing a duplicate task file.
+		const normalizedTask = normalizeTask(task);
+		const now = Date.now();
+		for (const [existingId, pending] of _pendingTasks) {
+			if (
+				normalizeTask(pending.taskText) === normalizedTask &&
+				now - pending.submittedAt < DEDUP_WINDOW_MS
+			) {
+				console.log(`${ts()} [TaskBridge] Dedup: task matches ${existingId} (submitted ${Math.round((now - pending.submittedAt) / 1000)}s ago)`);
+				return {
+					status: 'duplicate',
+					taskId: existingId,
+					message: `Task already pending as ${existingId}. Do NOT submit again — tell the user you are already working on it.`,
+				};
+			}
+		}
+
+		const taskId = `task-${Date.now()}`;
+		const timestamp = new Date().toISOString();
+		const ownerId = process.env.SUTANDO_DM_OWNER_ID || 'voice-local';
+		// Field order: `task:` LAST so the user-supplied (Gemini-relayed,
+		// possibly multi-line) task body can't forge header fields. Same
+		// shape as agent-api.py's /task endpoint after PR #982; consumers
+		// (`_isVoiceTask`, `parse_priority_from_text`) stop scanning at
+		// the first `task:` line.
+		// Attach a short window of recent conversation AFTER the `task:` line so
+		// the core can self-correct a misheard/garbled transcript (per Chi: "the
+		// voice agent may mishear and pass the wrong transcripts"). It lands in
+		// the task BODY (everything after `task:`), so it cannot forge header
+		// fields — consumers stop scanning headers at the first `task:` line.
+		// Best-effort: empty string if no log/session yet.
+		let contextBlock = '';
+		try {
+			const recent = getRecentConversation(4);
+			if (recent) {
+				contextBlock =
+					`\n\n--- recent voice transcript (may contain ASR errors; if the task above ` +
+					`seems garbled or doesn't match this, infer the true intent from it or ask to ` +
+					`confirm before acting) ---\n${confineUserContent(recent)}\n`;
+			}
+		} catch { /* best effort — never block delegation on context attach */ }
+		const content =
+			`id: ${taskId}\n` +
+			`timestamp: ${timestamp}\n` +
+			`source: voice\n` +
+			`interaction_type: realtime_audio\n` +
+			// interaction-model 4D, step 1.5 (scope A): stamp the media-form axis
+			// on live-plane tasks. Additive/observability — routing still keys on
+			// _isVoiceTask (source/channel_id); scope B makes this the canonical
+			// plane-routing signal. `live_stream` = the payload originates from a
+			// continuous real-time session (media frames stay out-of-band per the
+			// three-channel rule; this is provenance, not stream bytes).
+			`media_form: live_stream\n` +
+			`channel_id: local-voice\n` +
+			`user_id: ${ownerId}\n` +
+			`access_tier: owner\n` +
+			`priority: urgent\n` +
+			`task: ${confineUserContent(task)}${contextBlock}\n`;
+		await _delegation.submitTask(taskId, content);
+		pipelineEmit('task_enqueued', taskId, true, 'bodhi work() wrote tasks/*.txt', 'voice-agent-bridge');
+		// Resolve per-task timeout. 0 → no timeout. Negative or NaN → default.
+		// Cap at 6 hours to prevent runaway pending-state if the voice agent
+		// hallucinates a giant value.
+		let timeoutMs = DEFAULT_TASK_TIMEOUT_MS;
+		if (typeof timeout_minutes === 'number') {
+			if (timeout_minutes === 0) timeoutMs = 0;
+			else if (timeout_minutes > 0) timeoutMs = Math.min(timeout_minutes, 360) * 60 * 1000;
+		}
+		// Default FALSE (Susan PR #578 silent-timeout contract restored after
+		// Chi's 2026-05-03 06:00 override was reverted at 06:47 — the always-on
+		// default was producing unwanted DMs). Caller must explicitly pass
+		// dm_on_timeout: true on critical tasks where they want the fallback.
+		_pendingTasks.set(taskId, { submittedAt: Date.now(), timeoutMs, dmOnTimeout: dm_on_timeout === true, taskText: task });
+		// Record owner activity for status-aware-pivot in proactive loop
+		writeOwnerActivity('voice', task);
+		console.log(`${ts()} [TaskBridge] Task ${taskId}: ${task.slice(0, 100)}`);
+		_sendTaskStatus?.(taskId, 'working', task.slice(0, 60));
+		return {
+			status: 'pending',
+			taskId,
+			message: watcherOnline
+				? 'Task has been queued and is being processed. The result will be spoken when ready. Do NOT tell the user the task is done — say you are working on it.'
+				: 'Task has been saved. The processing engine will pick it up on its next pass (within a few minutes). Tell the user the task is queued and will be handled shortly.',
+		};
+	},
+};
+
+// cancelTask tool moved — canonical version is `cancelTaskTool` in inline-tools.ts.
+
+// ---------------------------------------------------------------------------
+// Result watcher — call this once at startup to watch for results
+// and inject them into the conversation via a callback
+// ---------------------------------------------------------------------------
+
+/** Append a message to the persistent conversation log. The text cap
+ *  matches Discord's per-message limit (2000 chars) so a single transcript
+ *  line never exceeds what could legitimately appear elsewhere in the
+ *  conversation. The previous 200-char cap was aggressive — it truncated
+ *  ordinary user/assistant turns mid-sentence, especially in CJK where one
+ *  character can render as multiple bytes. Lifted to LOG_LINE_MAX_CHARS;
+ *  override via SUTANDO_LOG_LINE_MAX_CHARS env if a host wants tighter logs. */
+const LOG_LINE_MAX_CHARS = Number(process.env.SUTANDO_LOG_LINE_MAX_CHARS) || 2000;
+export function logConversation(role: string, text: string, sessionId?: string): void {
+	const capped = text.replace(/\n/g, ' ').slice(0, LOG_LINE_MAX_CHARS);
+	const line = `${new Date().toISOString()}|${role}|${capped}\n`;
+	try { appendFileSync(CONVERSATION_LOG, line); } catch { /* best effort */ }
+	recordConversation(role, capped, sessionId); // #603 sqlite mirror — best-effort, swallowed inside
+}
+
+/** Append a session-end boundary marker. Used by voice-agent's
+ *  endSession tool so that getRecentConversation() can trim its
+ *  replay window at the last session boundary — preventing goodbye
+ *  text from a prior session from contaminating the reconnect
+ *  greeting. Replaces the pattern-match filter that got defeated
+ *  multiple times on 2026-04-09 (commits 1-6 of PR #257).
+ *
+ *  Format: ISO-ts|SESSION_END|<reason>
+ *  The `SESSION_END` sentinel is unique so the reader can locate
+ *  it without regex gymnastics. */
+export function logSessionBoundary(reason: string = 'user_goodbye'): void {
+	const line = `${new Date().toISOString()}|SESSION_END|${reason}\n`;
+	try { appendFileSync(CONVERSATION_LOG, line); } catch { /* best effort */ }
+	recordSessionBoundary(reason); // #603 sqlite mirror
+}
+
+/** Seconds since the most recent user/assistant turn. Walks the log
+ *  backwards, skipping `core-agent` task-result lines (written by the
+ *  task-bridge result watcher whenever the proactive loop or any
+ *  background task posts a result) and `SESSION_END` markers — those
+ *  are not user/assistant dialogue, and a recent one would falsely
+ *  make a long-away user look like a quick reconnect. Stops at the
+ *  most recent SESSION_END so we don't reach back into a cleanly-ended
+ *  prior session. Returns null if no log exists or no user/assistant
+ *  turn is found in the current session. */
+export function getSecondsSinceLastTurn(): number | null {
+	// Reads the text conversation.log directly: it is the primary truth for
+	// per-turn content. The sqlite mirror is a best-effort parallel write
+	// (errors swallowed in conversation-store.ts) so it can silently lag the
+	// log — trusting it here could return a stale "last turn". The current
+	// session is small, so the backward walk is cheap regardless.
+	if (!existsSync(CONVERSATION_LOG)) return null;
+	try {
+		const content = readFileSync(CONVERSATION_LOG, 'utf-8').trim();
+		if (!content) return null;
+		const lines = content.split('\n');
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const role = lines[i].split('|')[1];
+			if (role === 'SESSION_END') return null;
+			if (role !== 'user' && role !== 'assistant') continue;
+			const ts = Date.parse(lines[i].split('|')[0]);
+			if (Number.isNaN(ts)) return null;
+			return (Date.now() - ts) / 1000;
+		}
+		return null;
+	} catch { return null; }
+}
+
+/** Read recent conversation entries from disk, trimming at the most
+ *  recent SESSION_END marker. Survives restarts. Returns at most
+ *  `count` entries from the current session only — a cleanly-ended
+ *  prior session has no meaningful follow-up context. */
+export function getRecentConversation(count = 10): string {
+	// Reads the text conversation.log directly — primary truth for per-turn
+	// content. The sqlite mirror is best-effort and may lag; trusting it
+	// could replay a stale window. Current-session window is small.
+	if (!existsSync(CONVERSATION_LOG)) return '';
+	try {
+		const allLines = readFileSync(CONVERSATION_LOG, 'utf-8').trim().split('\n');
+		// Find the last SESSION_END marker and keep only lines after it
+		let lastBoundary = -1;
+		for (let i = allLines.length - 1; i >= 0; i--) {
+			if (allLines[i].includes('|SESSION_END|')) {
+				lastBoundary = i;
+				break;
+			}
+		}
+		const currentSession = lastBoundary >= 0 ? allLines.slice(lastBoundary + 1) : allLines;
+		const lines = currentSession.slice(-count);
+		return lines.map(l => {
+			const [, role, text] = l.split('|', 3);
+			return role && text ? `${role}: ${text}` : '';
+		}).filter(Boolean).join('\n');
+	} catch { return ''; }
+}
+
+const CONTEXT_DROP_FILE = join(REPO_DIR, 'context-drop.txt');
+const NOTE_VIEWING_FILE = '/tmp/sutando-note-viewing.json';
+
+/**
+ * Watch for context-drop.txt and inject into Gemini conversation.
+ * Called once at startup. When user drops context via keyboard shortcut,
+ * it gets sent to Gemini so it knows about it.
+ */
+export function startContextDropWatcher(onContextDrop: (content: string) => void): void {
+	console.log(`${ts()} [TaskBridge] Watching for context drops`);
+	setInterval(() => {
+		if (existsSync(CONTEXT_DROP_FILE)) {
+			try {
+				const content = readFileSync(CONTEXT_DROP_FILE, 'utf-8').trim();
+				if (content) {
+					console.log(`${ts()} [TaskBridge] Context drop detected: ${content.slice(0, 100)}`);
+					// Always write a task for sutando-core (reliable path)
+					mkdirSync(TASK_DIR, { recursive: true });
+					const taskId = `task-${Date.now()}`;
+					const ownerId = process.env.SUTANDO_DM_OWNER_ID || 'voice-local';
+					// `task:` last so the (multi-line) context-drop body can't
+					// forge header fields. Same shape as the voice/chat task
+					// writers and agent-api.py's /task endpoint per PR #982.
+					const taskContent =
+						`id: ${taskId}\n` +
+						`timestamp: ${new Date().toISOString()}\n` +
+						`source: context-drop\n` +
+						`interaction_type: system_event\n` +
+						`channel_id: local-hotkey\n` +
+						`user_id: ${ownerId}\n` +
+						`access_tier: owner\n` +
+						`priority: normal\n` +
+						`task: User dropped context via hotkey. Process this:\n${confineUserContent(content)}\n`;
+					writeFileSync(
+						join(TASK_DIR, `${taskId}.txt`),
+						taskContent,
+					);
+					emitTaskProcessed(taskContent);
+					unlinkSync(CONTEXT_DROP_FILE);
+					// Also inject into Gemini if available
+					onContextDrop(content);
+				}
+			} catch { /* file might be in transit */ }
+		}
+	}, 2000);
+}
+
+/**
+ * Watch for note-view events and inject into Gemini conversation.
+ * The web client writes {slug, content, ts} to /tmp/sutando-note-viewing.json
+ * whenever the user opens a note in the UI. This watcher reads the latest
+ * event and hands it to the voice agent so Gemini knows what the user is
+ * currently looking at — lets questions like "what does this note say about
+ * X" work without the user dictating the note path.
+ *
+ * Unlike the context-drop watcher, this does NOT write a task file: a note
+ * view is ambient UI state, not an action to execute. We also debounce by
+ * tracking the last event's timestamp so that repeatedly viewing the same
+ * note doesn't re-inject.
+ */
+let lastNoteViewingTs = '';
+// Track the last event we *logged* separately from the last we *handled*,
+// so that when the keep-pending-on-disconnect path (PR #246) retries an
+// event every 2s, we emit only one "Note view detected" line per unique
+// event.ts. Without this, voice-agent.log fills with ~30 identical lines
+// per minute whenever the user opens a note while voice is disconnected.
+let lastNoteViewingLoggedTs = '';
+/**
+ * Read the current note-viewing event from disk, if any. Used for
+ * on-reconnect delivery so the voice agent can catch up on what the user
+ * is looking at without waiting for a fresh click.
+ */
+export function readCurrentNoteViewing(): { slug: string; content: string; ts: string } | null {
+	if (!existsSync(NOTE_VIEWING_FILE)) return null;
+	try {
+		const raw = readFileSync(NOTE_VIEWING_FILE, 'utf-8').trim();
+		if (!raw) return null;
+		const event = JSON.parse(raw) as { slug?: string; content?: string; ts?: string };
+		if (!event.slug || !event.content || !event.ts) return null;
+		return { slug: event.slug, content: event.content, ts: event.ts };
+	} catch {
+		return null;
+	}
+}
+
+export function startNoteViewingWatcher(
+	onNoteView: (slug: string, content: string) => boolean | void,
+): void {
+	console.log(`${ts()} [TaskBridge] Watching for note views (${NOTE_VIEWING_FILE})`);
+	setInterval(() => {
+		const event = readCurrentNoteViewing();
+		if (!event) return;
+		if (event.ts === lastNoteViewingTs) return;  // already handled
+		if (event.ts !== lastNoteViewingLoggedTs) {
+			console.log(`${ts()} [TaskBridge] Note view detected: ${event.slug}`);
+			lastNoteViewingLoggedTs = event.ts;
+		}
+		const handled = onNoteView(event.slug, event.content);
+		// Only mark as handled if the callback actually delivered it. This
+		// lets a voice-disconnected callback return false/void-with-falsy
+		// and we'll try again on the next poll — which matters when a
+		// reconnect handler also calls back through here.
+		if (handled !== false) lastNoteViewingTs = event.ts;
+	}, 2000);
+}
+
+/**
+ * Reset the note-viewing debounce so a subsequent poll re-delivers the
+ * current event. Called from the voice session on reconnect so that a
+ * note the user was already looking at gets injected fresh.
+ */
+export function resetNoteViewingDebounce(): void {
+	lastNoteViewingTs = '';
+	// Also reset the logged-ts so the next delivery attempt logs again —
+	// a reconnect is a meaningful event that should show up in the log.
+	lastNoteViewingLoggedTs = '';
+}
+
+/** Split-host result loop (relay mode only). Scope is deliberately the
+ * delegation-critical subset of the local watcher: timeout expiry for
+ * _pendingTasks, and delivery+archive of results for tasks THIS process
+ * submitted. Results it doesn't own are left untouched for their real
+ * consumers on the core host. Skip markers get the same silent-archive
+ * treatment as the local path. */
+function startRelayResultWatcher(onResult: (result: string) => void): void {
+	console.log(`${ts()} [TaskBridge] Relay result watcher polling core agent-api`);
+	let inFlight = false;
+	setInterval(async () => {
+		if (inFlight) return; // don't stack slow HTTP polls
+		inFlight = true;
+		try {
+			// Timeout sweep — same semantics as the local watcher, minus the
+			// core-host file ops (task archival happens core-side).
+			for (const [taskId, pending] of _pendingTasks) {
+				const { submittedAt, timeoutMs } = pending;
+				if (timeoutMs === 0) continue;
+				if (Date.now() - submittedAt > timeoutMs) {
+					_pendingTasks.delete(taskId);
+					const minutes = Math.floor(timeoutMs / 60000);
+					const snippet = pending.taskText.length > 80 ? pending.taskText.slice(0, 77) + '...' : pending.taskText;
+					_sendTaskStatus?.(taskId, 'timeout', `Task '${snippet}' timed out — core agent may be unresponsive`);
+					onResult(`[Task ${taskId} ('${snippet}') timed out after ${minutes} minutes. The core host may be unreachable or busy.]`);
+				}
+			}
+			const files = await _delegation.listResultFiles();
+			for (const file of files) {
+				if (_deliveredResults.has(file)) continue;
+				const taskId = file.replace('.txt', '');
+				if (!_pendingTasks.has(taskId)) continue; // not ours — leave it
+				const result = (await _delegation.readResultFile(file)).trim();
+				if (!result) continue;
+				_deliveredResults.add(file);
+				_pendingTasks.delete(taskId);
+				const skip = /^\s*\[(deduped:[^\]]*|no-send|REPLIED)\]/.exec(result);
+				if (!skip) {
+					_sendTaskStatus?.(taskId, 'done', 'Task complete', result);
+					onResult(`[Task result for ${taskId}]\n${result}`);
+				}
+				await _delegation.archiveResultFile(file, taskId);
+			}
+		} catch (err) {
+			// Transient network failure: keep polling — the core keeps results
+			// durable in results/ until archived, so nothing is lost.
+			console.error(`${ts()} [TaskBridge] relay result poll failed (will retry):`, err);
+		} finally {
+			inFlight = false;
+		}
+	}, 2000);
+}
+
+export function startResultWatcher(onResult: (result: string) => void, isClientConnected: () => boolean): void {
+	if (_delegation.mode === 'relay') {
+		// Split-host mode: the local watcher below reads core-host state
+		// (task files for timeout snippets, voice-/question-/proactive- flows,
+		// context consolidation) that doesn't exist on this machine. The relay
+		// watcher covers the delegation-critical subset — results for tasks
+		// THIS process submitted — and nothing else: consuming other task-*
+		// results here would steal them from their real consumers on the core
+		// host (deliver-once). Core-host-only flows stay core-host-only.
+		startRelayResultWatcher(onResult);
+		return;
+	}
+	console.log(`${ts()} [TaskBridge] Watching for results in ${RESULT_DIR}`);
+
+	// Check every 2 seconds for new result files
+	setInterval(() => {
+		// Defensive try/catch around the timeout-check loop. Without this,
+		// a single throw during _pendingTasks iteration (corrupt entry,
+		// race with concurrent delete/set, unhandled rejection in a
+		// destructure of `pending`) takes down the visible behavior of
+		// this tick — the readdir block below has its own try/catch, but
+		// the loop above did not. Observed live 2026-05-16: post-restart
+		// voice-agent's result-watcher fell silent (no TaskBridge log
+		// lines across 30+ minutes) while the 30s health monitor's
+		// setInterval kept firing normally — same Node process, same
+		// event loop, so the only differential was an early throw in
+		// this body that propagated past the setInterval callback.
+		try {
+		// Check for timed-out tasks — runs every interval regardless of result files
+		for (const [taskId, pending] of _pendingTasks) {
+			const { submittedAt, timeoutMs, dmOnTimeout } = pending;
+			// timeoutMs === 0 means "no timeout" — skip the check entirely.
+			if (timeoutMs === 0) continue;
+			if (Date.now() - submittedAt > timeoutMs) {
+				_pendingTasks.delete(taskId);
+				// Read the task body (or a snippet of it) so the timeout message
+				// can identify which task timed out — the prior generic "[Task
+				// timed out]" string left no clue when multiple tasks were in
+				// flight. Snippet is bounded to 80 chars to keep the voice
+				// narration short.
+				const taskFile = join(TASK_DIR, `${taskId}.txt`);
+				let taskSnippet = '';
+				if (existsSync(taskFile)) {
+					try {
+						const body = readFileSync(taskFile, 'utf-8');
+						const taskLine = body.split('\n').find(l => l.startsWith('task:'));
+						const raw = (taskLine ? taskLine.slice(5) : '').trim();
+						taskSnippet = raw.length > 80 ? raw.slice(0, 77) + '...' : raw;
+					} catch {}
+				}
+				console.error(`${ts()} [TaskBridge] Task ${taskId} (${taskSnippet || '?'}) timed out after ${timeoutMs / 1000}s`);
+				pipelineEmit(
+					'task_bridge_timeout',
+					taskId,
+					false,
+					`Timed out after ${Math.floor(timeoutMs / 1000)}s`,
+					'voice-agent-bridge',
+				);
+				const statusMsg = taskSnippet
+					? `Task '${taskSnippet}' timed out — core agent may be unresponsive`
+					: 'Task timed out — core agent may be unresponsive';
+				_sendTaskStatus?.(taskId, 'timeout', statusMsg);
+				const minutes = Math.floor(timeoutMs / 60000);
+				const userMsg = taskSnippet
+					? `[Task ${taskId} ('${taskSnippet}') timed out after ${minutes} minutes. The processing engine may need to be restarted.]`
+					: `[Task ${taskId} timed out after ${minutes} minutes. The processing engine may need to be restarted.]`;
+				onResult(userMsg);
+				// Move the task file out of tasks/ so /tasks/active stops listing it
+				// as 'working' forever. (Without this, dedup-orphan tasks left behind
+				// after a consolidated reply pile up in the UI as stuck spinners.)
+				// Use archiveFile() — same destination (tasks/archive/<YYYY-MM>/) as
+				// the result-delivery archival paths so all timeout/done/dedupe lands
+				// in one place. (Mini's #589 review flagged the previous
+				// tasks/processed/ split as a learn-collector scan footprint.)
+				if (existsSync(taskFile)) {
+					archiveFile(taskFile, 'tasks', taskId);
+				}
+				// Discord DM fallback (opt-in via dm_on_timeout). Default off per
+				// Susan's PR #578 contract — silent timeout. We emit by writing
+				// a proactive-*.txt file; discord-bridge.py poll_proactive sends
+				// it to the owner's DM.
+				if (dmOnTimeout) {
+					try {
+						const proactiveTs = Math.floor(Date.now() / 1000);
+						const proactivePath = join(RESULT_DIR, `proactive-timeout-${taskId}-${proactiveTs}.txt`);
+						const dmBody = taskSnippet
+							? `⏱ Task '${taskSnippet}' timed out after ${minutes}m. The processing engine may need to be restarted, or the task may need a longer timeout via timeout_minutes.`
+							: `⏱ Task ${taskId} timed out after ${minutes}m.`;
+						writeFileSync(proactivePath, dmBody);
+						console.log(`${ts()} [TaskBridge] Wrote DM-on-timeout proactive file for ${taskId}`);
+					} catch (e) {
+						console.error(`${ts()} [TaskBridge] Failed to emit DM-on-timeout for ${taskId}:`, e);
+					}
+				}
+			}
+		}
+		} catch (err) {
+			console.error(`${ts()} [TaskBridge] timeout-check loop threw (non-fatal, continuing watch):`, err);
+		}
+
+		try {
+			const files = readdirSync(RESULT_DIR).filter(f => f.endsWith('.txt')).sort();
+			if (files.length === 0) return;
+
+			const clientConnected = isClientConnected();
+
+			for (const file of files) {
+				if (_deliveredResults.has(file)) continue;
+				const path = join(RESULT_DIR, file);
+				// `[dm-only]` is a Discord-routing privacy marker (see
+				// src/result_markers.py) — on the Python bridge side it suppresses
+				// any [channel:] redirect on the same body (so a body carrying
+				// private data can't be redirected out to a shared channel). It does
+				// NOT by itself force DM delivery — routing to the owner's DM stays
+				// the consumer's job (for a proactive-* result the default
+				// destination already is the owner's DM). It has no meaning for the
+				// voice/task path, so strip it on read: this keeps voice from ever
+				// speaking "dm only" and keeps it out of logs. Parity with Python
+				// parse_markers(), which strips ONLY a STANDALONE marker — one alone
+				// on its line. An inline mention is prose (a result DISCUSSING the
+				// marker) and rewriting it silently corrupts owner-facing text:
+				//   in  "- #2170 [dm-only]: closes the leak vector"
+				//   out "- #2170 : closes the leak vector"
+				// The old expression here was /\[dm-only\]\s*/gi, which stripped
+				// every occurrence and made this consumer disagree with every
+				// text bridge after the Python side was narrowed.
+				const result = readFileSync(path, 'utf-8')
+					.replace(/^[ \t]*\[dm-only\][ \t]*\r?\n?/gim, '')
+					.trim();
+				if (!result) continue;
+				const taskId = file.replace('.txt', '');
+
+				// Voice-only push channel: files named `voice-*.txt` are spoken
+				// by the voice agent on next turn, OR held in queue until the
+				// voice client reconnects. Discord-bridge skips them. Use this
+				// when the content is meaningless on Discord (e.g. a draft
+				// meant for voice to TYPE into a text field). Per Chi's
+				// 2026-05-20 02:25 ask after the proactive-* race.
+				if (file.startsWith('voice-')) {
+					if (!clientConnected) {
+						// Hold in queue; don't archive. Next poll will try again.
+						continue;
+					}
+					console.log(`${ts()} [TaskBridge] Voice-only result: ${file} (${result.slice(0, 80)})`);
+					onResult(result);
+					_deliveredResults.add(file);
+					setTimeout(() => archiveFile(path, 'results', `voice-${Date.now()}`), 10_000);
+					continue;
+				}
+				// Deduped-marker result: agent consolidated this task's reply
+				// into another task's result file. Mark this task done silently
+				// and archive — no Discord post, no voice narration, no timeout.
+				// Format: first line is "[deduped: <other-task-id>]" (rest of
+				// file optional, displayed as the result body in the UI).
+				if (file.startsWith('task-') && /^\s*\[deduped:\s*task-/i.test(result)) {
+					console.log(`${ts()} [TaskBridge] ${taskId} is deduped marker; archiving silently`);
+					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+					_deliveredResults.add(file);
+					_pendingTasks.delete(taskId);
+					try {
+						fetch('http://localhost:${AGENT_API_PORT}/task-done', {
+							method: 'POST',
+							headers: _apiHeaders(),
+							body: JSON.stringify({ taskId, result }),
+						}).catch(() => {});
+					} catch {}
+					setTimeout(() => {
+						archiveFile(path, 'results', taskId);
+						const taskFile = join(TASK_DIR, `${taskId}.txt`);
+						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+					}, 5_000);
+					continue;
+				}
+				// Skip markers: [no-send] / [REPLIED] — archive silently with no voice narration.
+				// These are set by the core agent when delivery already happened via another path
+				// (e.g. Discord bridge already replied) or the result should be suppressed entirely.
+				// Parity with Python bridges: discord-bridge.py and telegram-bridge.py both honor
+				// these via parse_markers(); task-bridge.ts must too (issue #1381).
+				if (file.startsWith('task-') && /^\s*\[(?:no-send|REPLIED)\]/i.test(result)) {
+					console.log(`${ts()} [TaskBridge] ${taskId} has skip marker; archiving silently`);
+					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+					_deliveredResults.add(file);
+					_pendingTasks.delete(taskId);
+					try {
+						fetch('http://localhost:${AGENT_API_PORT}/task-done', {
+							method: 'POST',
+							headers: _apiHeaders(),
+							body: JSON.stringify({ taskId, result }),
+						}).catch(() => {});
+					} catch {}
+					setTimeout(() => {
+						archiveFile(path, 'results', taskId);
+						const taskFile = join(TASK_DIR, `${taskId}.txt`);
+						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+					}, 5_000);
+					continue;
+				}
+				// Voice client offline → forward voice-task results to Discord DM
+				// via a proactive-result-*.txt file (poll_proactive in
+				// discord-bridge.py picks it up and DMs the owner). Skips files
+				// that aren't voice-originated tasks (Discord/Telegram bridges
+				// handle their own deliveries via pending_replies).
+				if (!clientConnected) {
+					if (file.startsWith('task-') && _isVoiceTask(taskId)) {
+						try {
+							const proactiveTs = Math.floor(Date.now() / 1000);
+							const proactivePath = join(RESULT_DIR, `proactive-result-${taskId}-${proactiveTs}.txt`);
+							writeFileSync(proactivePath, result);
+							console.log(`${ts()} [TaskBridge] Voice offline; forwarded ${taskId} result to Discord DM via ${proactivePath}`);
+							_deliveredResults.add(file);
+							_pendingTasks.delete(taskId);
+							setTimeout(() => {
+								archiveFile(path, 'results', taskId);
+								const taskFile = join(TASK_DIR, `${taskId}.txt`);
+								if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+							}, 10_000);
+						} catch (e) {
+							console.error(`${ts()} [TaskBridge] Failed to forward ${taskId} to Discord:`, e);
+						}
+					}
+					// Chat-path tasks have no bridge consumer — archive them directly
+					// so results/task-chat-*.txt files don't accumulate forever.
+					if (taskId.startsWith('task-chat-')) {
+						_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+						_deliveredResults.add(file);
+						_pendingTasks.delete(taskId);
+						console.log(`${ts()} [TaskBridge] Chat task archived (no client): ${taskId}`);
+						setTimeout(() => {
+							archiveFile(path, 'results', taskId);
+							const taskFile = join(TASK_DIR, `${taskId}.txt`);
+							if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+						}, 10_000);
+					}
+					// Context-drop tasks: Sutando.app writes `source: context-drop` (no bridge
+					// handles delivery). Archive them directly so they don't pile up indefinitely.
+					// Companion fix: Sutando.app main.swift writeTask() must include this field.
+					// Issue: https://github.com/sonichi/sutando/issues/969
+					if (taskId.startsWith('task-')) {
+						const ctxTaskFile = join(TASK_DIR, `${taskId}.txt`);
+						if (existsSync(ctxTaskFile)) {
+							try {
+								const taskBody = readFileSync(ctxTaskFile, 'utf-8');
+								if (/^source:\s*context-drop/m.test(taskBody)) {
+									_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+									_deliveredResults.add(file);
+									_pendingTasks.delete(taskId);
+									console.log(`${ts()} [TaskBridge] Context-drop task archived (no client): ${taskId}`);
+									setTimeout(() => {
+										archiveFile(path, 'results', taskId);
+										if (existsSync(ctxTaskFile)) archiveFile(ctxTaskFile, 'tasks', taskId);
+									}, 10_000);
+									continue;
+								}
+							} catch {}
+						}
+					}
+					// Other non-voice unsent results stay queued (their bridges deliver them)
+					continue;
+				}
+				// Belt-suspenders guard (issue #1035, follow-up to PR #1033):
+				// the fallthrough below fires onResult() for any non-empty .txt
+				// when the voice client is connected. PR #1033 introduced a new
+				// filename namespace `<channel-key>.task-{id}.txt` for the
+				// per-channel pull path used by phone / plugin surfaces — those
+				// files are NOT meant for task-bridge to inject into voice.
+				// PR #1033's mitigation is the per-channel scanner's
+				// read-and-delete winning the race; this guard closes the
+				// race by gating the fallthrough to filenames task-bridge
+				// legitimately consumes. See _shouldFallthrough for the
+				// allowlisted prefixes.
+				if (!_shouldFallthrough(file)) continue;
+				if (result) {
+					console.log(`${ts()} [TaskBridge] Result ${file}: ${result.slice(0, 100)}`);
+					pipelineEmit(
+						'agent_result_delivery',
+						taskId,
+						true,
+						result.slice(0, 120),
+						'voice-agent-bridge',
+					);
+					// Delivery affinity (owner-hit 2026-07-09 05:04): a task that
+					// arrived via a REMOTE bridge (gateway/discord/telegram/slack —
+					// anything not voice-origin) has its result delivered BY that
+					// bridge. Voice may narrate a copy for call continuity, but
+					// must NOT archive the files — archiving here starved the
+					// gateway and the owner's room reply silently never went out
+					// ("do we have a room event?" answered on-call only). Foreign
+					// results: narrate once (in-memory dedup), leave files alone.
+					const foreignOrigin = file.startsWith('task-') && !taskId.startsWith('task-chat-') && !_isVoiceTask(taskId);
+					// proactive-* files reach this fallthrough only to be SPOKEN
+					// (onResult below). They are NOT tasks — gate the two
+					// task-registration side-effects (_sendTaskStatus + POST
+					// /task-done) to genuine task-*.txt results, else each
+					// proactive re-fire duplicates a Task row (#1786).
+					const registersTask = _shouldRegisterTaskRow(file);
+					if (registersTask) _sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+					_deliveredResults.add(file);
+					_pendingTasks.delete(taskId);
+					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, LOG_LINE_MAX_CHARS)}`);
+					onResult(result);
+					// Notify agent-api directly (task results only), then delete file
+					if (registersTask) {
+						try {
+							fetch('http://localhost:${AGENT_API_PORT}/task-done', {
+								method: 'POST',
+								headers: _apiHeaders(),
+								body: JSON.stringify({ taskId, result }),
+							}).catch(() => {});
+						} catch {}
+					}
+					if (!foreignOrigin) {
+						setTimeout(() => {
+							const taskIdFromFile = path.split('/').pop()!.replace('.txt', '');
+							archiveFile(path, 'results', taskIdFromFile);
+							// Also archive the originating task file so get_task_status
+							// stops counting it as "queued" — voice agent reads
+							// tasks/*.txt directly and otherwise sees stale files
+							// (Chi reported "task done in UI but queued in voice"
+							// on 2026-05-04 with 32 stale files in tasks/).
+							const taskFile = join(TASK_DIR, `${taskIdFromFile}.txt`);
+							if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskIdFromFile);
+						}, 10_000);
+					} else {
+						console.log(`${ts()} [TaskBridge] ${taskId} is foreign-origin (remote bridge delivers); narrated only, files left for owner bridge`);
+					}
+				}
+			}
+		} catch (err) {
+			// Directory might not exist yet or file in transit. Log on
+			// unusual exceptions (not ENOENT) so a real file-system
+			// problem is observable, while still containing the throw.
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code && code !== 'ENOENT') {
+				console.error(`${ts()} [TaskBridge] result-scan threw (non-fatal):`, err);
+			}
+		}
+	}, 2000);
+}

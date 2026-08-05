@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Sutando — Mobile</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a12; color: #c0c0d0;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; min-height: 100dvh;
+    padding: 16px; gap: 12px;
+  }
+  h1 { font-size: 18px; font-weight: 500; color: #e0e0f0; }
+  .status {
+    font-size: 13px; padding: 6px 14px; border-radius: 16px;
+    background: #1a1a2e; border: 1px solid #2a2a4e;
+  }
+  .status.connected { border-color: #2a6e2a; color: #6fbf6f; }
+  .status.reconnecting { border-color: #7a5c16; color: #e5c45f; }
+  .status.error { border-color: #6e2a2a; color: #bf6f6f; }
+  button {
+    padding: 14px 32px; font-size: 16px; border: none; border-radius: 10px;
+    cursor: pointer; font-weight: 600; width: 100%; max-width: 300px;
+  }
+  #connect-btn { background: #2563eb; color: white; }
+  #connect-btn:disabled { background: #333; color: #666; }
+  #disconnect-btn { background: #dc2626; color: white; display: none; }
+  #mute-btn { background: #444; color: white; display: none; }
+  #mute-btn.muted { background: #b91c1c; }
+  #enable-audio-btn {
+    display: none; background: #b45309; color: #fff; border: 2px solid #f59e0b;
+    max-width: 320px; line-height: 1.35;
+  }
+  #enable-audio-btn:active { filter: brightness(1.08); }
+  #screen-view {
+    width: 100%; max-width: 100vw; aspect-ratio: 16/9;
+    background: #111; border-radius: 8px; border: 1px solid #2a2a4e;
+    display: none; object-fit: contain;
+  }
+  .login-form {
+    display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 300px;
+  }
+  input {
+    padding: 12px 14px; font-size: 15px; border-radius: 10px;
+    background: #1a1a2e; border: 1px solid #2a2a4e; color: #e0e0f0;
+    outline: none; width: 100%;
+  }
+  input:focus { border-color: #2563eb; }
+  #login-error { color: #bf6f6f; font-size: 13px; text-align: center; display: none; }
+  #main-ui { display: none; flex-direction: column; align-items: center; width: 100%; gap: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Sutando Mobile</h1>
+
+<form class="login-form" id="login-form" action="#" autocomplete="on">
+  <input id="username-input" name="username" type="text" placeholder="Username" autocomplete="username" />
+  <input id="secret-input" name="password" type="password" placeholder="Password" autocomplete="current-password" />
+  <button id="connect-btn" type="submit">Connect</button>
+  <div id="login-error"></div>
+</form>
+
+<div id="main-ui">
+  <div id="status" class="status">Connecting...</div>
+  <button type="button" id="enable-audio-btn">Enable audio — tap to hear</button>
+  <video id="screen-view" autoplay playsinline></video>
+  <div id="participants" class="participants"></div>
+  <div class="controls">
+    <button id="mute-btn">Mute</button>
+    <button id="disconnect-btn">Disconnect</button>
+  </div>
+</div>
+
+<script type="module">
+  // Optional URL flags on /mobile?... :
+  //   micMeter=1   — mic RMS in console
+  //   audioDebug=1 — verbose remote TTS trace (startAudio, AudioContext, subscriptions)
+  // Login: after a successful connect, username/password are stored in cookies (Path=/, Secure on HTTPS).
+  import {
+    Room,
+    RoomEvent,
+    Track,
+    createLocalTracks,
+  } from 'https://esm.sh/livekit-client@2.9.7';
+
+  // Token endpoint: same origin (proxied by screen-publisher-server)
+  const TOKEN_SERVER = `${window.location.origin}`;
+  const PAGE_PARAMS = new URLSearchParams(window.location.search);
+  const AUDIO_DEBUG = PAGE_PARAMS.get('audioDebug') === '1' || PAGE_PARAMS.get('audioDebug') === 'true';
+
+  /** Verbose only (?audioDebug=1). */
+  function audioDbg(...args) {
+    if (AUDIO_DEBUG) console.log('[LiveKit-audio]', ...args);
+  }
+
+  const loginForm = document.getElementById('login-form');
+  const mainUi = document.getElementById('main-ui');
+  const connectBtn = document.getElementById('connect-btn');
+  const disconnectBtn = document.getElementById('disconnect-btn');
+  const muteBtn = document.getElementById('mute-btn');
+  const screenView = document.getElementById('screen-view');
+  const participantsEl = document.getElementById('participants');
+  const statusEl = document.getElementById('status');
+  const enableAudioBtn = document.getElementById('enable-audio-btn');
+  const loginError = document.getElementById('login-error');
+  const usernameInput = document.getElementById('username-input');
+  const secretInput = document.getElementById('secret-input');
+
+  /** Same-origin cookies for https://localhost:7081/mobile (Path=/). Not httpOnly — readable by JS; avoid on shared devices. */
+  const AUTH_COOKIE_USER = 'sutando_mobile_user';
+  const AUTH_COOKIE_SECRET = 'sutando_mobile_secret';
+  const AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+
+  function _setCookie(name, value, maxAgeSec) {
+    const enc = encodeURIComponent(value);
+    let attrs = `${name}=${enc}; Path=/; Max-Age=${maxAgeSec}; SameSite=Lax`;
+    if (window.location.protocol === 'https:') attrs += '; Secure';
+    document.cookie = attrs;
+  }
+
+  function _getCookie(name) {
+    const pref = `${name}=`;
+    const parts = document.cookie.split(';');
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i].trim();
+      if (p.startsWith(pref)) return decodeURIComponent(p.slice(pref.length));
+    }
+    return '';
+  }
+
+  function saveAuthCookies(username, secret) {
+    if (!username) return;
+    _setCookie(AUTH_COOKIE_USER, username, AUTH_COOKIE_MAX_AGE);
+    if (secret) _setCookie(AUTH_COOKIE_SECRET, secret, AUTH_COOKIE_MAX_AGE);
+  }
+
+  function loadAuthCookiesIntoForm() {
+    const u = _getCookie(AUTH_COOKIE_USER);
+    const s = _getCookie(AUTH_COOKIE_SECRET);
+    if (u) usernameInput.value = u;
+    if (s) secretInput.value = s;
+  }
+
+  loadAuthCookiesIntoForm();
+
+  let room = null;
+  let micTrack = null;
+  let muted = false;
+  let micMeterIntervalId = null;
+  /** Resumed during Connect (user gesture); do not create a second suspended context for the meter */
+  let connectAudioCtx = null;
+  let micMeterSourceNode = null;
+  let savedCredentials = null;
+  let desiredConnected = false;
+  let reconnecting = false;
+  let reconnectAttempt = 0;
+  let reconnectTimerId = null;
+  let roomStateIntervalId = null;
+  let ignoreDisconnectEvent = false;
+
+  function stopMicLevelMeter() {
+    if (micMeterIntervalId) {
+      clearInterval(micMeterIntervalId);
+      micMeterIntervalId = null;
+    }
+    if (micMeterSourceNode) {
+      try {
+        micMeterSourceNode.disconnect();
+      } catch (_) {}
+      micMeterSourceNode = null;
+    }
+  }
+
+  /** When URL has ?micMeter=1, logs mic energy. Must use the same AudioContext resumed on Connect. */
+  function startMicLevelMeter(mediaStreamTrack, audioCtx) {
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get('micMeter') !== '1' && sp.get('micMeter') !== 'true') return;
+    stopMicLevelMeter();
+    if (!audioCtx) {
+      console.warn('[micMeter] skipped: no AudioContext');
+      return;
+    }
+    try {
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().then(() => console.log('[micMeter] AudioContext resumed → ' + audioCtx.state)).catch(() => {});
+      }
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      micMeterSourceNode = audioCtx.createMediaStreamSource(new MediaStream([mediaStreamTrack]));
+      micMeterSourceNode.connect(analyser);
+      const td = new Uint8Array(analyser.fftSize);
+      let tick = 0;
+      micMeterIntervalId = setInterval(() => {
+        analyser.getByteTimeDomainData(td);
+        let s = 0;
+        let peak = 0;
+        for (let i = 0; i < td.length; i++) {
+          const x = (td[i] - 128) / 128;
+          s += x * x;
+          const a = Math.abs(td[i] - 128);
+          if (a > peak) peak = a;
+        }
+        const rms = Math.sqrt(s / td.length);
+        tick += 1;
+        if (tick <= 5 || tick % 4 === 0) {
+          console.log(
+            '[micMeter] ctx=' + audioCtx.state +
+            ' rms=' + rms.toFixed(4) + ' peak_u8=' + peak +
+            ' — say "hello"; expect rms > ~0.02 when mic hears you (0 ≈ silence)'
+          );
+        }
+      }, 500);
+      console.log('[micMeter] enabled (shared AudioContext state=' + audioCtx.state + ')');
+    } catch (e) {
+      console.warn('[micMeter] failed:', e?.message || e);
+    }
+  }
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = `status ${cls || ''}`;
+  }
+
+  /** LiveKit: unlock remote audio (browser autoplay). Safe to call after connect / reconnect; may still need user tap. */
+  function refreshEnableAudioButton() {
+    if (!enableAudioBtn) return;
+    if (!room) {
+      enableAudioBtn.style.display = 'none';
+      return;
+    }
+    enableAudioBtn.style.display = room.canPlaybackAudio ? 'none' : 'block';
+  }
+
+  async function unlockRemoteAudio(hint) {
+    if (!room) return;
+    const tag = hint ? ` ${hint}` : '';
+    audioDbg('startAudio attempt' + tag, {
+      audioContextState: connectAudioCtx?.state,
+      canPlaybackAudio: room.canPlaybackAudio,
+    });
+    try {
+      if (connectAudioCtx && connectAudioCtx.state === 'suspended') {
+        await connectAudioCtx.resume();
+        audioDbg('AudioContext.resume →', connectAudioCtx.state);
+      }
+      await room.startAudio();
+      audioDbg('room.startAudio() settled' + tag, { canPlaybackAudio: room.canPlaybackAudio });
+    } catch (e) {
+      console.warn('[LiveKit] startAudio failed:', e?.message || e);
+    }
+    refreshEnableAudioButton();
+    if (!AUDIO_DEBUG && room && !room.canPlaybackAudio) {
+      console.info('[LiveKit-audio] Playback still blocked after startAudio' + tag + ' — use “Enable audio — tap to hear”');
+    }
+  }
+
+  function updateParticipants() {
+    if (!room) return;
+    const names = [];
+    room.remoteParticipants.forEach((p) => names.push(p.identity));
+    participantsEl.textContent = names.length
+      ? `In room: ${names.join(', ')}`
+      : 'Waiting for other participants...';
+  }
+
+  function tokenQuery({ username, secret }) {
+    return `user=${encodeURIComponent(username)}&secret=${encodeURIComponent(secret)}&identity=phone-user&name=Phone`;
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimerId) {
+      clearTimeout(reconnectTimerId);
+      reconnectTimerId = null;
+    }
+  }
+
+  function stopRoomStateMonitor() {
+    if (roomStateIntervalId) {
+      clearInterval(roomStateIntervalId);
+      roomStateIntervalId = null;
+    }
+  }
+
+  function startRoomStateMonitor() {
+    stopRoomStateMonitor();
+    roomStateIntervalId = setInterval(checkRoomState, 5000);
+    setTimeout(checkRoomState, 1500);
+  }
+
+  async function checkRoomState() {
+    if (!desiredConnected || reconnecting || !savedCredentials) return;
+    try {
+      const resp = await fetch(`${TOKEN_SERVER}/room-state?${tokenQuery(savedCredentials)}`, { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`room-state ${resp.status}`);
+      const state = await resp.json();
+      const participants = (state.participants || []).map((p) => p.identity);
+      console.log('[LiveKit] room-state participants:', participants.join(', ') || '(none)');
+      if (!state.identityPresent) {
+        scheduleReconnect('Phone was dropped from LiveKit room');
+      }
+    } catch (e) {
+      console.warn('[LiveKit] room-state check failed:', e?.message || e);
+    }
+  }
+
+  function scheduleReconnect(reason) {
+    if (!desiredConnected || !savedCredentials || reconnecting || reconnectTimerId) return;
+    const delay = Math.min(12000, 1000 * Math.pow(2, reconnectAttempt));
+    reconnectAttempt += 1;
+    setStatus(`${reason}; reconnecting in ${Math.round(delay / 1000)}s...`, 'reconnecting');
+    console.warn('[LiveKit] Scheduling reconnect:', reason);
+    reconnectTimerId = setTimeout(() => {
+      reconnectTimerId = null;
+      reconnect(reason).catch((e) => {
+        console.warn('[LiveKit] Reconnect failed:', e?.message || e);
+        scheduleReconnect('Reconnect failed');
+      });
+    }, delay);
+  }
+
+  async function reconnect(reason) {
+    if (!desiredConnected || !savedCredentials) return;
+    reconnecting = true;
+    setStatus(`Reconnecting (${reason})...`, 'reconnecting');
+    try {
+      await connectWithCredentials(savedCredentials, { isReconnect: true });
+    } finally {
+      reconnecting = false;
+    }
+  }
+
+  function teardownRoom({ hideUi, closeAudio, keepDesired } = {}) {
+    stopMicLevelMeter();
+    stopRoomStateMonitor();
+    clearReconnectTimer();
+    if (!keepDesired) desiredConnected = false;
+    if (micTrack) {
+      micTrack.stop();
+      micTrack = null;
+    }
+    if (room) {
+      ignoreDisconnectEvent = true;
+      Promise.resolve(room.disconnect()).catch(() => {}).finally(() => { ignoreDisconnectEvent = false; });
+      room = null;
+    }
+    if (closeAudio && connectAudioCtx) {
+      connectAudioCtx.close().catch(() => {});
+      connectAudioCtx = null;
+    }
+    muted = false;
+    screenView.style.display = 'none';
+    screenView.srcObject = null;
+    if (hideUi) {
+      mainUi.style.display = 'none';
+      loginForm.style.display = 'flex';
+    }
+    connectBtn.disabled = false;
+    disconnectBtn.style.display = hideUi ? 'none' : 'block';
+    muteBtn.style.display = hideUi ? 'none' : 'block';
+    if (enableAudioBtn) enableAudioBtn.style.display = 'none';
+    muteBtn.textContent = 'Mute';
+    muteBtn.classList.remove('muted');
+    participantsEl.textContent = '';
+  }
+
+  function attachRoomHandlers(currentRoom) {
+    currentRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+      console.log(`[LiveKit] Track subscribed: ${track.kind} from ${participant.identity}`);
+      try {
+        const live = participant.identity ? currentRoom.remoteParticipants.get(participant.identity) : null;
+        if (!live) {
+          console.warn('[LiveKit] Skipping track attach — participant no longer in room', participant.sid);
+          return;
+        }
+        if (track.kind === Track.Kind.Video) {
+          track.attach(screenView);
+          screenView.style.display = 'block';
+        }
+        if (track.kind === Track.Kind.Audio) {
+          const el = track.attach();
+          el.setAttribute('autoplay', '');
+          el.setAttribute('playsinline', '');
+          el.volume = 1.0;
+          document.body.appendChild(el);
+          audioDbg('remote audio element attached', {
+            from: participant.identity,
+            trackSid: pub?.trackSid,
+            publication: pub?.trackName,
+            muted: pub?.isMuted,
+          });
+          el.play()
+            .then(() => {
+              console.info('[LiveKit-audio] playing remote audio from', participant.identity, pub?.trackSid || '');
+              audioDbg('HTMLAudioElement.play resolved', { paused: el.paused, muted: el.muted });
+            })
+            .catch((e) => {
+              console.warn('[LiveKit] Audio play blocked:', e?.message || e, { identity: participant.identity });
+              refreshEnableAudioButton();
+            });
+        }
+      } catch (e) {
+        console.warn('[LiveKit] TrackSubscribed attach failed:', e?.message || e);
+      }
+    });
+
+    currentRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+      track.detach().forEach((el) => el.remove());
+      if (track.kind === Track.Kind.Video) screenView.style.display = 'none';
+    });
+
+    currentRoom.on(RoomEvent.Connected, () => {
+      setStatus('Connected', 'connected');
+      disconnectBtn.style.display = 'block';
+      muteBtn.style.display = 'block';
+      reconnectAttempt = 0;
+      updateParticipants();
+      startRoomStateMonitor();
+      unlockRemoteAudio('room:connected');
+    });
+
+    currentRoom.on(RoomEvent.AudioPlaybackStatusChanged, (canPlay) => {
+      console.info('[LiveKit-audio] browser allows remote playback:', canPlay === true, {
+        showEnableButton: !canPlay,
+      });
+      refreshEnableAudioButton();
+    });
+
+    if (RoomEvent.Reconnecting) {
+      currentRoom.on(RoomEvent.Reconnecting, () => {
+        if (desiredConnected) setStatus('Reconnecting...', 'reconnecting');
+      });
+    }
+
+    if (RoomEvent.Reconnected) {
+      currentRoom.on(RoomEvent.Reconnected, () => {
+        if (desiredConnected) setStatus('Connected', 'connected');
+        updateParticipants();
+        startRoomStateMonitor();
+        unlockRemoteAudio('room:reconnected');
+      });
+    }
+
+    if (RoomEvent.ConnectionStateChanged) {
+      currentRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
+        console.log('[LiveKit] connection state:', state);
+      });
+    }
+
+    currentRoom.on(RoomEvent.Disconnected, (reason) => {
+      console.warn('[LiveKit] Disconnected:', reason || '(no reason)');
+      if (ignoreDisconnectEvent) return;
+      teardownRoom({ hideUi: false, closeAudio: false, keepDesired: true });
+      if (desiredConnected) scheduleReconnect('Disconnected from LiveKit');
+    });
+
+    currentRoom.on(RoomEvent.ParticipantConnected, () => updateParticipants());
+
+    currentRoom.on(RoomEvent.ParticipantDisconnected, (p) => {
+      updateParticipants();
+      if (p.identity === 'screen-publisher') {
+        screenView.srcObject = null;
+        screenView.style.display = 'none';
+      }
+    });
+  }
+
+  async function connectWithCredentials(credentials, { isReconnect = false } = {}) {
+    clearReconnectTimer();
+    stopRoomStateMonitor();
+    if (room || micTrack) teardownRoom({ hideUi: false, closeAudio: false, keepDesired: true });
+
+    if (!connectAudioCtx) {
+      connectAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (connectAudioCtx.state === 'suspended') await connectAudioCtx.resume();
+
+    const resp = await fetch(`${TOKEN_SERVER}/token?${tokenQuery(credentials)}`);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.error || `Token error ${resp.status}`);
+    }
+    const { jwt, url } = await resp.json();
+    if (!url) throw new Error('LIVEKIT_URL not configured on server');
+
+    loginForm.style.display = 'none';
+    mainUi.style.display = 'flex';
+    setStatus(isReconnect ? 'Reconnecting...' : 'Connecting...', isReconnect ? 'reconnecting' : '');
+
+    /* Match screen-publisher Room flags — adaptiveStream/dynacast can race during ICE/subscribe
+       churn and trigger SDK "participant that's not present" when attaching remote screen tracks. */
+    room = new Room({ adaptiveStream: false, dynacast: false });
+    attachRoomHandlers(room);
+
+    await room.connect(url, jwt);
+
+    const tracks = await createLocalTracks({ audio: true, video: false });
+    micTrack = tracks[0];
+    await room.localParticipant.publishTrack(micTrack, {
+      name: 'mic',
+      source: Track.Source.Microphone,
+    });
+    console.log('[LiveKit] Mic published');
+    startMicLevelMeter(micTrack.mediaStreamTrack, connectAudioCtx);
+    desiredConnected = true;
+    reconnectAttempt = 0;
+    setStatus('Connected', 'connected');
+    updateParticipants();
+    startRoomStateMonitor();
+    await unlockRemoteAudio('post-publish');
+    refreshEnableAudioButton();
+    console.info('[LiveKit-audio] session ready', {
+      canPlaybackAudio: room.canPlaybackAudio,
+      audioContextState: connectAudioCtx?.state,
+      audioDebug: AUDIO_DEBUG,
+    });
+  }
+
+  async function connect() {
+    const username = usernameInput.value.trim();
+    const secret = secretInput.value;
+    if (!username || !secret) {
+      loginError.textContent = 'Enter username and password';
+      loginError.style.display = 'block';
+      return;
+    }
+
+    connectBtn.disabled = true;
+    loginError.style.display = 'none';
+    savedCredentials = { username, secret };
+    desiredConnected = true;
+
+    try {
+      await connectWithCredentials(savedCredentials);
+      saveAuthCookies(username, secret);
+    } catch (err) {
+      console.error('Connect failed:', err);
+      teardownRoom({ hideUi: true, closeAudio: true });
+      loginForm.style.display = 'flex';
+      mainUi.style.display = 'none';
+      loginError.textContent = err.message;
+      loginError.style.display = 'block';
+      connectBtn.disabled = false;
+      desiredConnected = false;
+    }
+  }
+
+  function toggleMute() {
+    if (!micTrack) return;
+    muted = !muted;
+    micTrack.mediaStreamTrack.enabled = !muted;
+    muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+    muteBtn.classList.toggle('muted', muted);
+  }
+
+  async function disconnect() {
+    desiredConnected = false;
+    savedCredentials = null;
+    clearReconnectTimer();
+    teardownRoom({ hideUi: true, closeAudio: true });
+    setStatus('Disconnected', '');
+  }
+
+  function cleanup() {
+    teardownRoom({ hideUi: true, closeAudio: true });
+  }
+
+  loginForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    connect();
+  });
+  disconnectBtn.onclick = disconnect;
+  muteBtn.onclick = toggleMute;
+  if (enableAudioBtn) {
+    enableAudioBtn.onclick = () => {
+      unlockRemoteAudio('user:enable-audio-tap').catch((e) => console.warn('[LiveKit] unlock click failed:', e));
+    };
+  }
+</script>
+
+</body>
+</html>
