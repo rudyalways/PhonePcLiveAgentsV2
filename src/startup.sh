@@ -859,21 +859,23 @@ if [[ "${SUTANDO_TAILNET_SERVE:-}" =~ ^(1|true|yes|on)$ ]]; then
   fi
 fi
 
-# 3. Dashboard (port 7844)
-reap_wedged_listener 7844 dashboard
-if ! lsof -i :7844 > /dev/null 2>&1; then
-  echo "  Starting dashboard (port 7844)..."
-  python3 src/dashboard.py > "$LOGS_DIR/dashboard.log" 2>&1 &
+# 3. Dashboard (port 7951 by default — matches agent-dashboard-ports.ts)
+DASHBOARD_PORT="${DASHBOARD_PORT:-7951}"
+reap_wedged_listener "$DASHBOARD_PORT" dashboard
+if ! lsof -i :"$DASHBOARD_PORT" > /dev/null 2>&1; then
+  echo "  Starting dashboard (port $DASHBOARD_PORT)..."
+  DASHBOARD_PORT="$DASHBOARD_PORT" python3 src/dashboard.py > "$LOGS_DIR/dashboard.log" 2>&1 &
   echo "  ✓ dashboard"
 else
   echo "  ✓ dashboard (already running)"
 fi
 
-# 4. Agent API (port 7843)
-reap_wedged_listener 7843 agent-api
-if ! lsof -i :7843 > /dev/null 2>&1; then
-  echo "  Starting agent API (port 7843)..."
-  python3 src/agent-api.py > "$LOGS_DIR/agent-api.log" 2>&1 &
+# 4. Agent API (port 7950 by default — matches web-client task bridge)
+AGENT_API_PORT="${AGENT_API_PORT:-7950}"
+reap_wedged_listener "$AGENT_API_PORT" agent-api
+if ! lsof -i :"$AGENT_API_PORT" > /dev/null 2>&1; then
+  echo "  Starting agent API (port $AGENT_API_PORT)..."
+  AGENT_API_PORT="$AGENT_API_PORT" python3 src/agent-api.py > "$LOGS_DIR/agent-api.log" 2>&1 &
   echo "  ✓ agent API"
 else
   echo "  ✓ agent API (already running)"
@@ -1265,7 +1267,7 @@ echo ""
 # Verify services actually started (wait a moment, then check ports)
 sleep 3
 echo "Verifying services..."
-VERIFY_PORTS="$WEB_CLIENT_PORT:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+VERIFY_PORTS="$WEB_CLIENT_PORT:web-client ${DASHBOARD_PORT:-7951}:dashboard ${AGENT_API_PORT:-7950}:agent-api 7845:screen-capture"
 if [ "${SKIP_VOICE:-}" != "1" ]; then
   VERIFY_PORTS="9900:voice-agent $VERIFY_PORTS"
 fi

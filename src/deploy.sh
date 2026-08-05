@@ -16,6 +16,32 @@ cd "$REPO"
 VENV="$REPO/.venv-livekit"
 PYTHON="$VENV/bin/python3"
 
+ensure_node_22() {
+  local major
+  major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
+  [ "$major" -ge 22 ] && return 0
+  if [ -n "${NVM_DIR:-}" ] && [ -s "${NVM_DIR}/nvm.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${NVM_DIR}/nvm.sh"
+    nvm use 22 >/dev/null 2>&1 || true
+  fi
+  major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
+  if [ "$major" -lt 22 ]; then
+    echo "  ✗ node $(node -v 2>/dev/null || echo '?') is too old — requires Node >=22 (node:sqlite)"
+    echo "    nvm install 22 && nvm use 22"
+    return 1
+  fi
+}
+
+# Start a background service that survives deploy.sh exiting (nohup + disown).
+start_detached() {
+  local log="$1"
+  shift
+  : > "$log"
+  nohup "$@" >> "$log" 2>&1 &
+  disown -h "$!" 2>/dev/null || true
+}
+
 port_listener_pids() {
   lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null || true
 }
@@ -153,7 +179,7 @@ wait_for_port_service() {
 }
 
 wait_for_livekit_agent() {
-  for _ in $(seq 1 80); do
+  for _ in $(seq 1 160); do
     if pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1 &&
        lsof -nP -iTCP:7082 -sTCP:LISTEN > /dev/null 2>&1; then
       return 0
@@ -173,7 +199,7 @@ start_port_service() {
   shift 5
 
   if ! lsof -i :"$port" -sTCP:LISTEN > /dev/null 2>&1; then
-    "$@" > "$log" 2>&1 &
+    start_detached "$log" "$@"
     echo "  ✓ $name (port $port)"
   elif port_owned_by "$port" "$pattern"; then
     echo "  ✓ $name (already running on port $port)"
@@ -256,6 +282,7 @@ do_stop_service() {
   stop_process_strict "screen capture server" "screen-capture-server.py"
   stop_process_strict "voice agent / result watcher" "src/voice-agent.ts"
   stop_process_strict "web client" "src/web-client.ts"
+  stop_process_strict "agent API" "src/agent-api.py"
   echo "LiveKit / voice / web services stopped."
 }
 
@@ -406,6 +433,7 @@ if ! command -v python3 > /dev/null 2>&1; then echo "  ✗ python3 not found"; m
 if ! command -v lsof > /dev/null 2>&1; then echo "  ✗ lsof not found"; missing=1; fi
 if ! command -v node > /dev/null 2>&1; then echo "  ✗ node not found — brew install node"; missing=1; fi
 if ! command -v npx > /dev/null 2>&1; then echo "  ✗ npx not found — comes with node"; missing=1; fi
+if ! ensure_node_22; then missing=1; fi
 if ! command -v claude > /dev/null 2>&1; then
   echo "  ✗ claude not found — see https://docs.anthropic.com/en/docs/claude-code/getting-started"
   missing=1
@@ -509,7 +537,7 @@ python3 "$REPO/src/archive-stale-results.py" 2>/dev/null || true
 
 echo "Starting voice services..."
 if ! lsof -i :7980 -sTCP:LISTEN > /dev/null 2>&1; then
-  PORT=7980 HOST=0.0.0.0 npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
+  PORT=7980 HOST=0.0.0.0 start_detached logs/voice-agent.log npx tsx src/voice-agent.ts
   echo "  ✓ voice agent / result watcher (port 7980)"
 else
   echo "  ✓ voice agent / result watcher (already running)"
@@ -517,14 +545,28 @@ fi
 wait_for_port_service 7980 "voice agent / result watcher" "voice-agent.ts" "logs/voice-agent.log" || exit 1
 
 if ! lsof -i :7080 -sTCP:LISTEN > /dev/null 2>&1; then
-  CLIENT_PORT=7080 PORT=7980 npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
+  CLIENT_PORT=7080 PORT=7980 start_detached logs/web-client.log npx tsx src/web-client.ts
   echo "  ✓ web client (port 7080)"
 else
   echo "  ✓ web client (already running)"
 fi
 wait_for_port_service 7080 "web client" "web-client.ts" "logs/web-client.log" || exit 1
 
-export CLIENT_PORT="${CLIENT_PORT:-7081}"  # HTTPS screen/mobile publisher (web UI uses 7080)
+AGENT_API_PORT="${AGENT_API_PORT:-7950}"
+if ! lsof -i :"$AGENT_API_PORT" -sTCP:LISTEN > /dev/null 2>&1; then
+  start_detached logs/agent-api.log env AGENT_API_PORT="$AGENT_API_PORT" python3 src/agent-api.py
+  echo "  ✓ agent API (port $AGENT_API_PORT)"
+else
+  echo "  ✓ agent API (already running on $AGENT_API_PORT)"
+fi
+wait_for_port_service "$AGENT_API_PORT" "agent API" "agent-api.py" "logs/agent-api.log" || exit 1
+
+# Task watcher runs INSIDE sutando-core via Monitor (schedule-crons skill).
+# Do NOT start watch-tasks-stream.sh here — a detached watcher writes to a
+# log file the core never reads, and its PID file makes /schedule-crons skip
+# the Monitor launch (skills/schedule-crons/SKILL.md step 5).
+
+export CLIENT_PORT=7081  # HTTPS screen/mobile publisher (web UI hardcoded to 7080 above)
 echo ""
 
 echo "Starting LiveKit services..."
@@ -558,8 +600,7 @@ sleep 1
 
 # Agent runs in worker mode — LiveKit Cloud dispatches jobs per room.
 if ! pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1; then
-  "$PYTHON" src/livekit-agent.py start \
-    > logs/livekit-agent.log 2>&1 &
+  start_detached logs/livekit-agent.log "$PYTHON" src/livekit-agent.py start
   echo "  ✓ AI agent (worker mode)"
 else
   echo "  ✓ AI agent (already running)"
@@ -578,6 +619,7 @@ verify_port_service 7900 "screen-capture" "screen-capture-server.py" "logs/scree
 verify_port_service 7902 "pipeline-trace" "pipeline-trace.py" "logs/pipeline-trace.log"
 verify_port_service 7980 "voice-agent / result watcher" "voice-agent.ts" "logs/voice-agent.log"
 verify_port_service 7080 "web-client" "web-client.ts" "logs/web-client.log"
+verify_port_service "${AGENT_API_PORT:-7950}" "agent API" "agent-api.py" "logs/agent-api.log"
 
 # Check agent process (doesn't bind a port)
 if pgrep -f "src/livekit-agent.py start" > /dev/null 2>&1; then
@@ -597,26 +639,16 @@ fi
 
 echo ""
 echo "Checking sutando-core..."
-SUTANDO_SOCKET="/tmp/sutando-tmux.sock"
-SUTANDO_CORE_JUST_STARTED=0
-if tmux -S "$SUTANDO_SOCKET" has-session -t sutando-core 2>/dev/null; then
-  echo "  ✓ sutando-core is running"
+export SUTANDO_CLAUDE_WORKING_DIR="$REPO"
+export SUTANDO_ACCEPT_BYPASS_PERMISSIONS=1
+if bash src/agent/claude/cli/start-cli.sh --restart; then
+  echo "  ✓ sutando-core started (canonical start-cli.sh)"
+  echo "    Attach with: tmux -S /tmp/sutando-tmux.sock attach -t sutando-core"
 else
-  echo "  Starting sutando-core..."
-  if command -v tmux > /dev/null 2>&1; then
-    tmux -S "$SUTANDO_SOCKET" new-session -d -s sutando-core \
-      "cd '$REPO' && claude --name sutando-core --remote-control 'Sutando' --dangerously-skip-permissions --add-dir '$HOME' -- '/proactive-loop'"
-    echo "  ✓ sutando-core started in background"
-    echo "    Attach with: tmux -S $SUTANDO_SOCKET attach -t sutando-core"
-    SUTANDO_CORE_JUST_STARTED=1
-  else
-    echo "  ✗ tmux not found — install with: brew install tmux"
-    exit 1
-  fi
+  echo "  ✗ sutando-core failed to start — check logs and tmux attach"
+  all_ok=0
 fi
-if [ "$SUTANDO_CORE_JUST_STARTED" -eq 1 ]; then
-  sleep 6
-fi
+sleep 6
 warn_if_sutando_core_needs_login
 
 echo ""

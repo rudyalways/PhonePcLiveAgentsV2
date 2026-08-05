@@ -488,20 +488,63 @@ def delegation_archive_result(data: dict):
     return 200, {"ok": True}
 
 
-def get_task_result(task_id: str):
-    """Check if a task result exists."""
+def _read_raw_result(task_id: str) -> str | None:
+    """Read result file text without marker resolution."""
     result_file = _safe_path(RESULT_DIR, task_id)
     if result_file and result_file.exists():
-        return {"task_id": _safe_id(task_id), "status": "completed", "result": result_file.read_text()}
-    # Check archive — task-bridge archives results within seconds of delivery,
-    # so direct /result polls often arrive after the file has been moved.
+        return result_file.read_text()
     safe_id = _safe_id(task_id)
     if safe_id:
         filename = f"{safe_id}.txt"
         for month_dir in sorted((RESULT_DIR / "archive").glob("*/"), reverse=True):
             candidate = month_dir / filename
             if candidate.exists():
-                return {"task_id": safe_id, "status": "completed", "result": candidate.read_text()}
+                return candidate.read_text()
+    return None
+
+
+_DEDUPED_RE = re.compile(r"^\s*\[deduped:\s*(task-[^\]]+)\]\s*", re.IGNORECASE)
+_SKIP_RE = re.compile(r"^\s*\[(?:no-send|REPLIED)\]\s*", re.IGNORECASE)
+
+
+def _resolve_result_text(result: str, task_id: str, depth: int = 0) -> tuple[str | None, str]:
+    """Resolve result-body skip/dedup markers. Returns (text, status) where status is pending|completed."""
+    text = result.strip()
+    if depth > 4:
+        return text, "completed"
+
+    if _SKIP_RE.match(text):
+        body = _SKIP_RE.sub("", text, count=1).strip()
+        return body or "(No separate reply — already handled elsewhere.)", "completed"
+
+    m = _DEDUPED_RE.match(text)
+    if not m:
+        return text, "completed"
+
+    holder_id = m.group(1).strip()
+    remainder = _DEDUPED_RE.sub("", text, count=1).strip()
+    if holder_id == task_id:
+        if remainder:
+            return remainder, "completed"
+        return None, "pending"
+
+    holder_raw = _read_raw_result(holder_id)
+    if holder_raw is None:
+        return None, "pending"
+    resolved, status = _resolve_result_text(holder_raw, holder_id, depth + 1)
+    if status == "pending" or not resolved:
+        return None, "pending"
+    return resolved, "completed"
+
+
+def get_task_result(task_id: str):
+    """Check if a task result exists."""
+    raw = _read_raw_result(task_id)
+    if raw is not None:
+        resolved, status = _resolve_result_text(raw, task_id)
+        if status == "pending":
+            return {"task_id": _safe_id(task_id), "status": "pending"}
+        return {"task_id": _safe_id(task_id), "status": "completed", "result": resolved}
     task_file = _safe_path(TASK_DIR, task_id)
     if task_file and task_file.exists():
         return {"task_id": _safe_id(task_id), "status": "pending"}

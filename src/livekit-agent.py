@@ -40,6 +40,8 @@ except ImportError:
     def _pipeline_emit(**_kw):  # type: ignore[misc,no-redef]
         pass
 
+from util_paths import claude_home_path  # noqa: E402
+
 load_dotenv(REPO / ".env")
 
 from livekit import rtc
@@ -256,14 +258,14 @@ def build_voice_context() -> str:
     vc = REPO / "voice-context.txt"
     if vc.exists():
         parts.append(vc.read_text().strip())
-    profile = (
-        Path.home()
-        / ".claude"
-        / "projects"
-        / "-Users-qingyi-project-sutando"
-        / "memory"
-        / "user_profile.md"
+    slug = str(REPO).replace("/", "-")
+    mem_dir = Path(
+        os.environ.get(
+            "SUTANDO_MEMORY_DIR",
+            str(Path(claude_home_path()) / "projects" / slug / "memory"),
+        )
     )
+    profile = mem_dir / "user_profile.md"
     if profile.exists():
         parts.append(f"User profile:\n{profile.read_text().strip()}")
     return "\n\n".join(parts)

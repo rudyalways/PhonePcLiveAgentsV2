@@ -8,8 +8,10 @@
  *   4. Click "Connect" and allow microphone access
  */
 
+import 'dotenv/config';
 import { createServer, request as httpRequest } from 'node:http';
 import { connect as netConnect } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -356,6 +358,12 @@ const HTML = /* html */ `<!DOCTYPE html>
   .t-system { color: #888; font-size: 14px; }
   .t-interim { color: #7fb3e0; opacity: 0.5; font-size: 16px; }
   .t-interim::before { content: 'You: '; font-weight: 600; }
+  .t-pending { color: #a8d8b0; opacity: 0.85; }
+  .t-pending::before { content: 'Sutando: '; font-weight: 600; color: #6dbe82; }
+  .t-duration {
+    display: block; margin-top: 6px; font-size: 12px; color: #666; font-style: normal;
+  }
+  .t-elapsed { font-style: italic; color: #888; }
 
   /* Input bar */
   #bottom-panel {
@@ -409,7 +417,8 @@ const HTML = /* html */ `<!DOCTYPE html>
   }
   .task-item.task-flash { animation: task-flash-anim 1s ease-out; }
   .task-text.expanded { white-space: normal; }
-  .task-time { color: #777; font-size: 13px; flex-shrink: 0; }
+  .task-time { color: #777; font-size: 13px; flex-shrink: 0; min-width: 4.5em; text-align: right; }
+  .task-time.live { color: #60a5fa; }
   .task-expand {
     flex-shrink: 0; padding: 5px 12px; border-radius: 12px;
     background: #2a4060; color: #d8e8f8; font-size: 13px; font-weight: 500;
@@ -542,6 +551,50 @@ const HTML = /* html */ `<!DOCTYPE html>
   .d-entry.err { color: #ef5350; }
   .d-entry.event { color: #9575cd; }
   .d-entry.audio { color: #4db6ac; }
+  .d-entry.ok { color: #4ecca3; }
+  .d-entry.info { color: #8ab4f8; }
+
+  /* Activity log panel */
+  #activity-log-panel {
+    background: #0a0a14; border: 1px solid #1a1a28; border-radius: 10px;
+    margin: 8px 0 12px; overflow: hidden;
+  }
+  #activity-status-row {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
+    border-bottom: 1px solid #151520; background: #080810;
+  }
+  .act-chip {
+    font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    border: 1px solid #252535; color: #888; font-family: 'SF Mono', monospace;
+  }
+  .act-chip.ok { border-color: #2a4a36; color: #4ecca3; background: #0e1a14; }
+  .act-chip.warn { border-color: #4a3a1a; color: #f0ad4e; background: #1a1408; }
+  .act-chip.err { border-color: #4a1a1a; color: #ef5350; background: #1a0808; }
+  .act-chip.idle { border-color: #252535; color: #666; }
+  #activity-log-list {
+    max-height: 22vh; overflow-y: auto; padding: 6px 10px 8px;
+    font-size: 11px; line-height: 1.5; font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .a-entry { padding: 2px 0; border-bottom: 1px solid #0f0f18; }
+  .a-entry:last-child { border-bottom: none; }
+  .a-entry .a-ts { color: #444; margin-right: 6px; }
+  .a-entry .a-kind { color: #6a8; margin-right: 6px; text-transform: uppercase; font-size: 10px; }
+  .a-entry.warn .a-msg { color: #f0ad4e; }
+  .a-entry.err .a-msg { color: #ef5350; }
+  .a-entry.ok .a-msg { color: #4ecca3; }
+  .a-entry.info .a-msg { color: #8ab4f8; }
+  .a-entry.event .a-msg { color: #9575cd; }
+  #activity-log-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 10px; font-size: 11px; color: #666; cursor: pointer;
+    user-select: none;
+  }
+  #activity-log-header:hover { color: #999; }
+  #activity-log-actions button {
+    background: none; border: 1px solid #222; color: #555; font-size: 10px;
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; margin-left: 6px;
+  }
+  #activity-log-actions button:hover { color: #aaa; border-color: #444; }
   .btn-download {
     display: inline-block; margin-top: 6px; padding: 4px 10px;
     border-radius: 6px; border: 1px solid #1e1e30; background: #0e0e18;
@@ -818,6 +871,26 @@ fetch('http://localhost:${DASHBOARD_PORT}/stand-identity').then(r=>r.json()).the
 <div class="main" id="main-area">
 
 <div class="toast-container" id="toast-container"></div>
+
+<div id="activity-log-panel">
+  <div id="activity-log-header" onclick="var b=$('activity-log-body'); b.style.display=b.style.display==='none'?'':'none';">
+    <span>Activity log — voice · core · tasks · pipeline</span>
+    <span id="activity-log-actions" onclick="event.stopPropagation()">
+      <button type="button" onclick="clearActivityLog()">Clear</button>
+    </span>
+  </div>
+  <div id="activity-log-body">
+    <div id="activity-status-row">
+      <span id="act-voice" class="act-chip idle">Voice: …</span>
+      <span id="act-gemini" class="act-chip idle">LLM: …</span>
+      <span id="act-core" class="act-chip idle">Core: …</span>
+      <span id="act-watcher" class="act-chip idle">Watcher: …</span>
+      <span id="act-bridge" class="act-chip idle">Bridge: …</span>
+    </div>
+    <div id="activity-log-list"></div>
+  </div>
+</div>
+
 <div id="bottom-panel">
 <div id="transcript">
   <div class="t-entry t-system">Ask Sutando anything.</div>
@@ -898,6 +971,7 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   renderHotkeyHints();
   initChromeStt();
+  logActivity('ui', 'Page loaded — polling /activity-log every 2s', 'info');
   // Auto-reconnect voice if it was connected before refresh
   try { if (sessionStorage.getItem('sutando-voice')) { setTimeout(() => toggle(), 500); } } catch {}
 });
@@ -1006,6 +1080,7 @@ let bytesSent = 0;
 let bytesRecv = 0;
 let audioChunksRecv = 0;
 let playChunkCount = 0;
+let voiceLlmReady = false; // true once Gemini returns audio/transcript; typed input falls back to task bridge until then
 let statsTimer = null;
 let muted = false;
 
@@ -1013,6 +1088,8 @@ let muted = false;
 let recognition = null;
 
 const debugLog = [];
+const activityLogEntries = [];
+const activityLogSeen = new Set();
 const $ = (id) => document.getElementById(id);
 
 // ─── Chrome STT (real-time interim display) ───────────────
@@ -1123,6 +1200,7 @@ function handleTranscript(role, text, partial) {
       currentUserEl = null;
     }
   } else {
+    voiceLlmReady = true;
     if (!currentAssistantEl) {
       currentAssistantEl = document.createElement('div');
       currentAssistantEl.className = 't-entry t-assistant';
@@ -1143,11 +1221,113 @@ function addSystem(text, isHtml) {
   scrollTranscript();
 }
 
+// ─── Activity log ─────────────────────────────────────────
+function logActivity(kind, message, level) {
+  level = level || 'info';
+  const ts = new Date().toISOString().slice(11, 23);
+  activityLogEntries.push({ ts, kind, message, level });
+  while (activityLogEntries.length > 250) activityLogEntries.shift();
+  renderActivityLog();
+}
+
+function renderActivityLog() {
+  const list = $('activity-log-list');
+  if (!list) return;
+  list.innerHTML = activityLogEntries.slice().reverse().map(function(e) {
+    return '<div class="a-entry ' + esc(e.level) + '">' +
+      '<span class="a-ts">' + esc(e.ts) + '</span>' +
+      '<span class="a-kind">' + esc(e.kind) + '</span>' +
+      '<span class="a-msg">' + esc(e.message) + '</span></div>';
+  }).join('');
+}
+
+function clearActivityLog() {
+  activityLogEntries.length = 0;
+  activityLogSeen.clear();
+  renderActivityLog();
+  logActivity('ui', 'Log cleared', 'info');
+}
+window.clearActivityLog = clearActivityLog;
+
+function updateActivityStatusChips(snap) {
+  if (!snap) return;
+  var v = $('act-voice');
+  var g = $('act-gemini');
+  var c = $('act-core');
+  var w = $('act-watcher');
+  var b = $('act-bridge');
+  if (v) {
+    var vc = snap.voice && snap.voice.wsConnected;
+    v.textContent = 'Voice: ' + (vc ? 'WS live' : 'off');
+    v.className = 'act-chip ' + (vc ? 'ok' : 'idle');
+  }
+  if (g) {
+    var provider = (snap.realtimeProvider || 'gemini').toLowerCase();
+    var providerLabel = provider === 'qwen' ? 'Qwen' : 'Gemini';
+    var gr = snap.voice && snap.voice.llmReady;
+    var gb = provider === 'gemini' && snap.voice && snap.voice.geminiBlocked;
+    if (gr) { g.textContent = providerLabel + ': responding'; g.className = 'act-chip ok'; }
+    else if (gb) { g.textContent = providerLabel + ': blocked (geo)'; g.className = 'act-chip err'; }
+    else if (snap.voice && snap.voice.wsConnected) { g.textContent = providerLabel + ': connecting'; g.className = 'act-chip warn'; }
+    else { g.textContent = providerLabel + ': n/a'; g.className = 'act-chip idle'; }
+  }
+  if (c) {
+    var cs = snap.core || {};
+    var label = 'Core: ' + (cs.supervisorState || cs.status || 'unknown');
+    if (cs.step) label += ' — ' + cs.step;
+    if (cs.tmuxWorking) label += ' (tool)';
+    c.textContent = label.slice(0, 80);
+    c.className = 'act-chip ' + (cs.running || cs.tmuxWorking ? 'ok' : (cs.supervisorState === 'logged-out' ? 'err' : 'idle'));
+  }
+  if (w) {
+    var wp = snap.watcher && snap.watcher.pid;
+    w.textContent = 'Watcher: ' + (wp ? 'pid ' + wp : 'not running');
+    w.className = 'act-chip ' + (wp ? 'ok' : 'warn');
+  }
+  if (b) {
+    b.textContent = 'Bridge: agent-api ' + (snap.agentApiOk ? 'ok' : 'down');
+    b.className = 'act-chip ' + (snap.agentApiOk ? 'ok' : 'err');
+  }
+}
+
+function ingestPipelineEvents(events) {
+  if (!Array.isArray(events)) return;
+  events.forEach(function(ev) {
+    var key = (ev.ts || '') + '|' + (ev.phase || '') + '|' + (ev.task_id || '');
+    if (activityLogSeen.has(key)) return;
+    activityLogSeen.add(key);
+    var msg = (ev.phase || '?') +
+      (ev.task_id ? ' ' + ev.task_id : '') +
+      (ev.component ? ' [' + ev.component + ']' : '') +
+      (ev.detail ? ' — ' + ev.detail : '');
+    logActivity('pipeline', msg, ev.ok === false ? 'err' : 'ok');
+  });
+}
+
+(function pollActivityLog() {
+  setInterval(function() {
+    var q = '?llm=' + (voiceLlmReady ? '1' : '0') +
+      '&ws=' + (ws && ws.readyState === WebSocket.OPEN ? '1' : '0') +
+      '&recv=' + bytesRecv;
+    fetch('/activity-log' + q).then(function(r) { return r.json(); }).catch(function() { return null; })
+      .then(function(snap) {
+        if (!snap) return;
+        snap.voice = snap.voice || {};
+        snap.voice.llmReady = voiceLlmReady;
+        snap.voice.wsConnected = !!(ws && ws.readyState === WebSocket.OPEN);
+        if (snap.voice.wsConnected && !voiceLlmReady && bytesRecv === 0 && (snap.realtimeProvider || 'gemini') === 'gemini') snap.voice.geminiBlocked = true;
+        updateActivityStatusChips(snap);
+        ingestPipelineEvents(snap.pipeline);
+      });
+  }, 2000);
+})();
+
 // ─── Debug log ────────────────────────────────────────────
 function dbg(text, cls = '') {
   const ts = new Date().toISOString().slice(11, 23);
   const line = ts + '  ' + text;
   debugLog.push(line);
+  logActivity('voice', text, cls === 'err' ? 'err' : cls === 'warn' ? 'warn' : cls === 'event' ? 'event' : 'info');
   const el = document.createElement('div');
   el.className = 'd-entry ' + cls;
   el.textContent = line;
@@ -1159,6 +1339,119 @@ function dbg(text, cls = '') {
 function setStatus(text, state) {
   $('status').textContent = text;
   $('dot').className = 'dot' + (state === 'live' ? ' live' : state === 'error' ? ' error' : '');
+}
+
+function formatElapsed(ms) {
+  if (!ms || ms < 0) ms = 0;
+  var sec = Math.floor(ms / 1000);
+  if (sec < 60) return sec + 's';
+  var min = Math.floor(sec / 60);
+  sec = sec % 60;
+  if (min < 60) return sec > 0 ? (min + 'm ' + sec + 's') : (min + 'm');
+  var hr = Math.floor(min / 60);
+  min = min % 60;
+  return min > 0 ? (hr + 'h ' + min + 'm') : (hr + 'h');
+}
+
+function taskStartedAt(t) {
+  if (!t) return Date.now();
+  if (t.startedAt) return new Date(t.startedAt).getTime();
+  if (t.time instanceof Date) return t.time.getTime();
+  if (typeof t.time === 'number') return t.time;
+  return Date.now();
+}
+
+function taskTimeLabel(t) {
+  if (!t) return '';
+  var started = taskStartedAt(t);
+  if (t.status === 'done' || t.status === 'error') {
+    var end = t.completedAt ? new Date(t.completedAt).getTime() : Date.now();
+    return formatElapsed(end - started);
+  }
+  if (t.status === 'working' || t.status === 'pending') {
+    return formatElapsed(Date.now() - started);
+  }
+  var ago = Math.round((Date.now() - started) / 1000);
+  return ago < 60 ? (ago + 's ago') : (Math.round(ago / 60) + 'm ago');
+}
+
+function normalizeTaskEntry(existing, patch) {
+  var prev = existing || {};
+  var now = Date.now();
+  var startedAt = prev.startedAt || (prev.time instanceof Date ? prev.time.getTime() : (typeof prev.time === 'number' ? prev.time : now));
+  var completedAt = prev.completedAt || null;
+  if (patch.status === 'done' || patch.status === 'error') {
+    if (!completedAt) completedAt = now;
+  } else if (patch.status === 'working' || patch.status === 'pending') {
+    completedAt = null;
+  }
+  return {
+    status: patch.status,
+    text: patch.text || prev.text || '',
+    result: patch.result != null ? patch.result : (prev.result || ''),
+    source: patch.source || prev.source || '',
+    startedAt: startedAt,
+    completedAt: completedAt,
+    time: new Date(startedAt),
+  };
+}
+
+function appendDurationFooter(el, ms) {
+  var foot = document.createElement('span');
+  foot.className = 't-duration';
+  foot.textContent = 'Completed in ' + formatElapsed(ms);
+  el.appendChild(foot);
+}
+
+var DEDUPED_RESULT_RE = /^\\s*\\[deduped:\\s*(task-[^\\]]+)\\]\\s*/i;
+var SKIP_RESULT_RE = /^\\s*\\[(?:no-send|REPLIED)\\]\\s*/i;
+
+function isDedupedStub(result, taskId) {
+  if (!result || typeof result !== 'string') return false;
+  var m = result.match(DEDUPED_RESULT_RE);
+  if (!m) return false;
+  var holderId = m[1].trim();
+  var remainder = result.replace(DEDUPED_RESULT_RE, '').trim();
+  return holderId === taskId && !remainder;
+}
+
+function renderAssistantResult(text) {
+  var re = document.createElement('div');
+  re.className = 't-entry t-assistant';
+  if (window.marked && window.DOMPurify) {
+    try {
+      re.innerHTML = window.DOMPurify.sanitize(
+        window.marked.parse(text, { breaks: true, gfm: true })
+      );
+    } catch (e) {
+      re.textContent = text;
+    }
+  } else {
+    re.textContent = text;
+  }
+  addCopyBtn(re);
+  return re;
+}
+
+async function resolveTaskResult(apiBase, taskId, result) {
+  if (!result || typeof result !== 'string') return result;
+  if (SKIP_RESULT_RE.test(result)) {
+    var body = result.replace(SKIP_RESULT_RE, '').trim();
+    return body || '(No separate reply — already handled elsewhere.)';
+  }
+  var m = result.match(DEDUPED_RESULT_RE);
+  if (!m) return result;
+  var holderId = m[1].trim();
+  var remainder = result.replace(DEDUPED_RESULT_RE, '').trim();
+  if (holderId === taskId && remainder) return remainder;
+  if (holderId === taskId) return null;
+  try {
+    var hr = await fetch(apiBase + '/result/' + holderId).then(function(r) { return r.json(); });
+    if (hr.status === 'completed' && hr.result) {
+      return resolveTaskResult(apiBase, holderId, hr.result);
+    }
+  } catch (e) {}
+  return null;
 }
 
 // ─── Task list ────────────────────────────────────────────
@@ -1188,7 +1481,13 @@ function loadPersistedTaskMap() {
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     // Reconstruct Date objects on time fields
-    Object.values(parsed).forEach(t => { if (t && t.time) t.time = new Date(t.time); });
+    Object.values(parsed).forEach(t => {
+      if (!t) return;
+      if (t.time) t.time = new Date(t.time);
+      if (t.startedAt) t.startedAt = new Date(t.startedAt).getTime();
+      if (t.completedAt) t.completedAt = new Date(t.completedAt).getTime();
+      if (!t.startedAt && t.time) t.startedAt = t.time.getTime();
+    });
     return parsed;
   } catch { return {}; }
 }
@@ -1209,7 +1508,13 @@ const taskMap = window.taskMap = loadPersistedTaskMap();
 function updateTask(taskId, status, text, result) {
   const existing = taskMap[taskId] || {};
   const isNew = !existing.status;
-  taskMap[taskId] = { status, text: text || existing.text, time: new Date(), result: result || existing.result || '' };
+  taskMap[taskId] = normalizeTaskEntry(existing, {
+    status,
+    text: text || existing.text,
+    result: result || existing.result || '',
+    source: existing.source,
+  });
+  logActivity('task', taskId + ' → ' + status + (text ? ': ' + String(text).slice(0, 72) : ''), status === 'error' ? 'err' : status === 'done' ? 'ok' : 'info');
   // Auto-switch to tasks tab if new task arrives and user is on starter
   if (isNew && window._drActiveTab === 'starter') { switchDRTab('tasks'); }
   // Auto-expand ongoing tasks so the user sees progress, AND newly-finished
@@ -1389,8 +1694,8 @@ function renderTasks() {
   const sorted = visible.sort((a, b) => b[1].time - a[1].time).slice(0, 30);
   container.innerHTML = sorted.map(([id, t], i) => {
     const icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
-    const ago = Math.round((Date.now() - t.time) / 1000);
-    const timeStr = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
+    const timeStr = taskTimeLabel(t);
+    const timeClass = 'task-time' + ((t.status === 'working' || t.status === 'pending') ? ' live' : '');
     // Show the result if it exists, regardless of status. The agent's task
     // bookkeeping sometimes leaves tasks in 'working' even after the result
     // file is written — gating render on status === 'done' meant those
@@ -1434,7 +1739,7 @@ function renderTasks() {
     return '<div class="task-item"' + clickAttr + '>' +
       '<div class="task-status ' + t.status + '">' + (icons[t.status] || '?') + '</div>' +
       '<span class="' + textClass + '">' + displayText + '</span>' +
-      '<span class="task-time">' + timeStr + '</span>' +
+      '<span class="' + timeClass + '">' + timeStr + '</span>' +
       expandChip +
       '</div>' + resultHtml + actionsHtml;
   }).join('');
@@ -1469,6 +1774,7 @@ function startTaskPolling() {
         // Toast for new tasks
         if (!knownTaskIds.has(t.id)) {
           knownTaskIds.add(t.id);
+          logActivity('task', 'Queued ' + t.id + ': ' + (t.text || '').slice(0, 72), 'info');
           const snippet = (t.text || '').slice(0, 60);
           showToast('<span class="toast-label">Context received</span> ' + snippet);
         }
@@ -1489,7 +1795,16 @@ function startTaskPolling() {
         if (t.status === 'done' && existing.status !== 'done' && !expandedTasks.has(t.id) && !userCollapsed) {
           expandedTasks.add(t.id);
         }
-        taskMap[t.id] = { status: t.status, text: t.text, time: new Date(t.time * 1000), result: t.result || existing.result || '', source: t.source || existing.source || '' };
+        taskMap[t.id] = normalizeTaskEntry(existing, {
+          status: t.status,
+          text: t.text,
+          result: t.result || existing.result || '',
+          source: t.source || existing.source || '',
+        });
+        if (t.time && !existing.startedAt) {
+          taskMap[t.id].startedAt = t.time * 1000;
+          taskMap[t.id].time = new Date(t.time * 1000);
+        }
       }
       // Remove tasks no longer in API (stale)
       for (const id of Object.keys(taskMap)) {
@@ -1517,6 +1832,21 @@ function stopTaskPolling() {
 
 // Start polling on page load
 startTaskPolling();
+
+// Live elapsed timer for in-flight tasks (updates task-time + working placeholders)
+setInterval(function() {
+  var hasActive = Object.values(taskMap).some(function(t) {
+    return t && (t.status === 'working' || t.status === 'pending');
+  });
+  if (hasActive) {
+    renderTasks();
+    if (window._drActiveTab === 'tasks') updateDynamicRegion();
+  }
+  document.querySelectorAll('.t-pending .t-elapsed').forEach(function(el) {
+    var started = Number(el.dataset.started || '0');
+    if (started) el.textContent = 'Working… ' + formatElapsed(Date.now() - started);
+  });
+}, 1000);
 
 function updateStats() {
   $('stats').textContent =
@@ -1874,6 +2204,7 @@ function connectWs() {
 
   ws.onmessage = (event) => {
     if (event.data instanceof ArrayBuffer) {
+      voiceLlmReady = true;
       bytesRecv += event.data.byteLength;
       audioChunksRecv++;
       if (audioChunksRecv <= 5) {
@@ -2077,6 +2408,7 @@ function doCleanup() {
   }
   setStatus('Text only', '');
   connected = false;
+  voiceLlmReady = false;
   muted = false;
   fetch('/mute-state?muted=false&voice=false').catch(() => {}); // Reset state on disconnect
   reportAgentState();
@@ -2443,6 +2775,7 @@ function toggle() {
     bytesRecv = 0;
     audioChunksRecv = 0;
     playChunkCount = 0;
+    voiceLlmReady = false;
 
     connected = true;
     muted = false;
@@ -2650,11 +2983,23 @@ function sendText() {
   scrollTranscript(true);
   input.value = '';
 
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    // Voice connected — send through voice agent
+  if (ws && ws.readyState === WebSocket.OPEN && voiceLlmReady) {
+    // Voice connected and Gemini is responding — send through voice agent
     ws.send(JSON.stringify({ type: 'text_input', text }));
     dbg('Sent text via voice: "' + text.slice(0, 50) + '"', 'event');
   } else {
+    // Voice off, or Gemini never came up (geo-block etc.) — task bridge via core
+    if (ws && ws.readyState === WebSocket.OPEN && !voiceLlmReady) {
+      addSystem('Voice backend unavailable — sending via text task bridge.');
+      logActivity('delegate', 'Voice dead → task bridge (typed)', 'warn');
+    }
+    logActivity('delegate', 'POST /task: ' + text.slice(0, 80), 'info');
+    const taskStarted = Date.now();
+    const waitingEl = document.createElement('div');
+    waitingEl.className = 't-entry t-assistant t-pending';
+    waitingEl.innerHTML = '<span class="t-elapsed" data-started="' + taskStarted + '">Working… 0s</span>';
+    $('transcript').appendChild(waitingEl);
+    scrollTranscript(true);
     // Voice disconnected — route through task bridge (same as Telegram/Discord)
     const apiBase = 'http://' + location.hostname + ':${AGENT_API_PORT}';
     fetch(apiBase + '/task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'web', task: text }) })
@@ -2662,39 +3007,31 @@ function sendText() {
       .then(d => {
         if (d.ok) {
           dbg('Sent text via task bridge: ' + d.task_id, 'event');
+          logActivity('delegate', 'Task accepted ' + d.task_id + ' → core queue', 'ok');
           // Poll for result
           const poll = setInterval(() => {
-            fetch(apiBase + '/result/' + d.task_id).then(r => r.json()).then(r => {
-              if (r.status === 'completed') {
-                clearInterval(poll);
-                const re = document.createElement('div');
-                re.className = 't-entry t-assistant';
-                // Render markdown if marked.js + DOMPurify both loaded; fall
-                // back to escaped textContent otherwise. Both required — marked
-                // alone would be unsafe innerHTML on agent results that
-                // originate from external task channels.
-                // Before this, headings/lists in long replies (e.g. skill
-                // suggestions) came through as raw "###" / "*" characters.
-                if (window.marked && window.DOMPurify) {
-                  try {
-                    re.innerHTML = window.DOMPurify.sanitize(
-                      window.marked.parse(r.result, { breaks: true, gfm: true })
-                    );
-                  } catch (e) {
-                    re.textContent = r.result;
-                  }
-                } else {
-                  re.textContent = r.result;
-                }
-                addCopyBtn(re);
-                $('transcript').appendChild(re);
-                scrollTranscript();
-              }
+            fetch(apiBase + '/result/' + d.task_id).then(r => r.json()).then(async (r) => {
+              if (r.status !== 'completed') return;
+              if (isDedupedStub(r.result, d.task_id)) return;
+              var resolved = await resolveTaskResult(apiBase, d.task_id, r.result);
+              if (!resolved) return;
+              clearInterval(poll);
+              const elapsed = Date.now() - taskStarted;
+              if (waitingEl.parentNode) waitingEl.remove();
+              logActivity('task', d.task_id + ' completed in ' + formatElapsed(elapsed), 'ok');
+              const re = renderAssistantResult(resolved);
+              appendDurationFooter(re, elapsed);
+              $('transcript').appendChild(re);
+              scrollTranscript();
             }).catch(() => {});
           }, 2000);
+        } else if (waitingEl.parentNode) {
+          waitingEl.remove();
         }
       })
       .catch(() => {
+        if (waitingEl.parentNode) waitingEl.remove();
+        logActivity('delegate', 'Agent API unreachable on :${AGENT_API_PORT}', 'err');
         const err = document.createElement('div');
         err.className = 't-entry t-assistant';
         err.textContent = '(Failed to send — agent API not reachable)';
@@ -2878,8 +3215,8 @@ function renderTabContent() {
       var icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
       container.innerHTML = sorted.map(function(entry, i) {
         var id = entry[0], t = entry[1];
-        var ago = Math.round((Date.now() - t.time) / 1000);
-        var timeStr = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
+        var timeStr = taskTimeLabel(t);
+        var timeClass = 'task-time' + ((t.status === 'working' || t.status === 'pending') ? ' live' : '');
         // Render results whenever they exist — agent's task bookkeeping
         // sometimes leaves tasks in 'working' state even after the result
         // file is written. Same fix as the main renderTasks path above.
@@ -2905,7 +3242,7 @@ function renderTabContent() {
         return '<div class="task-item"' + clickAttr + '>' +
           '<div class="task-status ' + t.status + '">' + (icons[t.status] || '?') + '</div>' +
           '<span class="' + textClass + '">' + displayText + '</span>' +
-          '<span class="task-time">' + timeStr + '</span>' +
+          '<span class="' + timeClass + '">' + timeStr + '</span>' +
           expandChip +
           '</div>' + resultHtml;
       }).join('');
@@ -3267,6 +3604,77 @@ let _seeingUntil = 0;
 //   that mtime moves but content lies). When stale, consumers should fall
 //   back to the tmux pane scrape for a fresh signal.
 const CORE_STATUS_STALE_SECONDS = 60;
+
+function readPipelineEvents(limit = 30): Array<{ ts: number; phase: string; task_id: string; ok: boolean; detail: string; component: string }> {
+	const path = join(REPO_ROOT, 'logs/pipeline-task-events.jsonl');
+	try {
+		const raw = readFileSync(path, 'utf-8');
+		return raw.trim().split('\n').slice(-limit).map((line) => {
+			try { return JSON.parse(line); } catch { return null; }
+		}).filter(Boolean) as Array<{ ts: number; phase: string; task_id: string; ok: boolean; detail: string; component: string }>;
+	} catch {
+		return [];
+	}
+}
+
+function readCoreSupervisor(): Record<string, unknown> | null {
+	try {
+		return JSON.parse(readFileSync(join(STATE_DIR, 'core-supervisor.json'), 'utf-8'));
+	} catch {
+		return null;
+	}
+}
+
+function readWatcherPid(): string | null {
+	try {
+		const pid = readFileSync(join(STATE_DIR, 'watch-tasks-stream.pid'), 'utf-8').trim();
+		return pid || null;
+	} catch {
+		return null;
+	}
+}
+
+function probeAgentApi(): boolean {
+	try {
+		const code = execFileSync(
+			'curl',
+			['-s', '-o', '/dev/null', '-w', '%{http_code}', `http://127.0.0.1:${AGENT_API_PORT}/`],
+			{ encoding: 'utf8', timeout: 800 },
+		);
+		return String(code).trim().startsWith('2');
+	} catch {
+		return false;
+	}
+}
+
+function buildActivityLogSnapshot(): Record<string, unknown> {
+	const core = readCoreStatus();
+	const tmux = readTmuxStatus();
+	const supervisor = readCoreSupervisor();
+	const vs = readVoiceState();
+	return {
+		realtimeProvider: (process.env.REALTIME_PROVIDER || 'gemini').toLowerCase(),
+		core: {
+			running: core.running,
+			step: core.step,
+			stale: core.stale,
+			status: core.running ? 'running' : 'idle',
+			supervisorState: supervisor?.state ?? null,
+			supervisorDetail: supervisor?.detail ?? null,
+			tmuxWorking: tmux.state === 'working',
+			tmuxLabel: tmux.label,
+		},
+		voice: {
+			connected: vs,
+			stateFile: vs === true,
+		},
+		watcher: { pid: readWatcherPid() },
+		pipeline: readPipelineEvents(35),
+		agentApiOk: probeAgentApi(),
+		ts: Date.now(),
+	};
+}
+
 function readCoreStatus(): { running: boolean; step: string; stale: boolean } {
 	try {
 		// core-status.json is per-user runtime state under <workspace>/state/
@@ -3746,6 +4154,13 @@ const server = createServer((req, res) => {
 			state: eff,
 			label,
 		}));
+		return;
+	}
+
+	// Aggregated activity snapshot for the in-page Activity log panel.
+	if (url.pathname === '/activity-log') {
+		res.writeHead(200, { 'Content-Type': 'application/json' });
+		res.end(JSON.stringify(buildActivityLogSnapshot()));
 		return;
 	}
 

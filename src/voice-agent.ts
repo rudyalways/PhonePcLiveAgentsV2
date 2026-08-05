@@ -38,8 +38,8 @@ import { clearActiveArtifact } from './artifact-cache-tools.js';
 import { injectText } from './browser-tools.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { VoiceSession } from 'bodhi-realtime-agent';
-import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
+import { VoiceSession, OpenAIRealtimeTransport } from 'bodhi-realtime-agent';
+import type { MainAgent, ToolDefinition, LLMTransport } from 'bodhi-realtime-agent';
 function assertMacOS() { if (process.platform !== 'darwin') { console.error('Sutando requires macOS'); process.exit(1); } }
 import { workTool, resetNoteViewingDebounce, logConversation, logSessionBoundary, getRecentConversation, getSecondsSinceLastTurn, setTaskStatusCallback } from './task-bridge.js';
 import { recordToolCall } from './conversation-store.js';
@@ -86,6 +86,38 @@ function assertGeminiKey(name: string, value: string): void {
 	}
 }
 
+const REALTIME_PROVIDER = (process.env.REALTIME_PROVIDER || 'gemini').toLowerCase();
+const USE_QWEN_VOICE = REALTIME_PROVIDER === 'qwen';
+
+function assertDashScopeKey(value: string): void {
+	if (!value || value.trim().length < 10) {
+		console.error('Error: DASHSCOPE_API_KEY is required when REALTIME_PROVIDER=qwen');
+		process.exit(1);
+	}
+}
+
+function buildQwenVoiceTransport(): LLMTransport {
+	// OpenAIRealtimeTransport uses the openai SDK; DashScope Qwen realtime is
+	// OpenAI-wire-compatible at this base URL (same as livekit-agent.py).
+	process.env.OPENAI_API_KEY = process.env.DASHSCOPE_API_KEY || '';
+	process.env.OPENAI_BASE_URL = process.env.REALTIME_BASE_URL || 'https://dashscope.aliyuncs.com/api-ws/v1';
+	const disableTx = (process.env.QWEN_DISABLE_INPUT_TRANSCRIPTION || '').toLowerCase();
+	return new OpenAIRealtimeTransport({
+		apiKey: process.env.DASHSCOPE_API_KEY || '',
+		model: process.env.REALTIME_MODEL || 'qwen3.5-omni-plus-realtime',
+		voice: process.env.QWEN_REALTIME_VOICE || 'Ethan',
+		transcriptionModel: disableTx === '1' || disableTx === 'true' || disableTx === 'yes'
+			? null
+			: (process.env.QWEN_INPUT_AUDIO_TRANSCRIPTION_MODEL || 'qwen3-asr-flash-realtime'),
+		turnDetection: {
+			type: process.env.QWEN_TURN_DETECTION_TYPE || 'semantic_vad',
+			threshold: Number(process.env.QWEN_SERVER_VAD_THRESHOLD || '0.1'),
+			prefix_padding_ms: Number(process.env.QWEN_SERVER_VAD_PREFIX_MS || '500'),
+			silence_duration_ms: Number(process.env.QWEN_SERVER_VAD_SILENCE_MS || '900'),
+		},
+	});
+}
+
 import { resolveCredential } from './credential-resolver.js';
 // Voice credential resolves via the G8 capability resolver: managed tier
 // (state/auth/managed-credentials.json) → GEMINI_VOICE_API_KEY → GEMINI_API_KEY.
@@ -93,12 +125,17 @@ import { resolveCredential } from './credential-resolver.js';
 // set; unset still works. `source` names the winning tier in startup errors.
 const voiceCredential = resolveCredential('gemini-voice');
 const GEMINI_VOICE_API_KEY = voiceCredential.key;
-assertGeminiKey(
-	voiceCredential.source === 'managed'
-		? 'managed credentials (state/auth)'
-		: process.env.GEMINI_VOICE_API_KEY ? 'GEMINI_VOICE_API_KEY' : 'GEMINI_API_KEY',
-	GEMINI_VOICE_API_KEY,
-);
+if (USE_QWEN_VOICE) {
+	assertDashScopeKey(process.env.DASHSCOPE_API_KEY || '');
+	console.log(`${new Date().toISOString().slice(11, 23)} [voice-agent] REALTIME_PROVIDER=qwen — Gemini Live skipped (DashScope Qwen realtime)`);
+} else {
+	assertGeminiKey(
+		voiceCredential.source === 'managed'
+			? 'managed credentials (state/auth)'
+			: process.env.GEMINI_VOICE_API_KEY ? 'GEMINI_VOICE_API_KEY' : 'GEMINI_API_KEY',
+		GEMINI_VOICE_API_KEY,
+	);
+}
 
 const PORT = Number(process.env.PORT) || 9900;
 // Loopback by default: the voice WS has no auth, so it must NOT be reachable
@@ -748,17 +785,20 @@ async function main() {
 	}
 
 
+	const qwenTransport = USE_QWEN_VOICE ? buildQwenVoiceTransport() : undefined;
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
 		userId: 'user',
-		apiKey: GEMINI_VOICE_API_KEY,
+		apiKey: USE_QWEN_VOICE ? (process.env.DASHSCOPE_API_KEY || 'unused') : GEMINI_VOICE_API_KEY,
 		agents: [mainAgent],
 		initialAgent: 'main',
 		port: PORT,
 		host: HOST,
 		model: google(VOICE_MODEL),
-		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
-		speechConfig: { voiceName: VOICE_NAME },
+		...(USE_QWEN_VOICE ? { transport: qwenTransport } : {
+			geminiModel: VOICE_NATIVE_AUDIO_MODEL,
+			speechConfig: { voiceName: VOICE_NAME },
+		}),
 		inputAudioTranscription: true,
 		hooks: {
 			onSessionStart: (e) => {
