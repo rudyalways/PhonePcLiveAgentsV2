@@ -27,6 +27,8 @@ import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
+import { injectVisionFrame } from './realtime-provider/vision-adapter.js';
+import type { RealtimeCapabilities } from './realtime-provider/types.js';
 import { resolveWorkspace, statusPath } from './workspace_default.js';
 
 const execFileAsync = promisify(execFile);
@@ -222,6 +224,20 @@ interface MinimalSession {
 }
 
 let sessionRef: MinimalSession | null = null;
+let rtVisionCaps: RealtimeCapabilities | null = null;
+let rtVisionAdapterEnabled = false;
+let rtAudioSent = false;
+
+/** Set by voice-agent from realtime-provider factory (Phase 2 vision path). */
+export function setRealtimeVisionPolicy(caps: RealtimeCapabilities, visionAdapter: boolean): void {
+	rtVisionCaps = caps;
+	rtVisionAdapterEnabled = visionAdapter;
+}
+
+/** Call when first PCM from client reaches the transport (Omni audio-first gate). */
+export function markRealtimeAudioSent(): void {
+	rtAudioSent = true;
+}
 
 // --- Vision-on contributor registry ---------------------------------------
 //
@@ -533,8 +549,7 @@ function stopStream(): { wasRunning: boolean; frames: number; durationMs: number
  *  getDisplayMedia loop). Push-mode must be active — caller should have
  *  hit /vision/start with source='browser' first. */
 export function submitFrame(data: Buffer, mimeType: string = 'image/jpeg'): { ok: boolean; error?: string } {
-	const sendFile = getSendFile();
-	if (!sendFile) {
+	if (!sessionRef?.transport) {
 		console.warn(`${ts()} [Vision] frame dropped: no active voice session (sessionRef=${!!sessionRef}, transport=${!!sessionRef?.transport})`);
 		return { ok: false, error: 'no active voice session' };
 	}
@@ -542,11 +557,40 @@ export function submitFrame(data: Buffer, mimeType: string = 'image/jpeg'): { ok
 		console.warn(`${ts()} [Vision] frame dropped: push mode inactive — call /vision/start with source=browser first`);
 		return { ok: false, error: 'not in push mode — call /vision/start with source=browser first' };
 	}
+
+	if (rtVisionCaps?.vision === 'input_image_buffer' && !rtVisionAdapterEnabled) {
+		return {
+			ok: false,
+			error: 'Watch on Qwen Omni requires REALTIME_VISION_ADAPTER=1 (Phase 2). Set REALTIME_PROVIDER=gemini or enable Phase 2.',
+		};
+	}
+
+	if (rtVisionCaps && rtVisionAdapterEnabled) {
+		const r = injectVisionFrame(
+			sessionRef.transport as import('bodhi-realtime-agent').LLMTransport,
+			rtVisionCaps,
+			{ data, mimeType },
+			{ audioSent: rtAudioSent, framesSent: frameCount },
+			true,
+		);
+		if (!r.ok) {
+			console.warn(`${ts()} [Vision] frame dropped: ${r.error}`);
+			return { ok: false, error: r.error };
+		}
+		frameCount++;
+		if (frameCount === 1 || frameCount % 10 === 0) {
+			console.log(`${ts()} [Vision] sent frame #${frameCount} via adapter (${Math.round(data.byteLength / 1024)}KB ${mimeType})`);
+		}
+		return { ok: true };
+	}
+
+	const sendFile = getSendFile();
+	if (!sendFile) {
+		return { ok: false, error: 'no active voice session' };
+	}
 	try {
 		sendFile(data.toString('base64'), mimeType);
 		frameCount++;
-		// Log first frame so the user can confirm vision is wired end-to-end,
-		// and every 10th to keep tail noise low.
 		if (frameCount === 1 || frameCount % 10 === 0) {
 			console.log(`${ts()} [Vision] sent frame #${frameCount} (${Math.round(data.byteLength / 1024)}KB ${mimeType})`);
 		}
