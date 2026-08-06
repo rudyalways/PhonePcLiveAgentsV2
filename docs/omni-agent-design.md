@@ -269,10 +269,10 @@ Do **not** call CC via a new RPC in v1. File bridge only. Ensure core watcher is
 
 | Phase | Deliverable | Done when |
 | --- | --- | --- |
-| **P0** | `omni-client.html` + `omni-agent.py` WSS echo (mic+cam preview, loopback status) | Phone on LAN HTTPS sees camera; PCM/JPEG reach PC |
-| **P1** | Provider VoiceTrigger only (Qwen) | Speak to phone → hear answer; no scene prompt yet |
-| **P2** | Frame append + PromptTrigger `scene_change` | Silent pan → intro; `[[NO_SPEAK]]` suppress |
-| **P3** | `work` + result watcher | “Research X” → core/CC → spoken result on phone |
+| **P0** | `omni-client.html` + `omni-agent.py` WSS echo (mic+cam preview, loopback status) | Phone on LAN HTTPS sees camera; PCM/JPEG reach PC — **implemented** (`bash src/start-omni.sh`) |
+| **P1** | Provider VoiceTrigger only (Qwen) | Speak to phone → hear answer — **implemented** (VAD + audio.out) |
+| **P2** | Frame append + PromptTrigger `scene_change` | Silent pan → intro; `[[NO_SPEAK]]` suppress — **implemented** |
+| **P3** | `work` + result watcher | “Research X” → core/CC → spoken result on phone — **implemented** (Core… button / `control.work`) |
 | **P4** | Drain modes / Gemini adapter / LiveKit transport | Optional hardening |
 
 ### Ops / constraints

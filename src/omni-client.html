@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Sutando Omni</title>
+<style>
+  :root {
+    --ink: #e8e6e1;
+    --muted: #9a968c;
+    --chip: rgba(12, 14, 18, 0.72);
+    --accent: #c4a574;
+    --danger: #c45c4a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0c0e12;
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  }
+  body { overflow: hidden; }
+  #stage {
+    position: fixed; inset: 0;
+    background: #111;
+  }
+  #cam {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    background: #1a1a1a;
+    transform: scaleX(1);
+  }
+  #cam.mirror { transform: scaleX(-1); }
+  #hud {
+    position: fixed; left: 0; right: 0; top: 0;
+    padding: calc(10px + env(safe-area-inset-top)) 14px 0;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none; z-index: 2;
+  }
+  #brand {
+    font-size: 15px; letter-spacing: 0.04em;
+    text-shadow: 0 1px 8px rgba(0,0,0,0.7);
+  }
+  #status {
+    pointer-events: auto;
+    font-size: 12px; font-family: ui-sans-serif, system-ui, sans-serif;
+    background: var(--chip); color: var(--ink);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 999px; padding: 6px 12px;
+    backdrop-filter: blur(8px);
+  }
+  #status.err { color: #ffb4a8; border-color: rgba(196,92,74,0.5); }
+  #login {
+    position: fixed; inset: 0; z-index: 5;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 24px 20px calc(28px + env(safe-area-inset-bottom));
+    background:
+      linear-gradient(180deg, rgba(12,14,18,0.15) 0%, rgba(12,14,18,0.88) 55%, #0c0e12 100%);
+  }
+  #login h1 {
+    font-size: clamp(2.4rem, 10vw, 3.4rem);
+    font-weight: 500; line-height: 0.95;
+    margin-bottom: 8px;
+  }
+  #login p { color: var(--muted); font-size: 15px; margin-bottom: 18px; max-width: 20em; }
+  #login input {
+    width: 100%; margin-bottom: 10px; padding: 14px 16px;
+    border-radius: 12px; border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(20,22,28,0.9); color: var(--ink); font-size: 16px;
+  }
+  #login button, #bar button {
+    border: none; border-radius: 12px; font-size: 16px; font-weight: 600;
+    padding: 14px 18px; cursor: pointer;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  #connect-btn { width: 100%; background: var(--accent); color: #1a140c; }
+  #login-error { color: #ffb4a8; font-size: 13px; min-height: 1.2em; margin-top: 8px; }
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 3;
+    display: none; gap: 8px; justify-content: center; flex-wrap: wrap;
+    padding: 12px 12px calc(16px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, transparent, rgba(0,0,0,0.75));
+  }
+  #bar button { background: rgba(255,255,255,0.12); color: var(--ink); min-width: 72px; }
+  #bar button.on { background: var(--accent); color: #1a140c; }
+  #bar button.danger { background: var(--danger); color: #fff; }
+  #log {
+    position: fixed; left: 12px; right: 12px; bottom: 88px; z-index: 2;
+    max-height: 28vh; overflow: auto; pointer-events: none;
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+  }
+  #log div { margin-top: 4px; opacity: 0.92; }
+  #log .user { color: #cde7ff; }
+  #log .assistant { color: #ffe6b8; }
+  #log .system { color: #b8ffd2; }
+  canvas { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline autoplay muted></video>
+</div>
+<div id="hud">
+  <div id="brand">Sutando Omni</div>
+  <div id="status">idle</div>
+</div>
+<div id="login">
+  <h1>Omni</h1>
+  <p>Camera-first guide. Voice when you speak; scene changes can prompt quietly.</p>
+  <input id="user" type="text" placeholder="Username" autocomplete="username" />
+  <input id="secret" type="password" placeholder="Password" autocomplete="current-password" />
+  <button id="connect-btn" type="button">Start camera &amp; connect</button>
+  <div id="login-error"></div>
+</div>
+<div id="bar">
+  <button type="button" id="audio-unlock">Enable sound</button>
+  <button type="button" id="mic-btn" class="on">Mic on</button>
+  <button type="button" id="flip-btn">Flip</button>
+  <button type="button" id="ask-btn">Ask view</button>
+  <button type="button" id="work-btn">Core…</button>
+  <button type="button" id="disc-btn" class="danger">End</button>
+</div>
+<div id="log"></div>
+<canvas id="snap"></canvas>
+
+<script type="module">
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+const cam = document.getElementById("cam");
+const canvas = document.getElementById("snap");
+const login = document.getElementById("login");
+const bar = document.getElementById("bar");
+
+let ws = null;
+let stream = null;
+let audioCtx = null;
+let playCtx = null;
+let processor = null;
+let sourceNode = null;
+let micOn = true;
+let facing = "environment";
+let frameTimer = null;
+let playTime = 0;
+
+const params = new URLSearchParams(location.search);
+if (params.get("user")) document.getElementById("user").value = params.get("user");
+if (params.get("secret")) document.getElementById("secret").value = params.get("secret");
+
+function setStatus(t, err = false) {
+  statusEl.textContent = t;
+  statusEl.classList.toggle("err", !!err);
+}
+function logLine(role, text) {
+  const d = document.createElement("div");
+  d.className = role;
+  d.textContent = `${role}: ${text}`;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+  while (logEl.children.length > 40) logEl.removeChild(logEl.firstChild);
+}
+
+function wsUrl() {
+  const u = new URL(location.href);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.pathname = "/ws";
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+function downsampleTo16k(float32, inRate) {
+  if (inRate === 16000) {
+    const out = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      out[i] = (s * 0x7fff) | 0;
+    }
+    return out;
+  }
+  const ratio = inRate / 16000;
+  const newLen = Math.floor(float32.length / ratio);
+  const out = new Int16Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const s = Math.max(-1, Math.min(1, float32[Math.floor(i * ratio)] || 0));
+    out[i] = (s * 0x7fff) | 0;
+  }
+  return out;
+}
+
+function b64FromInt16(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function ensurePlayCtx() {
+  if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  if (playCtx.state === "suspended") await playCtx.resume();
+  playTime = Math.max(playTime, playCtx.currentTime);
+}
+
+function playPcm24kBase64(b64) {
+  if (!playCtx) return;
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  const f32 = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
+  const buf = playCtx.createBuffer(1, f32.length, 24000);
+  buf.copyToChannel(f32, 0);
+  const src = playCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(playCtx.destination);
+  const startAt = Math.max(playCtx.currentTime + 0.01, playTime);
+  src.start(startAt);
+  playTime = startAt + buf.duration;
+}
+
+async function startMedia() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+    video: {
+      facingMode: { ideal: facing },
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+  });
+  cam.srcObject = stream;
+  cam.classList.toggle("mirror", facing === "user");
+  await cam.play().catch(() => {});
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  sourceNode = audioCtx.createMediaStreamSource(stream);
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (e) => {
+    if (!micOn || !ws || ws.readyState !== 1) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const pcm = downsampleTo16k(input, audioCtx.sampleRate);
+    ws.send(JSON.stringify({ type: "audio", format: "pcm16le_16k", data: b64FromInt16(pcm) }));
+  };
+  sourceNode.connect(processor);
+  processor.connect(audioCtx.destination); // keep processor alive; near-silent via gain would be nicer
+  // Mute local loopback
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0;
+  processor.disconnect();
+  sourceNode.connect(processor);
+  processor.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  if (frameTimer) clearInterval(frameTimer);
+  frameTimer = setInterval(sendFrame, 1000);
+}
+
+function sendFrame() {
+  if (!ws || ws.readyState !== 1 || !cam.videoWidth) return;
+  const w = 640;
+  const h = Math.round((cam.videoHeight / cam.videoWidth) * w) || 360;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(cam, 0, 0, w, h);
+  canvas.toBlob(async (blob) => {
+    if (!blob || !ws || ws.readyState !== 1) return;
+    const buf = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    ws.send(JSON.stringify({ type: "image", mime: "image/jpeg", data: btoa(bin) }));
+  }, "image/jpeg", 0.7);
+}
+
+function stopAll() {
+  if (frameTimer) clearInterval(frameTimer);
+  frameTimer = null;
+  try { processor && processor.disconnect(); } catch {}
+  try { sourceNode && sourceNode.disconnect(); } catch {}
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  if (ws) { try { ws.close(); } catch {} }
+  ws = null;
+  bar.style.display = "none";
+  login.style.display = "flex";
+  setStatus("idle");
+}
+
+document.getElementById("connect-btn").onclick = async () => {
+  const user = document.getElementById("user").value.trim() || "default";
+  const secret = document.getElementById("secret").value;
+  const err = document.getElementById("login-error");
+  err.textContent = "";
+  try {
+    await startMedia();
+    await ensurePlayCtx();
+    ws = new WebSocket(wsUrl());
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: "session.start", user, auth: secret }));
+      setStatus("connecting…");
+    };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "session.ready") {
+        login.style.display = "none";
+        bar.style.display = "flex";
+        setStatus("listening");
+      } else if (msg.type === "status") {
+        setStatus(msg.state || "");
+      } else if (msg.type === "audio.out") {
+        playPcm24kBase64(msg.data);
+      } else if (msg.type === "transcript") {
+        if (!msg.suppressed) logLine(msg.role || "assistant", msg.text || "");
+      } else if (msg.type === "error") {
+        setStatus(msg.message || "error", true);
+        err.textContent = msg.message || "error";
+      }
+    };
+    ws.onclose = () => setStatus("disconnected", true);
+    ws.onerror = () => setStatus("socket error", true);
+  } catch (e) {
+    err.textContent = String(e.message || e);
+    setStatus("media failed", true);
+  }
+};
+
+document.getElementById("audio-unlock").onclick = () => ensurePlayCtx();
+document.getElementById("mic-btn").onclick = (e) => {
+  micOn = !micOn;
+  e.target.textContent = micOn ? "Mic on" : "Mic off";
+  e.target.classList.toggle("on", micOn);
+};
+document.getElementById("flip-btn").onclick = async () => {
+  facing = facing === "environment" ? "user" : "environment";
+  await startMedia();
+};
+document.getElementById("ask-btn").onclick = () => {
+  if (ws?.readyState === 1) {
+    ws.send(JSON.stringify({ type: "control", action: "prompt_manual", text: "Describe what you see in the camera right now." }));
+  }
+};
+document.getElementById("work-btn").onclick = () => {
+  const task = prompt("Task for Sutando core / CC:");
+  if (task && ws?.readyState === 1) {
+    ws.send(JSON.stringify({ type: "control", action: "work", task }));
+  }
+};
+document.getElementById("disc-btn").onclick = () => stopAll();
+</script>
+</body>
+</html>

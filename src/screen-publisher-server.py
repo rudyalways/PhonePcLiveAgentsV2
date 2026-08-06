@@ -36,6 +36,9 @@ class Handler(SimpleHTTPRequestHandler):
         elif path_only in ("/mobile", "/mobile.html", "/phone"):
             # Map short paths to mobile-client.html but keep ?query (e.g. ?micMeter=1).
             self.path = "/mobile-client.html" + query_suffix
+        elif path_only in ("/omni", "/omni.html"):
+            # Static copy only — live WSS is on omni-agent (OMNI_PORT, default 7090).
+            self.path = "/omni-client.html" + query_suffix
         else:
             self.path = path_only + query_suffix
 
