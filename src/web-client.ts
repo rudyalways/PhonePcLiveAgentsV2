@@ -335,6 +335,28 @@ const HTML = /* html */ `<!DOCTYPE html>
     0%, 100% { box-shadow: 0 0 8px rgba(251, 191, 36, 0.3); }
     50%      { box-shadow: 0 0 16px rgba(251, 191, 36, 0.55); }
   }
+  /* Watch button group with dropdown */
+  .watch-group { display: inline-flex; gap: 0; position: relative; }
+  .btn-watch-menu {
+    background: #2a2a3e; color: #888; border: 1px solid #3a3a4e;
+    padding: 8px 6px; cursor: pointer; font-size: 10px;
+    border-radius: 0 6px 6px 0; margin-left: -1px;
+  }
+  .btn-watch-menu:hover { background: #3a3a4e; color: #fff; }
+  .btn-watch { border-radius: 6px 0 0 6px; }
+  .watch-menu {
+    position: absolute; top: 100%; right: 0; margin-top: 4px;
+    background: #1a1a2e; border: 1px solid #3a3a4e; border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 100; min-width: 140px;
+  }
+  .watch-menu button {
+    display: block; width: 100%; padding: 10px 14px; text-align: left;
+    background: transparent; color: #c0c0d0; border: none; cursor: pointer;
+    font-size: 14px; transition: background 0.15s;
+  }
+  .watch-menu button:first-child { border-radius: 6px 6px 0 0; }
+  .watch-menu button:last-child { border-radius: 0 0 6px 6px; }
+  .watch-menu button:hover { background: #2a2a3e; }
   .btn-subtle { background: transparent; color: #444; font-size: 11px; padding: 5px 8px; }
   .btn-subtle:hover { color: #888; }
 
@@ -780,7 +802,14 @@ const HTML = /* html */ `<!DOCTYPE html>
   <div class="controls">
     <button id="btn" class="btn-voice" onclick="toggle()" style="display:none">End Voice</button>
     <button id="btn-mute" class="btn-mute" onclick="toggleMute()" style="display:none">Mute</button>
-    <button id="btn-watch" class="btn-watch" onclick="toggleWatch()" title="Let Sutando watch your screen" style="display:none">👁️ Watch</button>
+    <div class="watch-group" style="display:none;" id="watch-group">
+      <button id="btn-watch" class="btn-watch" onclick="toggleWatch()" title="Let Sutando watch your screen or webcam">👁️ Watch</button>
+      <button id="btn-watch-menu" class="btn-watch-menu" onclick="toggleWatchMenu()" title="Choose vision source">▼</button>
+      <div id="watch-menu" class="watch-menu" style="display:none;">
+        <button onclick="startWatchScreen()">🖥️ Screen</button>
+        <button onclick="startWatchWebcam()">📷 Webcam</button>
+      </div>
+    </div>
   </div>
 </div>
 <!-- Vision preview — shows what Sutando is seeing. Mirrors the MediaStream
@@ -788,7 +817,7 @@ const HTML = /* html */ `<!DOCTYPE html>
      and see the same view the model gets. -->
 <div id="vision-preview-wrap" style="display:none; position: fixed; bottom: 16px; right: 316px; z-index: 200; background: rgba(0,0,0,0.6); border: 2px solid #fbbf24; border-radius: 10px; padding: 6px 6px 4px; box-shadow: 0 4px 18px rgba(0,0,0,0.35), 0 0 14px rgba(251,191,36,0.45); max-width: 280px;">
   <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; font: 11px/1.2 -apple-system, system-ui, sans-serif; color:#fbbf24;">
-    <span style="display:inline-flex; align-items:center; gap:6px;">👁️ Sutando is seeing</span>
+    <span style="display:inline-flex; align-items:center; gap:6px;"><span id="vision-source-icon">👁️</span> <span id="vision-source-label">Sutando is seeing</span></span>
     <span id="vision-preview-stats" style="color:#bbb; font-size:10px;"></span>
   </div>
   <video id="vision-preview" autoplay muted playsinline style="display:block; width: 100%; max-height: 180px; background:#000; border-radius:6px;"></video>
@@ -2437,7 +2466,8 @@ function doCleanup() {
   $('hero').style.display = '';
   $('btn').style.display = 'none';
   $('btn-mute').style.display = 'none';
-  $('btn-watch').style.display = 'none';
+  var watchGroup = document.getElementById('watch-group');
+  if (watchGroup) watchGroup.style.display = 'none';
   teardownPushSession();
   stopVisionPoll();
   $('voice-status').className = 'status-pill voice-off';
@@ -2616,6 +2646,11 @@ function teardownPushSession() {
 }
 
 async function startWatch() {
+  console.warn('[Vision] startWatch() called — prefer startWatchScreen() or startWatchWebcam()');
+  await startWatchScreen();
+}
+
+async function startWatchScreen() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     addSystem('Vision: this browser does not support screen sharing.');
     return;
@@ -2639,6 +2674,12 @@ async function startWatch() {
   var wrap = document.getElementById('vision-preview-wrap');
   if (preview) preview.srcObject = stream;
   if (wrap) wrap.style.display = '';
+
+  // Update preview label for screen
+  var sourceIcon = document.getElementById('vision-source-icon');
+  var sourceLabel = document.getElementById('vision-source-label');
+  if (sourceIcon) sourceIcon.textContent = '🖥️';
+  if (sourceLabel) sourceLabel.textContent = 'Screen sharing';
 
   // User can end sharing from the browser's native UI ("Stop sharing"
   // toolbar) — clean up our side and tell the server.
@@ -2686,6 +2727,88 @@ async function startWatch() {
   pollVisionState();
 }
 
+async function startWatchWebcam() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    addSystem('Vision: this browser does not support webcam access.');
+    return;
+  }
+  var stream;
+  try {
+    // Request webcam access (front camera preferred on mobile)
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: VISION_FRAME_WIDTH },
+        height: { ideal: VISION_FRAME_HEIGHT },
+        facingMode: 'user',  // front camera
+        frameRate: { ideal: 2, max: 5 }
+      },
+      audio: false,
+    });
+  } catch (err) {
+    if (err && err.name === 'NotAllowedError') {
+      addSystem('Vision: webcam access denied. Please allow camera access and try again.');
+    } else if (err && err.name === 'NotFoundError') {
+      addSystem('Vision: no webcam found on this device.');
+    } else {
+      addSystem('Vision: ' + (err.message || 'webcam access failed'));
+    }
+    return;
+  }
+  _visionStream = stream;
+  var preview = document.getElementById('vision-preview');
+  var wrap = document.getElementById('vision-preview-wrap');
+  if (preview) preview.srcObject = stream;
+  if (wrap) wrap.style.display = '';
+
+  // Update preview label for webcam
+  var sourceIcon = document.getElementById('vision-source-icon');
+  var sourceLabel = document.getElementById('vision-source-label');
+  if (sourceIcon) sourceIcon.textContent = '📷';
+  if (sourceLabel) sourceLabel.textContent = 'Webcam active';
+
+  // Webcam track can end if device is unplugged or permission revoked
+  var track = stream.getVideoTracks()[0];
+  if (track) track.addEventListener('ended', function() {
+    console.log('[Vision] webcam track.ended fired — device unplugged or permission revoked');
+    stopWatch();
+  });
+
+  // Tell the server we're entering push mode with webcam source
+  var startResp;
+  try {
+    var r = await fetch('/vision/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'webcam' }),
+    });
+    startResp = await r.json().catch(function() { return { status: 'failed', error: 'bad json' }; });
+  } catch (e) {
+    startResp = { status: 'failed', error: 'voice-agent not reachable' };
+  }
+  if (startResp.status === 'failed') {
+    addSystem('Vision: ' + (startResp.error || 'failed to start'));
+    teardownPushSession();
+    pollVisionState();
+    return;
+  }
+  _visionPushActive = true;
+  _visionFrameCount = 0;
+  updateVisionPreviewStats();
+
+  // Start capturing frames from webcam
+  var startTicker = function() {
+    if (_visionFrameTimer) clearInterval(_visionFrameTimer);
+    setTimeout(captureAndSendFrame, 250);
+    _visionFrameTimer = setInterval(captureAndSendFrame, VISION_FRAME_INTERVAL_MS);
+  };
+  if (preview && preview.readyState >= 2 && preview.videoWidth) {
+    startTicker();
+  } else if (preview) {
+    preview.addEventListener('playing', startTicker, { once: true });
+  }
+  pollVisionState();
+}
+
 async function stopWatch() {
   console.log('[Vision] stopWatch called — tearing down push session and POSTing /vision/stop');
   console.trace('[Vision] stopWatch caller');
@@ -2715,10 +2838,32 @@ function toggleWatch() {
   if (_visionPushActive || _visionStreaming) {
     stopWatch();
   } else {
-    startWatch();
+    // Default to screen when user clicks main Watch button
+    startWatchScreen();
   }
 }
 window.toggleWatch = toggleWatch;
+
+function toggleWatchMenu() {
+  var menu = document.getElementById('watch-menu');
+  if (!menu) return;
+  var isVisible = menu.style.display !== 'none';
+  menu.style.display = isVisible ? 'none' : 'block';
+}
+window.toggleWatchMenu = toggleWatchMenu;
+window.startWatchScreen = startWatchScreen;
+window.startWatchWebcam = startWatchWebcam;
+
+// Close watch menu when clicking outside
+document.addEventListener('click', function(e) {
+  var menu = document.getElementById('watch-menu');
+  var menuBtn = document.getElementById('btn-watch-menu');
+  if (menu && menu.style.display === 'block') {
+    if (!menu.contains(e.target) && e.target !== menuBtn) {
+      menu.style.display = 'none';
+    }
+  }
+});
 
 // ─── Mute toggle ──────────────────────────────────────────
 function toggleMute() {
@@ -2808,7 +2953,8 @@ function toggle() {
     $('btn-mute').style.display = '';
     $('btn-mute').textContent = 'Mute';
     $('btn-mute').className = 'btn-mute';
-    $('btn-watch').style.display = '';
+    var watchGroup = document.getElementById('watch-group');
+    if (watchGroup) watchGroup.style.display = 'inline-flex';
     $('btn-watch').textContent = '👁️ Watch';
     $('btn-watch').className = 'btn-watch';
     startVisionPoll();
