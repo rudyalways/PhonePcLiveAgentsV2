@@ -134,10 +134,66 @@ def _host_label() -> str:
 
 HOST_LABEL = _host_label()
 
+# TCC-safe completion signal for launchd tmux feeder (cannot read ~/Documents/results).
+FEEDER_DONE_DIR = (
+    Path.home()
+    / "Library"
+    / "Application Support"
+    / "Sutando"
+    / "omni-exp-feeder"
+    / "state"
+    / "omni-exp-watch-tasks-to-tmux.done"
+)
+
+
+def mark_feeder_done(task_id: str) -> None:
+    """Tell launchd feeder this task is finished (stop re-nudge)."""
+    base = task_id if task_id.endswith(".txt") else f"{task_id}.txt"
+    try:
+        FEEDER_DONE_DIR.mkdir(parents=True, exist_ok=True)
+        (FEEDER_DONE_DIR / base).write_text("done\n")
+        inbox = (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Sutando"
+            / "omni-exp-feeder"
+            / "inbox"
+            / base
+        )
+        inbox.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning("feeder done marker failed for %s: %s", base, e)
+
+
+def _launchd_feeder_running() -> bool:
+    """Prefer the TCC-safe launchd inbox feeder over the Documents scanner."""
+    try:
+        uid = os.getuid()
+        out = subprocess.check_output(
+            ["launchctl", "print", f"gui/{uid}/com.sutando.omni-exp-tmux-task-feeder"],
+            text=True,
+            timeout=3,
+            stderr=subprocess.DEVNULL,
+        )
+        return "state = running" in out or "\tpid = " in out
+    except (OSError, subprocess.SubprocessError):
+        return False
+
 
 def ensure_tmux_task_feeder() -> None:
-    """Start omni-exp-watch-tasks-to-tmux supervisor if not already alive (Monitor fallback)."""
-    if not ENSURE_TMUX_FEEDER or not TMUX_FEEDER.is_file():
+    """Ensure a Monitor fallback feeder is alive.
+
+    Prefer launchd inbox feeder (Application Support). Do NOT also start the
+    Documents-scanning supervisor — duplicates paste TASK_FILE into a busy
+    core and the scanner's 'missing task file ⇒ done' heuristic races the
+    launchd done-markers.
+    """
+    if not ENSURE_TMUX_FEEDER:
+        return
+    if _launchd_feeder_running():
+        return
+    if not TMUX_FEEDER.is_file():
         return
     pid_path = WORKSPACE / "state" / "omni-exp-watch-tasks-to-tmux-supervisor.pid"
     try:
@@ -1154,6 +1210,7 @@ class PhoneSession:
             if not result.exists():
                 if elapsed > WORK_TIMEOUT_S:
                     del self._pending_work[task_id]
+                    mark_feeder_done(task_id)
                     await self.work_event(
                         "timeout",
                         task_id=task_id,
@@ -1225,6 +1282,7 @@ class PhoneSession:
                 task=task_snippet,
             )
             del self._pending_work[task_id]
+            mark_feeder_done(task_id)
             try:
                 result.unlink(missing_ok=True)
                 task_path.unlink(missing_ok=True)

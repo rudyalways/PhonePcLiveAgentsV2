@@ -73,7 +73,9 @@ trap cleanup EXIT INT TERM
 echo "\$\$" > "\$PID_FILE"
 echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) feeder start pid=\$\$ inbox-mode" >>"\$LOG"
 session_ready() { tmux -S "\$SOCK" has-session -t "\$SESSION" 2>/dev/null; }
-is_done() { [[ -f "\$DONE_DIR/\$1" || -f "\$RESULTS/\$1" ]]; }
+# TCC: LaunchAgents cannot read ~/Documents — never probe \$RESULTS/\$TASKS for done.
+# Omni-exp (or install seed) writes \$DONE_DIR/<basename> when a result is consumed.
+is_done() { [[ -f "\$DONE_DIR/\$1" ]]; }
 mark_done() { : > "\$DONE_DIR/\$1"; rm -f "\$INBOX/\$1" 2>/dev/null || true; }
 inject() {
   local base="\$1" path="\$TASKS/\$base"
@@ -95,13 +97,7 @@ oldest_pending() {
   done < <(ls -tr "\$INBOX"/task-*.txt 2>/dev/null)
   return 1
 }
-# Seed inbox from workspace (best-effort; may no-op under TCC).
-for f in "\$TASKS"/task-*.txt; do
-  [[ -f "\$f" ]] || continue
-  base=\$(basename "\$f")
-  [[ -f "\$RESULTS/\$base" ]] && continue
-  : > "\$INBOX/\$base"
-done
+# Do not seed from \$TASKS here — LaunchAgent gets Operation not permitted on Documents.
 inflight_base=""; inflight_at=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do session_ready && break; sleep 1; done
 while true; do

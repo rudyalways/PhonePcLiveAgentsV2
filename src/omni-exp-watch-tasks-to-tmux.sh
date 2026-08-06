@@ -66,9 +66,11 @@ session_ready() {
 
 is_done() {
   local base="$1"
+  # Only real completion signals. Do NOT treat a missing task file as done —
+  # core may not have claimed it yet, or another feeder raced a delete; that
+  # false-done was clearing launchd inbox markers while HUD stayed on Task file.
   [[ -f "$DONE_DIR/$base" ]] && return 0
   [[ -f "$RESULTS/$base" ]] && return 0
-  [[ ! -f "$TASKS/$base" ]] && return 0
   return 1
 }
 
