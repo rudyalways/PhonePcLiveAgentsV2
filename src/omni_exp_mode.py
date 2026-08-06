@@ -1,4 +1,4 @@
-"""Omni-exp operating modes: normal_with_gui | no_gui | no_gui_html_output.
+"""Omni-exp operating modes: normal_with_gui | no_gui | no_gui_html_output | research.
 
 Split of responsibility:
   - Qwen system prompt / work tool desc: thin hints so voice phrases tasks correctly
@@ -6,6 +6,8 @@ Split of responsibility:
 
 ``normal_with_gui`` is a no-op for core (empty stamp) and uses the baseline voice
 prompt / work-tool wording (same shape as pre-mode omni-exp).
+
+Design note for ``research``: docs/omni-exp-research-mode.md
 """
 
 from __future__ import annotations
@@ -97,6 +99,57 @@ _NO_GUI_HTML_MIDDLE = (
     "\n"
 )
 
+_RESEARCH_MIDDLE = (
+    "MODE: research (active) — you are a live research capture front-end.\n"
+    "MONITOR camera + mic continuously. Extract durable hooks whenever they appear:\n"
+    "- search topics (names, products, papers, companies, jargon on screen or spoken)\n"
+    "- research questions\n"
+    "- todos / follow-ups\n"
+    "- notes / facts worth keeping\n"
+    "- meeting notes or a short meeting summary if it looks like a talk/whiteboard\n"
+    "\n"
+    "When you have a coherent NEW hook (or a batch of related ones), call work with a "
+    "structured brief, for example:\n"
+    "  Research capture: <topic>. Context: <what was seen/heard>. "
+    "Hooks: topics=…; questions=…; todos=…; notes=…. "
+    "Run full research pipeline (MD then auto-play HTML deck).\n"
+    "Batch related hooks; do not spam one task per word. Re-call only for a distinct new topic.\n"
+    "- Say one short line that you're researching; do not invent findings.\n"
+    "- Core does multi-angle deep research and builds a Simplified-Chinese auto-play "
+    "HTML deck — you only speak the TASK_RESULT summary.\n"
+    "- Phrase work as non-GUI research (curl/fetch/CLI), never 'open Google and search'.\n"
+    "\n"
+    "For EVERYTHING else that is not a pure camera description, call work under this mode.\n"
+    "\n"
+    "TOOLS:\n"
+    "- work: capture → deep research → Markdown first → 1–2 slide auto-play HTML deck "
+    "with auto-explanation. Same wait/result rules as always.\n"
+    "\n"
+)
+
+_RESEARCH_SCENE_OVERRIDE = (
+    "\nSCENE CHANGE OVERRIDE (research mode): If the new scene has a researchable "
+    "topic, product, paper, slide, whiteboard, or spoken hook, call work with a "
+    "capture brief (structured hooks) instead of [[NO_SPEAK]]. "
+    "Use [[NO_SPEAK]] only when nothing researchable appeared.\n"
+)
+
+_SCENE_PROMPT_DEFAULT = (
+    "[Proactive: scene_change] Briefly introduce what is now clearly visible "
+    "in the camera. If nothing notable or the same as before, reply exactly [[NO_SPEAK]]."
+)
+
+_SCENE_PROMPT_RESEARCH = (
+    "[Proactive: scene_change] Research-capture scan. Look at the new scene (and any "
+    "on-screen text). If you see a researchable topic, product, paper, company, slide, "
+    "or whiteboard, call work NOW with a structured brief: "
+    "Research capture: <topic>. Context: <what is visible>. "
+    "Hooks: topics=…; questions=…; todos=…; notes=…. "
+    "Run full research pipeline (MD then auto-play HTML deck). "
+    "Speak at most one short acknowledgment. "
+    "If nothing researchable / same as before, reply exactly [[NO_SPEAK]]."
+)
+
 _WORK_TOOL_DESC_NORMAL = (
     "Do the work. Call this for anything beyond simple greetings — questions, "
     "actions, research, writing, translation, file changes, system queries, "
@@ -113,6 +166,12 @@ _WORK_TOOL_DESC_NO_GUI = (
 _WORK_TOOL_DESC_NO_GUI_HTML = (
     "Delegate to core: non-GUI research (no browser search), then local HTML report "
     "+ open that file. Speak a short summary when ready."
+)
+
+_WORK_TOOL_DESC_RESEARCH = (
+    "Delegate scene/audio research capture to core: extract topics/todos/notes, "
+    "deep-research multiple directions, write Markdown first, then a 1–2 slide "
+    "auto-play HTML deck with auto-explanation; open the HTML. Speak a short summary."
 )
 
 # Source of truth for sutando-core execution (appended to task files).
@@ -141,15 +200,105 @@ NO_GUI_HTML_TASK_SYSTEM = (
     "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
 )
 
-_VALID_MODES = frozenset({"normal_with_gui", "no_gui", "no_gui_html_output"})
+# Sutando-core switchable prompt for OMNI_EXP_MODE=research.
+# HTML deck contract: topics / format / autoplay / auto-explain.
+RESEARCH_TASK_SYSTEM = (
+    "===SUTANDO SYSTEM INSTRUCTIONS===\n"
+    "RESEARCH MODE — you are sutando-core. Spec: docs/omni-exp-research-mode.md\n"
+    "\n"
+    "### A) CAPTURE\n"
+    "Parse the task brief (scene/audio). Organize: search topics; research questions; "
+    "todos/follow-ups; notes; meeting notes/summary if applicable.\n"
+    "\n"
+    "### B) DEEP RESEARCH (non-GUI)\n"
+    "Via curl/fetch/CLI/APIs only — do NOT open Google/Chrome to type queries. "
+    "Cover: (a) SOTA papers (b) frontier startups (c) big-tech blogs/products "
+    "(d) community X/Reddit/HN/YC (e) investor perspectives. Skip only if N/A; note gaps.\n"
+    "\n"
+    "### C) MARKDOWN FIRST (required)\n"
+    "Write workspace/data/omni-research/research-<slug>-YYYYMMDD.md "
+    "(mkdir -p as needed) in Simplified Chinese: capture summary; per-direction findings "
+    "+ links; follow-ups. (Source titles/URLs may stay in original language.)\n"
+    "\n"
+    "### D) HTML DECK (required) — ONE file, 1–2 PPT slides concatenated\n"
+    "Path: workspace/data/omni-research/<slug>-deck.html\n"
+    "Build from the Markdown. Deck CSS/UI inline. "
+    "Exception: in-browser TTS may load a JS runtime + download a Chinese speech model "
+    "once, then cache it locally (Cache API / IndexedDB) for offline replay.\n"
+    "\n"
+    "#### D1) Slide topics (choose 1 or 2) — Chinese labels on slides\n"
+    "Always include Slide 1. Add Slide 2 only if you have enough substance.\n"
+    "- SLIDE 1 — 全景 / 论点\n"
+    "  中文标题（≤16字）. 一句中文论点. 3–5条中文要点. "
+    "可选 2–3 个来源标签（论文 / 创业公司 / 大厂）.\n"
+    "- SLIDE 2 — 深挖 / 行动（optional）\n"
+    "  五条中文分栏：论文 | 创业公司 | 大厂 | 社区讨论 | 投资视角 "
+    "(各1–2条; 无内容则省略). 页脚：2–4条中文待办/跟进.\n"
+    "Do NOT dump raw research. Curate for a standup-style briefing in Chinese.\n"
+    "\n"
+    "#### D2) Format (PPT-like) + LANGUAGE\n"
+    "- LANGUAGE (required): All user-facing HTML copy MUST be Simplified Chinese (简体中文) — "
+    "titles, thesis, bullets, lane labels, follow-ups, #explain narration, and control "
+    "labels (e.g. 播放/暂停, 静音, 讲解). Proper nouns / product names may stay in original "
+    "script. Do not ship an English-only deck.\n"
+    "- Each slide: position fixed; inset 0; 100vw×100vh; only the active slide visible.\n"
+    "- Layout: large title top-left; thesis under title; sparse bullets; source chips as "
+    "small muted pills; bottom bar for narration + controls.\n"
+    "- Visual: background #12141a; text #f2f2f0; accent #3d9cf0. Fonts: -apple-system, "
+    "\"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", sans-serif. "
+    "No purple neon, no emoji decoration, no cluttered card grids.\n"
+    "- Chrome: slide counter (e.g. 1/2), progress dots, 播放/暂停, 静音讲解.\n"
+    "- html lang=\"zh-CN\".\n"
+    "\n"
+    "#### D3) Auto-explain — in-browser model download + local TTS (required)\n"
+    "- Every slide MUST include a Chinese narration transcript (2–4 spoken sentences):\n"
+    "  * data-narration=\"…\" on the slide element, AND visible in #explain.\n"
+    "- PRIMARY TTS path (do this in the HTML, not via core pre-baked mp3):\n"
+    "  (1) On first open, show a small status:「正在下载语音模型…」then fetch a "
+    "browser-runnable Chinese TTS stack (e.g. onnxruntime-web / transformers.js / "
+    "sherpa-onnx wasm + a zh model). Persist weights in Cache API or IndexedDB so "
+    "later opens reuse the local copy without re-download when possible.\n"
+    "  (2) After the model is ready, synthesize data-narration on-device and play it; "
+    "keep the Chinese transcript on screen while speaking.\n"
+    "  (3) Do NOT depend on cloud TTS APIs for the happy path. Core should NOT be "
+    "required to run gemini-tts/openai-tts/say to ship the deck.\n"
+    "- FALLBACK only if model download/init fails: speechSynthesis with lang=zh-CN.\n"
+    "- Narration explains the slide in Chinese — do not read every bullet verbatim.\n"
+    "- Mute: skip audio, still show transcript; use timer fallback for advance.\n"
+    "- UI: show model state 下载中 / 就绪 / 失败; allow retry download.\n"
+    "\n"
+    "#### D4) Auto-play — MUST adapt to explanation duration\n"
+    "- Do NOT use a fixed 10s when local/model TTS or speechSynthesis is speaking.\n"
+    "- Advance rule (when not muted / not reduced-motion):\n"
+    "  * Local model TTS / generated AudioBuffer: onended → next slide "
+    "(progress tracks playback position / duration).\n"
+    "  * Else if speechSynthesis fallback: utterance.onend → next slide.\n"
+    "  * Else (mute / TTS unavailable): timer = max(8s, ~0.35s × char_count/2), cap 20s.\n"
+    "- Start only after model is 就绪 (or fallback is chosen). If still 下载中, wait "
+    "(do not advance on a blind timer).\n"
+    "- Loop to slide 1 after the last slide.\n"
+    "- Pause on: Space, 播放/暂停, or pointer hover on stage ≥400ms.\n"
+    "- Resume on: Space / 播放 / mouse leave (if paused only by hover).\n"
+    "\n"
+    "### E) OPEN + RESULT\n"
+    "Run: open <absolute-path-to-deck.html>\n"
+    "Results file: 2–4 sentence phone summary + absolute paths to .md and .html.\n"
+    "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
+)
+
+_VALID_MODES = frozenset(
+    {"normal_with_gui", "no_gui", "no_gui_html_output", "research"}
+)
 
 
 def normalize_omni_exp_mode(raw: str | None) -> str:
-    """Return ``normal_with_gui``, ``no_gui``, or ``no_gui_html_output``.
+    """Return a canonical mode name.
 
-    Default when unset/unknown: ``no_gui_html_output``.
+    Default when unset/unknown: ``research`` (includes no_gui search + HTML deck).
     """
-    v = (raw or "no_gui_html_output").strip().lower().replace("-", "_").replace(" ", "_")
+    v = (raw or "research").strip().lower().replace("-", "_").replace(" ", "_")
+    if v in ("research", "research_mode", "scene_research"):
+        return "research"
     if v in (
         "no_gui_html_output",
         "no_gui_html",
@@ -164,7 +313,7 @@ def normalize_omni_exp_mode(raw: str | None) -> str:
         return "normal_with_gui"
     if v in _VALID_MODES:
         return v
-    return "no_gui_html_output"
+    return "research"
 
 
 def build_omni_exp_instructions(mode: str, *, override: str | None = None) -> str:
@@ -179,9 +328,14 @@ def build_omni_exp_instructions(mode: str, *, override: str | None = None) -> st
         middle = _NO_GUI_MIDDLE
     elif m == "no_gui_html_output":
         middle = _NO_GUI_HTML_MIDDLE
+    elif m == "research":
+        middle = _RESEARCH_MIDDLE
     else:
         middle = _NORMAL_MIDDLE
-    return _COMMON_PREFIX + middle + _CRITICAL_AND_VOICE
+    text = _COMMON_PREFIX + middle + _CRITICAL_AND_VOICE
+    if m == "research":
+        text += _RESEARCH_SCENE_OVERRIDE
+    return text
 
 
 def work_tool_description(mode: str) -> str:
@@ -190,7 +344,16 @@ def work_tool_description(mode: str) -> str:
         return _WORK_TOOL_DESC_NO_GUI
     if m == "no_gui_html_output":
         return _WORK_TOOL_DESC_NO_GUI_HTML
+    if m == "research":
+        return _WORK_TOOL_DESC_RESEARCH
     return _WORK_TOOL_DESC_NORMAL
+
+
+def scene_prompt_for_mode(mode: str) -> str:
+    """PromptTrigger text for scene_change (mode-specific)."""
+    if normalize_omni_exp_mode(mode) == "research":
+        return _SCENE_PROMPT_RESEARCH
+    return _SCENE_PROMPT_DEFAULT
 
 
 def task_system_suffix(mode: str) -> str:
@@ -203,4 +366,16 @@ def task_system_suffix(mode: str) -> str:
         return "\n" + NO_GUI_TASK_SYSTEM
     if m == "no_gui_html_output":
         return "\n" + NO_GUI_HTML_TASK_SYSTEM
+    if m == "research":
+        return "\n" + RESEARCH_TASK_SYSTEM
     return ""
+
+
+def format_work_task(mode: str, task: str) -> str:
+    """Normalize the task body written into the task file (research adds a tag)."""
+    body = (task or "").strip()
+    if normalize_omni_exp_mode(mode) != "research":
+        return body
+    if body.lower().startswith("research capture:") or "[research-mode]" in body.lower():
+        return body
+    return f"[research-mode] {body}"

@@ -11,7 +11,9 @@ sys.path.insert(0, str(REPO / "src"))
 
 from omni_exp_mode import (  # noqa: E402
     build_omni_exp_instructions,
+    format_work_task,
     normalize_omni_exp_mode,
+    scene_prompt_for_mode,
     task_system_suffix,
     work_tool_description,
 )
@@ -28,12 +30,12 @@ def check(label: str, cond: bool) -> None:
 
 
 check(
-    "default → no_gui_html_output",
-    normalize_omni_exp_mode("") == "no_gui_html_output",
+    "default → research",
+    normalize_omni_exp_mode("") == "research",
 )
 check(
-    "unknown → no_gui_html_output",
-    normalize_omni_exp_mode("weird") == "no_gui_html_output",
+    "unknown → research",
+    normalize_omni_exp_mode("weird") == "research",
 )
 check(
     "alias normal → normal_with_gui",
@@ -44,10 +46,16 @@ check(
     "alias no_gui_html → no_gui_html_output",
     normalize_omni_exp_mode("no_gui_html") == "no_gui_html_output",
 )
+check("research canonical", normalize_omni_exp_mode("research") == "research")
+check(
+    "alias research_mode → research",
+    normalize_omni_exp_mode("research_mode") == "research",
+)
 
 gui = build_omni_exp_instructions("normal_with_gui")
 no_gui = build_omni_exp_instructions("no_gui")
 html = build_omni_exp_instructions("no_gui_html_output")
+research = build_omni_exp_instructions("research")
 
 # normal = baseline voice prompt; core stamp is the true no-op.
 check("normal_with_gui baseline lists browser/apps", "Open/close browser or apps" in gui)
@@ -85,7 +93,71 @@ check(
     "no_gui work tool one-liner",
     "without GUI" in work_tool_description("no_gui"),
 )
-
+check("research voice hint", "MODE: research (active)" in research)
+check(
+    "research scene override",
+    "SCENE CHANGE OVERRIDE (research mode)" in research,
+)
+stamp = task_system_suffix("research")
+check(
+    "research core stamp has MD then HTML deck",
+    "MARKDOWN FIRST" in stamp
+    and "HTML DECK" in stamp
+    and "SOTA papers" in stamp,
+)
+check(
+    "research HTML slide topics specified",
+    "SLIDE 1 — 全景 / 论点" in stamp
+    and "SLIDE 2 — 深挖 / 行动" in stamp,
+)
+check(
+    "research HTML requires Simplified Chinese",
+    "Simplified Chinese" in stamp
+    and "zh-CN" in stamp
+    and "播放/暂停" in stamp,
+)
+check(
+    "research HTML format tokens",
+    "#12141a" in stamp and "100vw" in stamp,
+)
+check(
+    "research auto-play adapts to local TTS end",
+    "onended → next slide" in stamp
+    and "utterance.onend → next slide" in stamp
+    and "Do NOT use a fixed 10s" in stamp
+    and "下载中" in stamp,
+)
+check(
+    "research auto-explain downloads model in HTML",
+    "IndexedDB" in stamp
+    and "正在下载语音模型" in stamp
+    and "on-device" in stamp
+    and 'data-narration="' in stamp
+    and "#explain" in stamp
+    and "NOT depend on cloud TTS" in stamp,
+)
+check(
+    "research work tool mentions deck",
+    "auto-play HTML deck" in work_tool_description("research"),
+)
+check(
+    "research scene prompt asks for work capture",
+    "call work NOW" in scene_prompt_for_mode("research")
+    and "Research capture:" in scene_prompt_for_mode("research"),
+)
+check(
+    "default scene prompt keeps NO_SPEAK",
+    "[[NO_SPEAK]]" in scene_prompt_for_mode("normal_with_gui")
+    and "call work NOW" not in scene_prompt_for_mode("normal_with_gui"),
+)
+check(
+    "research formats task tag",
+    format_work_task("research", "look into transformers").startswith("[research-mode]"),
+)
+check(
+    "research does not double-tag",
+    format_work_task("research", "Research capture: foo") == "Research capture: foo",
+)
 override = "CUSTOM PROMPT ONLY"
 check(
     "INSTRUCTIONS override wins",

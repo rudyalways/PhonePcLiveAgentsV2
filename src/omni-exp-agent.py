@@ -40,7 +40,9 @@ from core_readiness import probe_core_readiness  # noqa: E402
 from omni_exp_provider_qwen import QwenOmniSession  # noqa: E402
 from omni_exp_mode import (  # noqa: E402
     build_omni_exp_instructions,
+    format_work_task,
     normalize_omni_exp_mode,
+    scene_prompt_for_mode,
     task_system_suffix,
     work_tool_description,
 )
@@ -844,14 +846,18 @@ def stop_sutando_core() -> dict[str, Any]:
         logger.exception("stop core failed: %s", e)
         return {"ok": False, "stopped": False, "message": str(e), **probe_core_status()}
 
-# Operating mode: normal_with_gui | no_gui | no_gui_html_output.
-OMNI_EXP_MODE = normalize_omni_exp_mode(_env_omni_exp("MODE", "no_gui_html_output"))
+# Operating mode: normal_with_gui | no_gui | no_gui_html_output | research.
+OMNI_EXP_MODE = normalize_omni_exp_mode(_env_omni_exp("MODE", "research"))
+# Research capture loop needs scene_change; force on (override OMNI_EXP_SCENE_CHANGE=0).
+if OMNI_EXP_MODE == "research":
+    SCENE_CHANGE_ENABLED = True
 # Optional full prompt override (OMNI_EXP_INSTRUCTIONS) wins over mode defaults.
 _INSTRUCTIONS_OVERRIDE = _env_omni_exp("INSTRUCTIONS", "")
 INSTRUCTIONS = build_omni_exp_instructions(
     OMNI_EXP_MODE,
     override=_INSTRUCTIONS_OVERRIDE or None,
 )
+SCENE_PROMPT = scene_prompt_for_mode(OMNI_EXP_MODE)
 
 # Tool name + description aligned with voice (task-bridge.ts workTool) and
 # LiveKit (livekit-agent.py work) — same contract: name=work, param=task.
@@ -871,12 +877,6 @@ WORK_TOOL: dict[str, Any] = {
         "required": ["task"],
     },
 }
-
-SCENE_PROMPT = (
-    "[Proactive: scene_change] Briefly introduce what is now clearly visible "
-    "in the camera. If nothing notable or the same as before, reply exactly [[NO_SPEAK]]."
-)
-
 
 def load_users() -> dict:
     if not USERS_FILE.exists():
@@ -1210,6 +1210,12 @@ class PhoneSession:
                 "session",
                 "NO GUI + HTML mode — research without browser search; "
                 "write local HTML and open it",
+            )
+        elif OMNI_EXP_MODE == "research":
+            await self.activity(
+                "session",
+                "RESEARCH mode — capture scene/audio topics; deep research → "
+                "MD then auto-play HTML deck (see docs/omni-exp-research-mode.md)",
             )
         core = probe_core_status()
         await self.push_core_status(core)
@@ -1807,10 +1813,11 @@ class PhoneSession:
             return tid, "already_done", note
 
         task_id = f"task-{int(time.time() * 1000)}"
+        task_body = format_work_task(OMNI_EXP_MODE, task)
         content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now(timezone.utc).isoformat()}\n"
-            f"task: {task}\n"
+            f"task: {task_body}\n"
             f"source: omni\n"
             f"via: {source}\n"
             f"channel_id: omni-phone\n"
