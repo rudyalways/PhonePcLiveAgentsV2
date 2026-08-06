@@ -119,6 +119,24 @@ check(
     rc == 0 and stdout.strip() == "disabled" and "invalid" in stderr,
 )
 
+crons_text = (REPO / "skills/schedule-crons/SKILL.md").read_text(encoding="utf-8")
+check(
+    "both gates invoke the toggle script",
+    crons_text.count("proactive-loop-enabled.py") >= 2,
+)
+check(
+    "registration step skips the loop entry when off",
+    "skip any entry whose `prompt_skill` is `proactive-loop`" in crons_text,
+)
+check(
+    "fallback step is gated",
+    "proactive-loop fallback skipped" in crons_text,
+)
+check(
+    "a missing script is treated as enabled",
+    "missing optional script must not silently stop" in crons_text,
+)
+
 if failures:
     raise SystemExit(f"{len(failures)} failure(s): {', '.join(failures)}")
 print("\nall tests passed")

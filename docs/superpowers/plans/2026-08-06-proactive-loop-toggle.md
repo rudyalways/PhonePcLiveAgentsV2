@@ -440,22 +440,20 @@ SUTANDO_PROACTIVE_LOOP_ENABLED=0 SUTANDO_ACCEPT_BYPASS_PERMISSIONS=1 \
   bash src/agent/start-cli.sh
 ```
 
-等 core 跑完 `/startup`（约 2-3 分钟）后检查：
+等 core 跑完 `/startup`（约 2-3 分钟）后，在 core 会话里运行 `CronList`。
 
-```bash
-test -f "$WS/hosts/$HOST/crons.json" \
-  && python3 -c "
-import json,sys
-jobs=json.load(open('$WS/hosts/$HOST/crons.json'))
-hit=[j for j in jobs if j.get('prompt_skill')=='proactive-loop'
-     or '/proactive-loop' in (j.get('prompt') or '')]
-print('proactive-loop 条目数:', len(hit))
-sys.exit(1 if hit else 0)" \
-  || echo 'crons.json 未生成（同样满足验收）'
-```
+Expected: 列表中**没有**任何引用 `/proactive-loop` 的 job（也没有 `*/5` 或
+`*/10` 的循环 job）；其他 cron（morning-briefing 等）正常出现。
 
-Expected: 条目数为 `0`，或文件未生成。任一即通过。
-另在 core 会话里跑 `/cron-list`，Expected: `No scheduled jobs`。
+> **不要用 `crons.json` 的内容做验收。** 该文件是 core 从
+> `skills/schedule-crons/crons.example.json` 整体拷贝来的**配置模板**，
+> `main-loop` 条目存在其中只表示「被声明过」，不表示「被注册了」。2026-08-06
+> 首次执行本计划时我就是这么误判的 —— 文件里有 `main-loop`，但 CronList 为
+> 空，两道门其实都正常工作。运行时状态只看 CronList。
+
+补充证据（可选）：在 core 的 scrollback 里应能看到步骤 4 的日志行
+`proactive-loop fallback skipped (SUTANDO_PROACTIVE_LOOP_ENABLED=0)`，
+以及所有 `CronCreate` 调用中没有 proactive-loop。
 
 - [ ] **Step 7: 实跑验证开启态**
 
@@ -508,6 +506,6 @@ EOF
 |---|---|
 | `python3 tests/proactive-loop-toggle.test.py` | all tests passed |
 | `python3 tests/proactive-loop-self-development.test.py` | all tests passed（未回归） |
-| `SUTANDO_PROACTIVE_LOOP_ENABLED=0` 启动 core | `crons.json` 无 proactive-loop 条目；`/cron-list` 为空 |
-| 不设该变量启动 core | 出现引用 `/proactive-loop` 的 job（默认行为不变） |
+| `SUTANDO_PROACTIVE_LOOP_ENABLED=0` 启动 core | `CronList` 中无 proactive-loop job（`crons.json` 里有 `main-loop` 条目是正常的 —— 那是配置模板，非注册状态） |
+| 不设该变量启动 core | `CronList` 中出现引用 `/proactive-loop` 的 job（默认行为不变） |
 | `git diff --stat main -- src/` | 空（不触碰 `src/`） |

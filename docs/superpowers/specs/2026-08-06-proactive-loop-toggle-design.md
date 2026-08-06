@@ -114,8 +114,11 @@ core 启动
                             兜底检查也跳过，不补 */10
 ```
 
-关闭态下 `crons.json` 里不存在 proactive-loop 条目，dashboard 上同样看不到。
-状态与显示一致，没有「存在但不执行」的错位。
+关闭态下 `CronList` 里不存在 proactive-loop job，循环不会被唤醒。
+
+注意：`crons.json` 里**仍可能保留** `main-loop` 条目 —— core 首次启动时会把
+`crons.example.json` 整体拷贝成该文件，那是配置模板而非注册状态。两者的区别
+是本设计的核心：门拦的是「注册」这个动作，不是模板内容。
 
 ## 错误处理
 
@@ -140,8 +143,12 @@ core 启动
 | manifest 文件缺失 | enabled（默认） |
 
 SKILL.md 那两道门是 markdown 指令，无法单测。验收靠实跑：设
-`SUTANDO_PROACTIVE_LOOP_ENABLED=0` 后重启 core，确认 `crons.json` 中不含
-proactive-loop 条目，且 `CronList` 为空。
+`SUTANDO_PROACTIVE_LOOP_ENABLED=0` 后重启 core，确认 `CronList` 中不含
+proactive-loop job。
+
+**不要用 `crons.json` 的内容做验收。** 该文件是 core 从
+`crons.example.json` 整体拷贝来的配置模板，`main-loop` 条目存在其中只表示
+「被声明过」，不表示「被注册了」。运行时状态只看 `CronList`。
 
 ## 影响面
 
