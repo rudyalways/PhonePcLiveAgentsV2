@@ -38,6 +38,12 @@ sys.path.insert(0, str(REPO / "src"))
 
 from core_readiness import probe_core_readiness  # noqa: E402
 from omni_exp_provider_qwen import QwenOmniSession  # noqa: E402
+from omni_exp_mode import (  # noqa: E402
+    build_omni_exp_instructions,
+    normalize_omni_exp_mode,
+    task_system_suffix,
+    work_tool_description,
+)
 from omni_exp_result_speak import (  # noqa: E402
     DELIVER_RETRY_DELAYS_S,
     TRUST_DONE_CLAIM_S,
@@ -838,18 +844,22 @@ def stop_sutando_core() -> dict[str, Any]:
         logger.exception("stop core failed: %s", e)
         return {"ok": False, "stopped": False, "message": str(e), **probe_core_status()}
 
+# Operating mode: normal_with_gui | no_gui | no_gui_html_output.
+OMNI_EXP_MODE = normalize_omni_exp_mode(_env_omni_exp("MODE", "no_gui_html_output"))
+# Optional full prompt override (OMNI_EXP_INSTRUCTIONS) wins over mode defaults.
+_INSTRUCTIONS_OVERRIDE = _env_omni_exp("INSTRUCTIONS", "")
+INSTRUCTIONS = build_omni_exp_instructions(
+    OMNI_EXP_MODE,
+    override=_INSTRUCTIONS_OVERRIDE or None,
+)
+
 # Tool name + description aligned with voice (task-bridge.ts workTool) and
 # LiveKit (livekit-agent.py work) — same contract: name=work, param=task.
+# Description follows OMNI_EXP_MODE (no_gui drops browser/app wording).
 WORK_TOOL: dict[str, Any] = {
     "type": "function",
     "name": "work",
-    "description": (
-        "Do the work. Call this for anything beyond simple greetings — questions, "
-        "actions, research, writing, translation, file changes, system queries, "
-        "explanations, analysis, open browser/URL, apps, email. "
-        "This is how Sutando thinks and acts. Results are spoken back when ready. "
-        "Also called core / submit a task / delegate to core — those all mean this tool."
-    ),
+    "description": work_tool_description(OMNI_EXP_MODE),
     "parameters": {
         "type": "object",
         "properties": {
@@ -861,67 +871,6 @@ WORK_TOOL: dict[str, Any] = {
         "required": ["task"],
     },
 }
-
-# System prompt borrows voice/LiveKit DEFAULT BEHAVIOR + CRITICAL RULES
-# (voice-agent-config.ts / livekit-agent.py), trimmed for phone camera+mic
-# (no Zoom/meeting/inline keystroke tools on this surface).
-INSTRUCTIONS = _env_omni_exp(
-    "INSTRUCTIONS",
-    (
-        "You are Sutando, a personal AI that belongs entirely to the user. "
-        "You are on the user's phone camera and mic (omni-exp). Keep spoken replies to 2–3 sentences.\n"
-        "\n"
-        "DEFAULT BEHAVIOR: Call work for almost everything.\n"
-        "You are the voice/vision interface. The Sutando core (Claude Code) is the brain.\n"
-        "Your job is to relay the user's requests to work and speak the results.\n"
-        "\n"
-        "CAMERA / VISION (answer directly — do NOT call work):\n"
-        "- When the user asks what you see, what's in the camera/lens, or to look again, "
-        "describe the live camera view in 1–2 sentences.\n"
-        "- Never claim you cannot see the video if frames are streaming; use the latest view.\n"
-        "\n"
-        "ONLY answer directly (without calling work) for:\n"
-        "- Simple greetings and yes/no acknowledgments\n"
-        "- Self-introduction (who you are / what you can do)\n"
-        "- Asking a clarifying question\n"
-        "- Language switch requests (just switch and speak)\n"
-        "- Describing what is clearly visible in the camera right now\n"
-        "\n"
-        "For EVERYTHING else, call work. This includes:\n"
-        "- Open/close browser or apps, navigate, click, type, search\n"
-        "- Questions about the system, code, files, email, calendar\n"
-        "- Requests to do anything (write, read, change, create, delete, send)\n"
-        "- Research, translation, analysis — anything you are not 100% certain about\n"
-        "\n"
-        "TOOLS:\n"
-        "- work: THE default tool. Call it for any non-trivial request. "
-        "Also called core, submit a task, send to core, ask the core, "
-        "delegate to core — these all mean call this tool. "
-        "Returns pending — say you started / are working on it once, then stay quiet "
-        "until a TASK_RESULT arrives. "
-        "Call work in the SAME turn before claiming any PC action is done.\n"
-        "\n"
-        "CRITICAL RULES:\n"
-        "- NEVER pretend you called a tool. NEVER say done / already opened / 已经帮你 "
-        "without actually calling work in this turn.\n"
-        "- NEVER say you can't do that — call work and let the core handle it.\n"
-        "- Only say you are still waiting when a work call is in flight and you have "
-        "NOT yet received its TASK_RESULT. After you summarize a TASK_RESULT, that "
-        "task is DONE — do not keep saying 还在等 / still waiting for it.\n"
-        "- Never call work with 'wait for the previous result' — that creates a useless "
-        "extra task. Just wait, or handle the user's new request.\n"
-        "- If the user asks something new, call work for that new request (or answer "
-        "camera/simple questions directly) instead of only repeating that you are waiting.\n"
-        "- If you KNOW the answer from camera/context alone, answer directly; otherwise call work.\n"
-        "- When in doubt, call work.\n"
-        "\n"
-        "SCENE CHANGE: When given a [Proactive: scene_change] prompt, briefly introduce "
-        "what is clearly visible; if nothing notable or unclear, reply with exactly "
-        "[[NO_SPEAK]] and nothing else.\n"
-        "\n"
-        "VOICE RULES: Keep responses short. Never read long file contents aloud — summarize."
-    ),
-)
 
 SCENE_PROMPT = (
     "[Proactive: scene_change] Briefly introduce what is now clearly visible "
@@ -1246,8 +1195,22 @@ class PhoneSession:
             }
         )
         await self.status("listening")
-        await self.activity("session", f"Qwen ready ({self.qwen.model}) · tool: work")
+        await self.activity(
+            "session",
+            f"Qwen ready ({self.qwen.model}) · tool: work · mode={OMNI_EXP_MODE}",
+        )
         await self.activity("session", f"Tasks dir: {TASKS_DIR}")
+        if OMNI_EXP_MODE == "no_gui":
+            await self.activity(
+                "session",
+                "NO GUI mode — work tasks forbid browser/app/GUI automation",
+            )
+        elif OMNI_EXP_MODE == "no_gui_html_output":
+            await self.activity(
+                "session",
+                "NO GUI + HTML mode — research without browser search; "
+                "write local HTML and open it",
+            )
         core = probe_core_status()
         await self.push_core_status(core)
         if core.get("ready"):
@@ -1854,9 +1817,11 @@ class PhoneSession:
             f"username: {self.username}\n"
             f"access_tier: owner\n"
             f"priority: normal\n"
+            f"omni_exp_mode: {OMNI_EXP_MODE}\n"
         )
         if call_id:
             content += f"call_id: {call_id}\n"
+        content += task_system_suffix(OMNI_EXP_MODE)
         path = TASKS_DIR / f"{task_id}.txt"
         path.write_text(content)
         # TCC-safe notify for launchd feeder (cannot scan ~/Documents/tasks).
