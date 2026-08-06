@@ -2950,10 +2950,10 @@ function doCleanup() {
 // MediaStream renders into the on-screen preview so the user sees exactly
 // what Sutando sees. Voice tools (start_vision/stop_vision) still flip the
 // button via the 2s poll for the server-side screencapture path.
-var VISION_FRAME_INTERVAL_MS = 1500; // 1280x720 JPEG q=0.6 → ~80–150KB/frame; ~0.7 fps
+var VISION_FRAME_INTERVAL_MS = 1000; // 1280x720 JPEG q=0.55 → ~70–130KB/frame; 1 fps (Qwen limit)
 var VISION_FRAME_WIDTH = 1280;
 var VISION_FRAME_HEIGHT = 720;
-var VISION_FRAME_QUALITY = 0.6;
+var VISION_FRAME_QUALITY = 0.55; // Reduced from 0.6 to ensure <256KB for Qwen
 var _visionStreaming = false;        // last-known server state (push or pull)
 var _visionPushActive = false;       // this browser is the push-mode driver
 var _visionPollTimer = null;

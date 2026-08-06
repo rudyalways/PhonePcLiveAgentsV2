@@ -81,6 +81,10 @@ function patchQwenDashScopeTransport(transport: OpenAIRealtimeTransport, config:
 	t.connect = async (...args: unknown[]) => {
 		const result = await origConnect(...args);
 		wireDashScopeEvents();
+		// Expose rt as session for vision-adapter.ts sendTransportEvent
+		if (t.rt) {
+			t.session = t.rt;
+		}
 		return result;
 	};
 
