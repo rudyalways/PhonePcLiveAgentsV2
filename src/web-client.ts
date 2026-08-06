@@ -107,11 +107,11 @@ const HTML = /* html */ `<!DOCTYPE html>
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background: #0a0a12; color: #c0c0d0;
     display: flex; flex-direction: column; align-items: center;
-    min-height: 100vh; padding: 0 300px 60px 0;
+    min-height: 100vh; padding: 0 0 60px 420px;
   }
   @media (max-width: 900px) {
-    body { padding-right: 0; padding-bottom: 40vh; }
-    #bottom-panel { right: 0; bottom: 40vh; }
+    body { padding-left: 0; padding-bottom: 46vh; }
+    #bottom-panel { left: 0; bottom: 46vh; }
     #vision-preview-wrap { right: 16px !important; }
   }
   /* Header */
@@ -394,13 +394,13 @@ const HTML = /* html */ `<!DOCTYPE html>
 
   /* Input bar */
   #bottom-panel {
-    position: fixed; bottom: 0; left: 0; right: 300px; max-width: 960px; margin: 0 auto;
+    position: fixed; bottom: 0; left: 420px; right: 0; max-width: 960px; margin: 0 auto;
     background: #12121e; z-index: 10;
     border-top: 1px solid #1e1e30;
     padding: 8px 16px 12px;
   }
   @media (max-width: 900px) {
-    #bottom-panel { right: 0; }
+    #bottom-panel { left: 0; }
   }
   .input-bar {
     display: flex; gap: 8px;
@@ -584,20 +584,20 @@ const HTML = /* html */ `<!DOCTYPE html>
   .d-entry.ok { color: #4ecca3; }
   .d-entry.info { color: #8ab4f8; }
 
-  /* Activity log — fixed right sidebar */
+  /* Activity log — fixed left sidebar */
   #activity-log-panel {
-    position: fixed; top: 0; right: 0; width: 300px; height: 100vh;
-    background: #0a0a14; border-left: 1px solid #1a1a28;
+    position: fixed; top: 0; left: 0; width: 420px; height: 100vh;
+    background: #0a0a14; border-right: 1px solid #1a1a28;
     display: flex; flex-direction: column; overflow: hidden; z-index: 25;
   }
   @media (max-width: 900px) {
     #activity-log-panel {
-      width: 100%; height: 40vh; top: auto; bottom: 0;
-      border-left: none; border-top: 1px solid #1a1a28;
+      width: 100%; height: 46vh; top: auto; bottom: 0;
+      border-right: none; border-top: 1px solid #1a1a28;
     }
   }
   #activity-log-body {
-    flex: 1; display: flex; flex-direction: column; min-height: 0;
+    flex: 1 1 34%; display: flex; flex-direction: column; min-height: 100px;
   }
   #activity-status-row {
     display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
@@ -636,6 +636,63 @@ const HTML = /* html */ `<!DOCTYPE html>
     padding: 2px 8px; border-radius: 4px; cursor: pointer; margin-left: 6px;
   }
   #activity-log-actions button:hover { color: #aaa; border-color: #444; }
+  #model-call-panel {
+    flex: 1 1 33%; min-height: 140px; display: flex; flex-direction: column;
+    border-top: 1px solid #151520; background: #080812;
+  }
+  #model-call-header, #claude-queue-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; font-size: 11px; color: #888; user-select: none;
+    background: #0e0e18; border-bottom: 1px solid #151520; flex-shrink: 0;
+  }
+  #model-call-actions button, #claude-queue-actions button {
+    background: none; border: 1px solid #222; color: #555; font-size: 10px;
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; margin-left: 6px;
+  }
+  #model-call-actions button:hover, #claude-queue-actions button:hover { color: #aaa; border-color: #444; }
+  #model-call-list, #claude-queue-list {
+    flex: 1; overflow-y: auto; padding: 8px 10px 10px;
+    font-size: 11px; line-height: 1.45; font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  #claude-queue-panel {
+    flex: 1 1 33%; min-height: 150px; display: flex; flex-direction: column;
+    border-top: 1px solid #151520; background: #080812;
+  }
+  .mc-empty { color: #555; padding: 6px 0; }
+  .mc-entry, .cq-entry {
+    border: 1px solid #151522; background: #0d0d16; border-radius: 6px;
+    padding: 8px; margin-bottom: 8px;
+  }
+  .mc-entry.ok { border-color: #1f3a2a; }
+  .mc-entry.err { border-color: #4a1a1a; }
+  .mc-entry.pending { border-color: #2b2b3f; }
+  .mc-entry.receiving { border-color: #243a4a; }
+  .cq-entry.pending { border-color: #4a3a1a; }
+  .cq-entry.working { border-color: #243a4a; }
+  .cq-entry.done { border-color: #1f3a2a; }
+  .cq-entry.error { border-color: #4a1a1a; }
+  .mc-top, .cq-top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .mc-ts, .cq-id { color: #555; flex-shrink: 0; overflow-wrap: anywhere; }
+  .mc-state, .cq-state { text-transform: uppercase; font-size: 10px; flex-shrink: 0; }
+  .mc-entry.ok .mc-state { color: #4ecca3; }
+  .mc-entry.err .mc-state { color: #ef5350; }
+  .mc-entry.pending .mc-state { color: #f0ad4e; }
+  .mc-entry.receiving .mc-state { color: #8ab4f8; }
+  .cq-entry.pending .cq-state { color: #f0ad4e; }
+  .cq-entry.working .cq-state { color: #8ab4f8; }
+  .cq-entry.done .cq-state { color: #4ecca3; }
+  .cq-entry.error .cq-state { color: #ef5350; }
+  .mc-model { color: #c0c0d0; margin-bottom: 6px; overflow-wrap: anywhere; }
+  .mc-row, .cq-row { margin-top: 5px; }
+  .mc-label, .cq-label { color: #666; display: block; margin-bottom: 2px; }
+  .mc-text, .cq-text {
+    color: #9aa4b2; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 110px; overflow-y: auto;
+  }
+  .mc-output { color: #a8d8b0; }
+  .mc-detail { color: #777; }
+  .cq-result { color: #a8d8b0; }
+  .cq-meta { color: #777; }
   .btn-download {
     display: inline-block; margin-top: 6px; padding: 4px 10px;
     border-radius: 6px; border: 1px solid #1e1e30; background: #0e0e18;
@@ -815,7 +872,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 <!-- Vision preview — shows what Sutando is seeing. Mirrors the MediaStream
      captured by getDisplayMedia so the user can verify the picked surface
      and see the same view the model gets. -->
-<div id="vision-preview-wrap" style="display:none; position: fixed; bottom: 16px; right: 316px; z-index: 200; background: rgba(0,0,0,0.6); border: 2px solid #fbbf24; border-radius: 10px; padding: 6px 6px 4px; box-shadow: 0 4px 18px rgba(0,0,0,0.35), 0 0 14px rgba(251,191,36,0.45); max-width: 280px;">
+<div id="vision-preview-wrap" style="display:none; position: fixed; bottom: 16px; right: 16px; z-index: 200; background: rgba(0,0,0,0.6); border: 2px solid #fbbf24; border-radius: 10px; padding: 6px 6px 4px; box-shadow: 0 4px 18px rgba(0,0,0,0.35), 0 0 14px rgba(251,191,36,0.45); max-width: 280px;">
   <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; font: 11px/1.2 -apple-system, system-ui, sans-serif; color:#fbbf24;">
     <span style="display:inline-flex; align-items:center; gap:6px;"><span id="vision-source-icon">👁️</span> <span id="vision-source-label">Sutando is seeing</span></span>
     <span id="vision-preview-stats" style="color:#bbb; font-size:10px;"></span>
@@ -933,6 +990,28 @@ fetch('http://localhost:${DASHBOARD_PORT}/stand-identity').then(r=>r.json()).the
     </div>
     <div id="activity-log-list"></div>
   </div>
+  <div id="model-call-panel">
+    <div id="model-call-header">
+      <span>Model calls</span>
+      <span id="model-call-actions">
+        <button type="button" onclick="clearModelCalls()">Clear</button>
+      </span>
+    </div>
+    <div id="model-call-list">
+      <div class="mc-empty">No model calls yet.</div>
+    </div>
+  </div>
+  <div id="claude-queue-panel">
+    <div id="claude-queue-header">
+      <span>Claude Code queue</span>
+      <span id="claude-queue-actions">
+        <button type="button" onclick="clearClaudeQueue()">Clear</button>
+      </span>
+    </div>
+    <div id="claude-queue-list">
+      <div class="mc-empty">No Claude Code tasks yet.</div>
+    </div>
+  </div>
 </div>
 
 <div class="main" id="main-area">
@@ -973,6 +1052,12 @@ let INPUT_RATE  = 16000;
 let OUTPUT_RATE = 24000;
 const CAPTURE_BUF = 2048;
 const WS_PORT = ${WS_PORT};
+const REALTIME_PROVIDER = '${(process.env.REALTIME_PROVIDER || 'gemini').toLowerCase()}';
+const REALTIME_MODEL = '${process.env.REALTIME_MODEL || (
+	(process.env.REALTIME_PROVIDER || 'gemini').toLowerCase() === 'qwen'
+		? 'qwen3.5-omni-plus-realtime'
+		: 'provider default'
+)}';
 const LAN_SHARE = ${LAN_SHARE ? 'true' : 'false'};
 
 // Auto-detect WebSocket URL from current hostname
@@ -1128,7 +1213,7 @@ let bytesSent = 0;
 let bytesRecv = 0;
 let audioChunksRecv = 0;
 let playChunkCount = 0;
-let voiceLlmReady = false; // true once Gemini returns audio/transcript; typed input falls back to task bridge until then
+let voiceLlmReady = false; // true once the realtime voice session can accept text/audio.
 let statsTimer = null;
 let muted = false;
 
@@ -1138,6 +1223,9 @@ let recognition = null;
 const debugLog = [];
 const activityLogEntries = [];
 const activityLogSeen = new Set();
+const modelCallEntries = [];
+let modelCallSeq = 0;
+const claudeQueueEntries = {};
 const $ = (id) => document.getElementById(id);
 
 // ─── Chrome STT (real-time interim display) ───────────────
@@ -1195,6 +1283,11 @@ function stopChromeStt() {
 let currentUserEl = null;
 let currentAssistantEl = null;
 let serverUserTextReceived = false;  // blocks Chrome STT overwrites after server sends
+let pendingRealtimeRouteEl = null;
+let pendingRealtimeCallId = null;
+let pendingRealtimeStartedAt = 0;
+let pendingRealtimeTimer = null;
+let pendingRealtimeHadAssistant = false;
 
 // Stick-to-bottom autoscroll: follow new content only while the user is at the
 // bottom. A manual scroll-up to read history must not be yanked back down by
@@ -1246,8 +1339,22 @@ function handleTranscript(role, text, partial) {
       currentUserEl.textContent = text;
       addCopyBtn(currentUserEl);
       currentUserEl = null;
+      if (!pendingRealtimeCallId && (text || '').trim() && !text.startsWith('[System:')) {
+        var voiceCallId = addModelCall(text, realtimeRouteLabel(), 'voice input via voice-agent:' + WS_PORT);
+        startRealtimePending(null, voiceCallId);
+        updateModelCall(voiceCallId, { state: 'pending', detail: 'voice input sent to realtime; waiting for response' });
+      }
     }
   } else {
+    if ((text || '').trim()) {
+      pendingRealtimeHadAssistant = true;
+      updateModelCall(pendingRealtimeCallId, {
+        state: partial ? 'receiving' : 'ok',
+        output: text,
+        detail: partial ? 'Realtime response streaming' : 'Realtime response received',
+      });
+      if (!partial) markRealtimeComplete('ok', 'Realtime response received');
+    }
     voiceLlmReady = true;
     if (!currentAssistantEl) {
       currentAssistantEl = document.createElement('div');
@@ -1267,6 +1374,64 @@ function addSystem(text, isHtml) {
   addCopyBtn(el);
   $('transcript').appendChild(el);
   scrollTranscript();
+}
+
+function addRouteStatus(label, detail) {
+  const el = document.createElement('div');
+  el.className = 't-entry t-system';
+  el.textContent = label + ' — pending' + (detail ? ' · ' + detail : '');
+  $('transcript').appendChild(el);
+  scrollTranscript(true);
+  return el;
+}
+
+function markRouteStatus(el, state, detail) {
+  if (!el) return;
+  const base = el.dataset.routeLabel || el.textContent.split(' — ')[0] || 'Model route';
+  if (!el.dataset.routeLabel) el.dataset.routeLabel = base;
+  const label = state === 'ok' ? 'sent' : state === 'err' ? 'failed' : 'pending';
+  el.textContent = base + ' — ' + label + (detail ? ' · ' + detail : '');
+}
+
+function startRealtimePending(routeEl, callId) {
+  pendingRealtimeRouteEl = routeEl;
+  pendingRealtimeCallId = callId || null;
+  pendingRealtimeStartedAt = Date.now();
+  pendingRealtimeHadAssistant = false;
+  if (pendingRealtimeTimer) clearTimeout(pendingRealtimeTimer);
+  pendingRealtimeTimer = setTimeout(() => {
+    if (!pendingRealtimeRouteEl && !pendingRealtimeCallId) return;
+    markRealtimeComplete('err', 'No realtime response after 20s');
+    addSystem('Realtime did not return an assistant response. Check voice-agent logs for Qwen/DashScope errors.');
+  }, 20000);
+}
+
+function markRealtimeComplete(state, detail) {
+  if (pendingRealtimeTimer) {
+    clearTimeout(pendingRealtimeTimer);
+    pendingRealtimeTimer = null;
+  }
+  markRouteStatus(pendingRealtimeRouteEl, state, detail);
+  var patch = {
+    state: state === 'ok' ? 'ok' : 'err',
+    detail: detail || '',
+    completedAt: new Date().toISOString(),
+  };
+  if (state !== 'ok') patch.output = detail || 'Realtime failed';
+  updateModelCall(pendingRealtimeCallId, patch);
+  pendingRealtimeRouteEl = null;
+  pendingRealtimeCallId = null;
+  pendingRealtimeStartedAt = 0;
+  pendingRealtimeHadAssistant = false;
+}
+
+function realtimeRouteLabel() {
+  var provider = REALTIME_PROVIDER === 'qwen' ? 'Qwen realtime' : REALTIME_PROVIDER + ' realtime';
+  return 'Model: ' + provider + ' (' + REALTIME_MODEL + ')';
+}
+
+function taskBridgeRouteLabel() {
+  return 'Model: Claude Code core (current core model)';
 }
 
 // ─── Activity log ─────────────────────────────────────────
@@ -1296,6 +1461,158 @@ function clearActivityLog() {
   logActivity('ui', 'Log cleared', 'info');
 }
 window.clearActivityLog = clearActivityLog;
+
+function addModelCall(input, model, detail) {
+  const call = {
+    id: 'mc-' + (++modelCallSeq),
+    ts: new Date().toISOString().slice(11, 23),
+    input: input || '',
+    model: model || 'unknown',
+    detail: detail || '',
+    state: 'pending',
+    output: '',
+    completedAt: '',
+  };
+  modelCallEntries.push(call);
+  while (modelCallEntries.length > 60) modelCallEntries.shift();
+  renderModelCalls();
+  return call.id;
+}
+
+function updateModelCall(id, patch) {
+  if (!id) return;
+  const call = modelCallEntries.find(function(c) { return c.id === id; });
+  if (!call) return;
+  Object.assign(call, patch || {});
+  renderModelCalls();
+}
+
+function renderModelCalls() {
+  const list = $('model-call-list');
+  if (!list) return;
+  if (modelCallEntries.length === 0) {
+    list.innerHTML = '<div class="mc-empty">No model calls yet.</div>';
+    return;
+  }
+  list.innerHTML = modelCallEntries.slice().reverse().map(function(c) {
+    var stateClass = c.state === 'ok' ? 'ok' : c.state === 'err' ? 'err' : c.state === 'receiving' ? 'receiving' : 'pending';
+    var stateText = c.state === 'ok' ? 'sent' : c.state === 'err' ? 'failed' : c.state === 'receiving' ? 'receiving' : 'pending';
+    return '<div class="mc-entry ' + esc(stateClass) + '">' +
+      '<div class="mc-top"><span class="mc-ts">' + esc(c.ts) + '</span><span class="mc-state">' + esc(stateText) + '</span></div>' +
+      '<div class="mc-model">' + esc(c.model) + '</div>' +
+      '<div class="mc-row"><span class="mc-label">input</span><div class="mc-text">' + esc(c.input) + '</div></div>' +
+      (c.output ? '<div class="mc-row"><span class="mc-label">return</span><div class="mc-text mc-output">' + esc(c.output) + '</div></div>' : '') +
+      (c.detail ? '<div class="mc-row"><span class="mc-label">detail</span><div class="mc-text mc-detail">' + esc(c.detail) + '</div></div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function clearModelCalls() {
+  modelCallEntries.length = 0;
+  renderModelCalls();
+}
+window.clearModelCalls = clearModelCalls;
+
+function claudeStateClass(status) {
+  if (status === 'done') return 'done';
+  if (status === 'error' || status === 'failed') return 'error';
+  if (status === 'working' || status === 'running') return 'working';
+  return 'pending';
+}
+
+function claudeStateLabel(status) {
+  var cls = claudeStateClass(status);
+  if (cls === 'done') return '执行完毕';
+  if (cls === 'error') return '失败';
+  if (cls === 'working') return '执行中';
+  return '待执行';
+}
+
+function upsertClaudeQueueTask(taskId, patch) {
+  if (!taskId) return;
+  var now = Date.now();
+  var prev = claudeQueueEntries[taskId] || {
+    id: taskId,
+    status: 'pending',
+    text: '',
+    result: '',
+    source: '',
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+  };
+  var next = Object.assign({}, prev, patch || {});
+  next.id = taskId;
+  next.updatedAt = now;
+  if ((next.status === 'done' || next.status === 'error' || next.status === 'failed') && !next.completedAt) {
+    next.completedAt = now;
+  }
+  if (next.status === 'pending' || next.status === 'working' || next.status === 'running') {
+    next.completedAt = null;
+  }
+  claudeQueueEntries[taskId] = next;
+  renderClaudeQueue();
+}
+
+function syncClaudeQueueFromTaskMap() {
+  Object.entries(taskMap || {}).forEach(function(pair) {
+    var id = pair[0], t = pair[1] || {};
+    if (isClearedCompletedTask(id, t.status)) return;
+    upsertClaudeQueueTask(id, {
+      status: t.status || 'pending',
+      text: t.text || id,
+      result: t.result || '',
+      source: t.source || '',
+      createdAt: t.startedAt || (t.time instanceof Date ? t.time.getTime() : Date.now()),
+      completedAt: t.completedAt || null,
+    });
+  });
+}
+
+function renderClaudeQueue() {
+  const list = $('claude-queue-list');
+  if (!list) return;
+  const entries = Object.values(claudeQueueEntries).sort(function(a, b) {
+    return (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
+  }).slice(0, 30);
+  if (entries.length === 0) {
+    list.innerHTML = '<div class="mc-empty">No Claude Code tasks yet.</div>';
+    return;
+  }
+  list.innerHTML = entries.map(function(t) {
+    var cls = claudeStateClass(t.status);
+    var elapsed = t.completedAt
+      ? formatElapsed(t.completedAt - (t.createdAt || t.updatedAt || Date.now()))
+      : formatElapsed(Date.now() - (t.createdAt || t.updatedAt || Date.now()));
+    var meta = (t.source ? 'source: ' + t.source + ' · ' : '') + elapsed;
+    return '<div class="cq-entry ' + esc(cls) + '">' +
+      '<div class="cq-top"><span class="cq-id">' + esc(t.id) + '</span><span class="cq-state">' + esc(claudeStateLabel(t.status)) + '</span></div>' +
+      '<div class="cq-row"><span class="cq-label">task</span><div class="cq-text">' + esc(t.text || t.id) + '</div></div>' +
+      (t.result ? '<div class="cq-row"><span class="cq-label">result</span><div class="cq-text cq-result">' + esc(t.result) + '</div></div>' : '') +
+      '<div class="cq-row"><span class="cq-label">status</span><div class="cq-text cq-meta">' + esc(meta) + '</div></div>' +
+      '</div>';
+  }).join('');
+}
+
+function clearClaudeQueue() {
+  Object.keys(claudeQueueEntries).forEach(function(k) {
+    var t = claudeQueueEntries[k] || {};
+    var cls = claudeStateClass(t.status);
+    if (cls === 'done' || cls === 'error') {
+      delete claudeQueueEntries[k];
+      delete taskMap[k];
+      clearedTaskIds.add(k);
+      expandedTasks.delete(k);
+      knownTaskIds.delete(k);
+    }
+  });
+  persistClearedTaskIds();
+  persistTaskMap();
+  persistExpanded();
+  renderTasks();
+  renderClaudeQueue();
+}
+window.clearClaudeQueue = clearClaudeQueue;
 
 function updateActivityStatusChips(snap) {
   if (!snap) return;
@@ -1512,6 +1829,7 @@ async function resolveTaskResult(apiBase, taskId, result) {
 const PERSIST_KEY_TASKS = 'sutando-taskmap-v1';
 const PERSIST_KEY_EXPAND = 'sutando-expanded-v1';
 const PERSIST_KEY_SHOW_DONE = 'sutando-show-done-v1';
+const PERSIST_KEY_CLEARED_TASKS = 'sutando-cleared-task-ids-v1';
 // Default-hide done tasks. With Tasks growing to top-30, completed work was
 // crowding out active items and the watcher-glance use case ("what's still
 // running?") got lost. Toggle persists across reloads.
@@ -1546,14 +1864,36 @@ function loadPersistedExpanded() {
     return new Set(JSON.parse(raw));
   } catch { return new Set(); }
 }
+function loadClearedTaskIds() {
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY_CLEARED_TASKS);
+    if (!raw) return new Set();
+    return new Set(JSON.parse(raw));
+  } catch { return new Set(); }
+}
 function persistTaskMap() {
   try { localStorage.setItem(PERSIST_KEY_TASKS, JSON.stringify(taskMap)); } catch {}
 }
 function persistExpanded() {
   try { localStorage.setItem(PERSIST_KEY_EXPAND, JSON.stringify(Array.from(expandedTasks))); } catch {}
 }
+function persistClearedTaskIds() {
+  try { localStorage.setItem(PERSIST_KEY_CLEARED_TASKS, JSON.stringify(Array.from(clearedTaskIds).slice(-500))); } catch {}
+}
+function isClearedCompletedTask(taskId, status) {
+  return clearedTaskIds.has(taskId) && (status === 'done' || status === 'error' || status === 'failed');
+}
 const taskMap = window.taskMap = loadPersistedTaskMap();
+const clearedTaskIds = window.clearedTaskIds = loadClearedTaskIds();
+Object.keys(taskMap).forEach(function(id) {
+  if (isClearedCompletedTask(id, taskMap[id]?.status)) delete taskMap[id];
+});
 function updateTask(taskId, status, text, result) {
+  if (isClearedCompletedTask(taskId, status)) return;
+  if (status === 'working' || status === 'pending') {
+    clearedTaskIds.delete(taskId);
+    persistClearedTaskIds();
+  }
   const existing = taskMap[taskId] || {};
   const isNew = !existing.status;
   taskMap[taskId] = normalizeTaskEntry(existing, {
@@ -1561,6 +1901,14 @@ function updateTask(taskId, status, text, result) {
     text: text || existing.text,
     result: result || existing.result || '',
     source: existing.source,
+  });
+  upsertClaudeQueueTask(taskId, {
+    status,
+    text: text || existing.text || taskId,
+    result: result || existing.result || '',
+    source: existing.source || 'voice',
+    createdAt: taskMap[taskId].startedAt,
+    completedAt: taskMap[taskId].completedAt,
   });
   logActivity('task', taskId + ' → ' + status + (text ? ': ' + String(text).slice(0, 72) : ''), status === 'error' ? 'err' : status === 'done' ? 'ok' : 'info');
   // Auto-switch to tasks tab if new task arrives and user is on starter
@@ -1804,6 +2152,7 @@ function showToast(msg) {
   setTimeout(() => { if (el.parentNode) el.remove(); }, 4000);
 }
 const knownTaskIds = new Set(Object.keys(taskMap));
+setTimeout(syncClaudeQueueFromTaskMap, 0);
 
 // ─── Poll agent API for task status ───────────────────────
 let taskPollTimer = null;
@@ -1817,6 +2166,11 @@ function startTaskPolling() {
       // Replace taskMap with API data (preserve expanded state and WebSocket-delivered results)
       const apiTasks = new Set();
       for (const t of (data.tasks || [])) {
+        if (isClearedCompletedTask(t.id, t.status)) continue;
+        if (t.status === 'working' || t.status === 'pending') {
+          clearedTaskIds.delete(t.id);
+          persistClearedTaskIds();
+        }
         apiTasks.add(t.id);
         const existing = taskMap[t.id] || {};
         // Toast for new tasks
@@ -1853,6 +2207,14 @@ function startTaskPolling() {
           taskMap[t.id].startedAt = t.time * 1000;
           taskMap[t.id].time = new Date(t.time * 1000);
         }
+        upsertClaudeQueueTask(t.id, {
+          status: t.status,
+          text: t.text || existing.text || t.id,
+          result: t.result || existing.result || '',
+          source: t.source || existing.source || '',
+          createdAt: taskMap[t.id].startedAt,
+          completedAt: taskMap[t.id].completedAt,
+        });
       }
       // Remove tasks no longer in API (stale)
       for (const id of Object.keys(taskMap)) {
@@ -1862,6 +2224,7 @@ function startTaskPolling() {
       }
       persistTaskMap();
       renderTasks();
+      renderClaudeQueue();
       // Update system status indicators
       const statusParts = [];
       if (data.claude === false) statusParts.push('<span style="color:#e94560">brain offline</span>');
@@ -2205,18 +2568,21 @@ function stopMic() {
 }
 
 // ─── WebSocket ────────────────────────────────────────────
-function connectWs() {
-  const url = $('wsUrl').value.trim();
-  if (!url) return;
-
-  dbg('Connecting to ' + url);
-  setStatus('Connecting...', '');
-
-  ws = new WebSocket(url);
+function attachWsHandlers(startMicrophone) {
+  if (!ws) return;
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = async () => {
     dbg('WebSocket connected');
+    if (!startMicrophone) {
+      connected = true;
+      voiceLlmReady = false;
+      setStatus('Realtime socket connected', 'live');
+      fetch('/mute-state?muted=true&voice=true').catch(() => {});
+      reportAgentState();
+      document.body.classList.add('voice-active');
+      return;
+    }
     setStatus('Starting mic...', 'live');
     try {
       await startMic();
@@ -2250,8 +2616,97 @@ function connectWs() {
     }
   };
 
-  ws.onmessage = (event) => {
+  ws.onmessage = handleWsMessage;
+
+  ws.onclose = handleWsClose;
+
+  ws.onerror = () => {
+    dbg('WS error', 'err');
+    setStatus('Connection failed', 'error');
+    addSystem('Connection error — is the agent server running?');
+  };
+}
+
+function connectWs() {
+  const url = $('wsUrl').value.trim();
+  if (!url) return;
+
+  dbg('Connecting to ' + url);
+  setStatus('Connecting...', '');
+
+  ws = new WebSocket(url);
+  attachWsHandlers(true);
+}
+
+function connectTextOnlyWs() {
+  return new Promise((resolve, reject) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      resolve(ws);
+      return;
+    }
+    const url = $('wsUrl').value.trim();
+    if (!url) {
+      reject(new Error('Missing WebSocket URL'));
+      return;
+    }
+    dbg('Connecting text-only realtime to ' + url);
+    const nextWs = new WebSocket(url);
+    ws = nextWs;
+    attachWsHandlers(false);
+    const timeout = setTimeout(() => {
+      if (nextWs.readyState !== WebSocket.OPEN) {
+        try { nextWs.close(); } catch {}
+        reject(new Error('Realtime text connection timeout'));
+      }
+    }, 5000);
+    nextWs.addEventListener('open', () => {
+      clearTimeout(timeout);
+      resolve(nextWs);
+    }, { once: true });
+    nextWs.addEventListener('error', () => {
+      clearTimeout(timeout);
+      reject(new Error('Realtime text connection failed'));
+    }, { once: true });
+  });
+}
+
+function waitForRealtimeReady(socket) {
+  return new Promise((resolve, reject) => {
+    if (voiceLlmReady) {
+      resolve(socket);
+      return;
+    }
+    const timeout = setTimeout(() => {
+      socket.removeEventListener('message', onMessage);
+      reject(new Error('Realtime session did not become ready'));
+    }, 10000);
+    function onMessage(event) {
+      if (event.data instanceof ArrayBuffer) return;
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'session.config') {
+          clearTimeout(timeout);
+          socket.removeEventListener('message', onMessage);
+          resolve(socket);
+        } else if (msg.type === 'error') {
+          clearTimeout(timeout);
+          socket.removeEventListener('message', onMessage);
+          reject(new Error(msg.error?.message || msg.message || 'Realtime error'));
+        }
+      } catch {}
+    }
+    socket.addEventListener('message', onMessage);
+  });
+}
+
+function handleWsMessage(event) {
     if (event.data instanceof ArrayBuffer) {
+      updateModelCall(pendingRealtimeCallId, {
+        state: 'receiving',
+        output: '[audio response: ' + event.data.byteLength + ' bytes]',
+        detail: 'Realtime audio received',
+      });
+      pendingRealtimeHadAssistant = true;
       voiceLlmReady = true;
       bytesRecv += event.data.byteLength;
       audioChunksRecv++;
@@ -2265,12 +2720,22 @@ function connectWs() {
         dbg('Recv: ' + JSON.stringify(msg), 'event');
 
         if (msg.type === 'session.config' && msg.audioFormat) {
+          voiceLlmReady = true;
+          setStatus(connected ? 'Realtime ready' : 'Text only', connected ? 'live' : '');
           INPUT_RATE = msg.audioFormat.inputSampleRate;
           OUTPUT_RATE = msg.audioFormat.outputSampleRate;
           dbg('Audio format configured: input=' + INPUT_RATE + 'Hz output=' + OUTPUT_RATE + 'Hz', 'event');
         } else if (msg.type === 'transcript') {
           handleTranscript(msg.role, msg.text, msg.partial !== false);
         } else if (msg.type === 'turn.end') {
+          if (pendingRealtimeRouteEl) {
+            var elapsed = pendingRealtimeStartedAt ? Math.max(0, Date.now() - pendingRealtimeStartedAt) : 0;
+            if (pendingRealtimeHadAssistant) {
+              markRealtimeComplete('ok', 'Realtime turn ended' + (elapsed ? ' after ' + formatElapsed(elapsed) : ''));
+            } else {
+              markRealtimeComplete('err', 'Turn ended with no assistant response' + (elapsed ? ' after ' + formatElapsed(elapsed) : ''));
+            }
+          }
           // Remove orphaned Chrome STT interim — if server never finalized it,
           // it's echo from the assistant's voice picked up by mic.
           if (currentUserEl && currentUserEl.classList.contains('t-interim')) {
@@ -2280,6 +2745,9 @@ function connectWs() {
           currentAssistantEl = null;
           serverUserTextReceived = false;
         } else if (msg.type === 'turn.interrupted') {
+          if (pendingRealtimeRouteEl) {
+            markRealtimeComplete('err', 'Realtime turn interrupted');
+          }
           for (const s of activeSources) {
             try { s.stop(); } catch {}
           }
@@ -2355,6 +2823,10 @@ function connectWs() {
           else if (msg.command === 'expand_tasks') { Object.keys(taskMap).forEach(id => { if (taskMap[id].result) expandedTasks.add(id); }); renderTasks(); }
         } else if (msg.type === 'gui.notification') {
           addSystem('[notification] ' + (msg.payload?.message || ''));
+        } else if (msg.type === 'error') {
+          var errMsg = msg.error?.message || msg.message || 'Realtime error';
+          markRealtimeComplete('err', errMsg);
+          addSystem('Realtime error: ' + errMsg);
         } else if (msg.type === 'image') {
           const imgEl = document.createElement('div');
           imgEl.className = 't-entry t-system';
@@ -2399,10 +2871,13 @@ function connectWs() {
         dbg('Bad JSON text frame', 'warn');
       }
     }
-  };
+}
 
-  ws.onclose = (e) => {
+function handleWsClose(e) {
     dbg('WS closed: code=' + e.code + ' reason=' + e.reason);
+    if (pendingRealtimeRouteEl) {
+      markRealtimeComplete('err', 'Realtime connection closed');
+    }
     // Server-initiated clean close (goodbye code 4000) or user clicked Disconnect
     const wasCleanDisconnect = !connected || e.code === 4000;
     // Always reset connected here so subsequent toggle calls (from auto-
@@ -2438,13 +2913,6 @@ function connectWs() {
         }
       }, 3000);
     }
-  };
-
-  ws.onerror = () => {
-    dbg('WS error', 'err');
-    setStatus('Connection failed', 'error');
-    addSystem('Connection error — is the agent server running?');
-  };
 }
 
 function doCleanup() {
@@ -3134,7 +3602,7 @@ window.showNotesInDR = showNotesInDR;
 window.showNoteInDR = showNoteInDR;
 
 // ─── Text input ──────────────────────────────────────────
-function sendText() {
+async function sendText() {
   const input = $('textInput');
   const text = input.value.trim();
   if (!text) return;
@@ -3148,61 +3616,142 @@ function sendText() {
   scrollTranscript(true);
   input.value = '';
 
-  if (ws && ws.readyState === WebSocket.OPEN && voiceLlmReady) {
-    // Voice connected and Gemini is responding — send through voice agent
-    ws.send(JSON.stringify({ type: 'text_input', text }));
-    dbg('Sent text via voice: "' + text.slice(0, 50) + '"', 'event');
-  } else {
-    // Voice off, or Gemini never came up (geo-block etc.) — task bridge via core
-    if (ws && ws.readyState === WebSocket.OPEN && !voiceLlmReady) {
-      addSystem('Voice backend unavailable — sending via text task bridge.');
-      logActivity('delegate', 'Voice dead → task bridge (typed)', 'warn');
-    }
-    logActivity('delegate', 'POST /task: ' + text.slice(0, 80), 'info');
-    const taskStarted = Date.now();
-    const waitingEl = document.createElement('div');
-    waitingEl.className = 't-entry t-assistant t-pending';
-    waitingEl.innerHTML = '<span class="t-elapsed" data-started="' + taskStarted + '">Working… 0s</span>';
-    $('transcript').appendChild(waitingEl);
-    scrollTranscript(true);
-    // Voice disconnected — route through task bridge (same as Telegram/Discord)
-    const apiBase = 'http://' + location.hostname + ':${AGENT_API_PORT}';
-    fetch(apiBase + '/task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'web', task: text }) })
-      .then(r => r.json())
-      .then(d => {
-        if (d.ok) {
-          dbg('Sent text via task bridge: ' + d.task_id, 'event');
-          logActivity('delegate', 'Task accepted ' + d.task_id + ' → core queue', 'ok');
-          // Poll for result
-          const poll = setInterval(() => {
-            fetch(apiBase + '/result/' + d.task_id).then(r => r.json()).then(async (r) => {
-              if (r.status !== 'completed') return;
-              if (isDedupedStub(r.result, d.task_id)) return;
-              var resolved = await resolveTaskResult(apiBase, d.task_id, r.result);
-              if (!resolved) return;
-              clearInterval(poll);
-              const elapsed = Date.now() - taskStarted;
-              if (waitingEl.parentNode) waitingEl.remove();
-              logActivity('task', d.task_id + ' completed in ' + formatElapsed(elapsed), 'ok');
-              const re = renderAssistantResult(resolved);
-              appendDurationFooter(re, elapsed);
-              $('transcript').appendChild(re);
-              scrollTranscript();
-            }).catch(() => {});
-          }, 2000);
-        } else if (waitingEl.parentNode) {
-          waitingEl.remove();
-        }
-      })
-      .catch(() => {
-        if (waitingEl.parentNode) waitingEl.remove();
-        logActivity('delegate', 'Agent API unreachable on :${AGENT_API_PORT}', 'err');
-        const err = document.createElement('div');
-        err.className = 't-entry t-assistant';
-        err.textContent = '(Failed to send — agent API not reachable)';
-        $('transcript').appendChild(err);
-      });
+  const routeEl = addRouteStatus(realtimeRouteLabel(), 'via voice-agent:' + WS_PORT);
+  routeEl.dataset.routeLabel = realtimeRouteLabel();
+  const realtimeCallId = addModelCall(text, realtimeRouteLabel(), 'via voice-agent:' + WS_PORT);
+  try {
+    const socket = await waitForRealtimeReady((ws && ws.readyState === WebSocket.OPEN) ? ws : await connectTextOnlyWs());
+    // Browser text should use the live realtime model whenever the realtime
+    // socket is reachable. Text-only connect avoids requiring mic permission.
+    socket.send(JSON.stringify({ type: 'text_input', text }));
+    voiceLlmReady = true;
+    startRealtimePending(routeEl, realtimeCallId);
+    markRouteStatus(routeEl, 'pending', 'sent to realtime; waiting for response');
+    updateModelCall(realtimeCallId, { state: 'pending', detail: 'sent to realtime; waiting for response' });
+    dbg('Sent text via realtime: "' + text.slice(0, 50) + '"', 'event');
+    logActivity('delegate', 'Realtime text: ' + text.slice(0, 80), 'ok');
+    return;
+  } catch (e) {
+    markRouteStatus(routeEl, 'err', 'Realtime unavailable; falling back');
+    updateModelCall(realtimeCallId, {
+      state: 'err',
+      detail: 'Realtime unavailable; falling back' + (e && e.message ? ': ' + e.message : ''),
+      completedAt: new Date().toISOString(),
+    });
+    dbg('Realtime text send failed: ' + (e && e.message ? e.message : e), 'err');
+    logActivity('delegate', 'Realtime send failed → task bridge', 'warn');
   }
+
+  sendTextViaTaskBridge(text);
+}
+
+function sendTextViaTaskBridge(text) {
+  const routeEl = addRouteStatus(taskBridgeRouteLabel(), 'via agent-api:${AGENT_API_PORT}');
+  routeEl.dataset.routeLabel = taskBridgeRouteLabel();
+  const taskCallId = addModelCall(text, taskBridgeRouteLabel(), 'via agent-api:${AGENT_API_PORT}');
+  const submittingId = 'submitting-' + Date.now();
+  let queueTaskId = submittingId;
+  upsertClaudeQueueTask(submittingId, {
+    status: 'pending',
+    text: text,
+    source: 'web',
+    result: '',
+    createdAt: Date.now(),
+  });
+  logActivity('delegate', 'POST /task: ' + text.slice(0, 80), 'info');
+  const taskStarted = Date.now();
+  const waitingEl = document.createElement('div');
+  waitingEl.className = 't-entry t-assistant t-pending';
+  waitingEl.innerHTML = '<span class="t-elapsed" data-started="' + taskStarted + '">Working… 0s</span>';
+  $('transcript').appendChild(waitingEl);
+  scrollTranscript(true);
+  const apiBase = 'http://' + location.hostname + ':${AGENT_API_PORT}';
+  fetch(apiBase + '/task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'web', task: text }) })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        dbg('Sent text via task bridge: ' + d.task_id, 'event');
+        logActivity('delegate', 'Task accepted ' + d.task_id + ' → core queue', 'ok');
+        updateModelCall(taskCallId, { state: 'pending', detail: 'task accepted: ' + d.task_id });
+        delete claudeQueueEntries[submittingId];
+        queueTaskId = d.task_id;
+        upsertClaudeQueueTask(d.task_id, {
+          status: 'pending',
+          text: text,
+          source: 'web',
+          result: '',
+          createdAt: taskStarted,
+        });
+        // Poll for result
+        const poll = setInterval(() => {
+          fetch(apiBase + '/result/' + d.task_id).then(r => r.json()).then(async (r) => {
+            if (r.status !== 'completed') return;
+            if (isDedupedStub(r.result, d.task_id)) return;
+            var resolved = await resolveTaskResult(apiBase, d.task_id, r.result);
+            if (!resolved) return;
+            clearInterval(poll);
+            const elapsed = Date.now() - taskStarted;
+            if (waitingEl.parentNode) waitingEl.remove();
+            markRouteStatus(routeEl, 'ok', 'Task result received');
+            updateModelCall(taskCallId, {
+              state: 'ok',
+              output: String(resolved),
+              detail: 'Task result received from ' + d.task_id + ' in ' + formatElapsed(elapsed),
+              completedAt: new Date().toISOString(),
+            });
+            upsertClaudeQueueTask(d.task_id, {
+              status: 'done',
+              text: text,
+              result: String(resolved),
+              source: 'web',
+              createdAt: taskStarted,
+              completedAt: Date.now(),
+            });
+            logActivity('task', d.task_id + ' completed in ' + formatElapsed(elapsed), 'ok');
+            const re = renderAssistantResult(resolved);
+            appendDurationFooter(re, elapsed);
+            $('transcript').appendChild(re);
+            scrollTranscript();
+          }).catch(() => {});
+        }, 2000);
+      } else if (waitingEl.parentNode) {
+        waitingEl.remove();
+        markRouteStatus(routeEl, 'err', 'Task API rejected request');
+        updateModelCall(taskCallId, {
+          state: 'err',
+          detail: 'Task API rejected request' + (d.error ? ': ' + d.error : ''),
+          completedAt: new Date().toISOString(),
+        });
+        upsertClaudeQueueTask(queueTaskId, {
+          status: 'error',
+          text: text,
+          result: d.error || 'Task API rejected request',
+          source: 'web',
+          completedAt: Date.now(),
+        });
+      }
+    })
+    .catch(() => {
+      if (waitingEl.parentNode) waitingEl.remove();
+      markRouteStatus(routeEl, 'err', 'Agent API unreachable');
+      updateModelCall(taskCallId, {
+        state: 'err',
+        detail: 'Agent API unreachable',
+        completedAt: new Date().toISOString(),
+      });
+      upsertClaudeQueueTask(queueTaskId, {
+        status: 'error',
+        text: text,
+        result: 'Agent API unreachable',
+        source: 'web',
+        completedAt: Date.now(),
+      });
+      logActivity('delegate', 'Agent API unreachable on :${AGENT_API_PORT}', 'err');
+      const err = document.createElement('div');
+      err.className = 't-entry t-assistant';
+      err.textContent = '(Failed to send — agent API not reachable)';
+      $('transcript').appendChild(err);
+    });
 }
 
 // ─── Dynamic region: contextual generative UI ────────────
