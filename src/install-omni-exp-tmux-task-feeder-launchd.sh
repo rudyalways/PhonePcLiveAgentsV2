@@ -56,6 +56,9 @@ PID_FILE="\$STATE/omni-exp-watch-tasks-to-tmux.pid"
 LOCK_DIR="\$STATE/omni-exp-watch-tasks-to-tmux.lock"
 POLL_S="\${SUTANDO_TMUX_TASK_FEEDER_POLL_S:-1}"
 STUCK_S="\${SUTANDO_TMUX_TASK_FEEDER_STUCK_S:-60}"
+# After this many re-nudges without a done-marker, abandon and drain the next inbox
+# item (prevents one orphan from head-of-line blocking Safari/etc.).
+MAX_NUDGES="\${SUTANDO_TMUX_TASK_FEEDER_MAX_NUDGES:-3}"
 mkdir -p "\$INBOX" "\$STATE" "\$DONE_DIR"
 if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
   old="\$(cat "\$PID_FILE" 2>/dev/null || true)"
@@ -98,23 +101,34 @@ oldest_pending() {
   return 1
 }
 # Do not seed from \$TASKS here — LaunchAgent gets Operation not permitted on Documents.
-inflight_base=""; inflight_at=0
+inflight_base=""; inflight_at=0; inflight_nudges=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do session_ready && break; sleep 1; done
 while true; do
   if [[ -n "\$inflight_base" ]] && is_done "\$inflight_base"; then
     mark_done "\$inflight_base"
     echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) done \$inflight_base" >>"\$LOG"
-    inflight_base=""; inflight_at=0
+    inflight_base=""; inflight_at=0; inflight_nudges=0
   fi
   base="\$(oldest_pending || true)"
   if [[ -z "\${base:-}" ]]; then sleep "\$POLL_S"; continue; fi
   now=\$(date +%s)
   if [[ -n "\$inflight_base" ]] && ! is_done "\$inflight_base"; then
     if (( now - inflight_at < STUCK_S )); then sleep "\$POLL_S"; continue; fi
-    echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) re-nudge \$inflight_base" >>"\$LOG"
+    inflight_nudges=\$((inflight_nudges + 1))
+    if (( inflight_nudges > MAX_NUDGES )); then
+      echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) abandon \$inflight_base after \${MAX_NUDGES} nudges (unblock inbox)" >>"\$LOG"
+      mark_done "\$inflight_base"
+      inflight_base=""; inflight_at=0; inflight_nudges=0
+      sleep "\$POLL_S"
+      continue
+    fi
+    echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) re-nudge \$inflight_base (\$inflight_nudges/\$MAX_NUDGES)" >>"\$LOG"
     base="\$inflight_base"
   fi
-  if inject "\$base"; then inflight_base="\$base"; inflight_at=\$(date +%s); fi
+  if inject "\$base"; then
+    if [[ "\$base" != "\$inflight_base" ]]; then inflight_nudges=0; fi
+    inflight_base="\$base"; inflight_at=\$(date +%s)
+  fi
   sleep "\$POLL_S"
 done
 EOF

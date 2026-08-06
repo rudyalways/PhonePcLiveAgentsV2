@@ -18,6 +18,11 @@ if [ -f "$REPO/.env" ]; then
     _self_dev_was_set=1
     _self_dev_ambient="$SUTANDO_SELF_DEVELOPMENT_ENABLED"
   fi
+  _proactive_was_set=0
+  if [ "${SUTANDO_PROACTIVE_LOOP_ENABLED+x}" = x ]; then
+    _proactive_was_set=1
+    _proactive_ambient="$SUTANDO_PROACTIVE_LOOP_ENABLED"
+  fi
   set -a
   # shellcheck disable=SC1091
   source "$REPO/.env"
@@ -25,7 +30,10 @@ if [ -f "$REPO/.env" ]; then
   if [ "$_self_dev_was_set" = 1 ]; then
     export SUTANDO_SELF_DEVELOPMENT_ENABLED="$_self_dev_ambient"
   fi
-  unset _self_dev_was_set _self_dev_ambient
+  if [ "$_proactive_was_set" = 1 ]; then
+    export SUTANDO_PROACTIVE_LOOP_ENABLED="$_proactive_ambient"
+  fi
+  unset _self_dev_was_set _self_dev_ambient _proactive_was_set _proactive_ambient
 fi
 
 runtime="$(bash "$REPO/scripts/sutando-config.sh" core-runtime)" || {

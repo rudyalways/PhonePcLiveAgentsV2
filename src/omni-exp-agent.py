@@ -223,6 +223,157 @@ def ensure_tmux_task_feeder() -> None:
         logger.warning("Could not start tmux task feeder: %s", e)
 
 
+_PANE_ERR_CACHE: dict[str, Any] = {"ts": 0.0, "error": "", "snippet": ""}
+
+
+def probe_core_pane_error() -> dict[str, str]:
+    """Best-effort read of sutando-core tmux for API/auth failures (cached ~8s)."""
+    now = time.time()
+    if now - float(_PANE_ERR_CACHE.get("ts") or 0) < 8.0:
+        return {
+            "error": str(_PANE_ERR_CACHE.get("error") or ""),
+            "snippet": str(_PANE_ERR_CACHE.get("snippet") or ""),
+        }
+    error = ""
+    snippet = ""
+    try:
+        out = subprocess.check_output(
+            [
+                "tmux",
+                "-S",
+                TMUX_SOCKET,
+                "capture-pane",
+                "-t",
+                TMUX_SESSION,
+                "-p",
+                "-S",
+                "-30",
+            ],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+        low = out.lower()
+        if "403" in out and ("key" in low or "limit" in low or "openrouter" in low):
+            error = "openrouter_403"
+        elif "api error" in low or "please run /login" in low:
+            error = "api_error"
+        elif "rate limit" in low or "429" in out:
+            error = "rate_limit"
+        # Prefer error-bearing lines for HUD; else short tail (no secrets).
+        lines = [
+            ln.strip()
+            for ln in out.splitlines()
+            if ln.strip()
+            and "sk-" not in ln
+            and "Bearer" not in ln
+            and not ln.strip().startswith("─")
+            and "bypass permissions" not in ln.lower()
+        ]
+        err_lines = [
+            ln
+            for ln in lines
+            if any(
+                t in ln.lower()
+                for t in ("403", "api error", "rate limit", "openrouter", "please run /login", "429")
+            )
+        ]
+        pick = err_lines[-2:] if err_lines else lines[-3:]
+        snippet = " | ".join(pick)[:220]
+    except Exception:
+        pass
+    _PANE_ERR_CACHE["ts"] = now
+    _PANE_ERR_CACHE["error"] = error
+    _PANE_ERR_CACHE["snippet"] = snippet
+    return {"error": error, "snippet": snippet}
+
+
+def probe_feeder_hint(task_id: str) -> str:
+    """Last feeder-log line mentioning this task (inject / re-nudge / abandon / done)."""
+    base = task_id if task_id.endswith(".txt") else f"{task_id}.txt"
+    log = (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Sutando"
+        / "omni-exp-feeder"
+        / "omni-exp-watch-tasks-to-tmux.log"
+    )
+    try:
+        if not log.is_file():
+            return "feeder_log_missing"
+        # Read last ~8KB only.
+        data = log.read_bytes()[-8192:].decode("utf-8", errors="replace")
+        hits = [ln.strip() for ln in data.splitlines() if base in ln]
+        if not hits:
+            inbox = (
+                Path.home()
+                / "Library"
+                / "Application Support"
+                / "Sutando"
+                / "omni-exp-feeder"
+                / "inbox"
+                / base
+            )
+            return "inbox_pending" if inbox.is_file() else "no_feeder_line"
+        return hits[-1][:160]
+    except Exception as e:
+        return f"feeder_read_err:{e}"
+
+
+def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
+    """Compact pipeline probe for HUD — answers 'is core actually doing work?'."""
+    tid = task_id if task_id.startswith("task-") else f"task-{task_id}"
+    task_path = TASKS_DIR / f"{tid}.txt"
+    archive_path = TASKS_DIR / "archive" / f"{tid}.txt"
+    result_path = RESULTS_DIR / f"{tid}.txt"
+    core = probe_core_status()
+    feeder = probe_feeder_hint(tid)
+    pane_err = str(core.get("pane_error") or "")
+    on_disk = task_path.is_file()
+    archived = archive_path.is_file()
+    has_result = result_path.is_file()
+
+    if pane_err == "openrouter_403":
+        verdict = "BLOCKED: OpenRouter 403 (key/quota) — core is NOT executing tools"
+    elif pane_err == "api_error":
+        verdict = "BLOCKED: core API error (check /login or provider key)"
+    elif pane_err == "rate_limit":
+        verdict = "BLOCKED: rate limit — core stalling on API"
+    elif not core.get("alive"):
+        verdict = "BLOCKED: sutando-core DOWN — task sits on disk"
+    elif phase == "task_written" and on_disk and "inject" not in feeder.lower() and "nudge" not in feeder.lower():
+        verdict = "WAITING: task on disk; feeder has not injected into tmux yet"
+    elif phase == "task_written" and on_disk:
+        verdict = "WAITING: injected/nudged but core has not claimed the task file"
+    elif phase == "cc_processing":
+        verdict = "RUNNING?: task claimed (file gone/archived) — waiting for results/"
+    else:
+        verdict = f"phase={phase} · core={'up' if core.get('alive') else 'DOWN'}"
+
+    line = (
+        f"{verdict} · feeder={feeder[:80]} · "
+        f"disk={'yes' if on_disk else 'no'} archive={'yes' if archived else 'no'} "
+        f"result={'yes' if has_result else 'no'}"
+    )
+    if core.get("pane_snippet") and pane_err:
+        line += f" · pane: {str(core.get('pane_snippet'))[:100]}"
+    return {
+        "verdict": verdict,
+        "line": line[:320],
+        "phase": phase,
+        "core_alive": bool(core.get("alive")),
+        "pane_error": pane_err,
+        "pane_snippet": str(core.get("pane_snippet") or "")[:160],
+        "feeder": feeder[:160],
+        "task_on_disk": on_disk,
+        "archived": archived,
+        "has_result": has_result,
+        "pending_tasks": core.get("pending_tasks"),
+        "core_step": core.get("step") or "",
+    }
+
+
 def probe_core_status() -> dict[str, Any]:
     """Read workspace heartbeat + core-status.json (same signals as health-check)."""
     alive_path = WORKSPACE / "state" / "cores" / f"{HOST_LABEL}.alive"
@@ -258,6 +409,7 @@ def probe_core_status() -> dict[str, Any]:
         )
     except Exception:
         pass
+    pane = probe_core_pane_error()
     return {
         "alive": alive,
         "age_s": None if age_s is None else round(age_s, 1),
@@ -268,6 +420,8 @@ def probe_core_status() -> dict[str, Any]:
         "can_start": ALLOW_START_CORE and START_CLI.is_file(),
         "can_stop": ALLOW_START_CORE,
         "how": f"bash {START_CLI.relative_to(REPO)}" if START_CLI.is_file() else "bash src/startup.sh",
+        "pane_error": pane.get("error") or "",
+        "pane_snippet": pane.get("snippet") or "",
     }
 
 
@@ -597,17 +751,27 @@ class PhoneSession:
 
     async def enqueue_speak(self, item: SpeakItem) -> None:
         self.speak_queue.push(item)
-        await self.work_event(
-            "speak_queued",
-            task_id=item.task_id,
-            queue_len=len(self.speak_queue),
-            merge=self.speak_queue.merge,
-            preview=(item.preview or "")[:80],
-        )
+        kind = ""
+        if isinstance(item.meta, dict):
+            kind = str(item.meta.get("kind") or "")
+        # Fake-done nudges are model-correction prompts, not user tasks — Activity
+        # only. Emitting work_event without task_id used to spawn spam cards.
+        if kind != "fake_done_nudge":
+            await self.work_event(
+                "speak_queued",
+                task_id=item.task_id,
+                queue_len=len(self.speak_queue),
+                merge=self.speak_queue.merge,
+                preview=(item.preview or "")[:80],
+            )
         await self.activity(
             "work",
-            f"Speak buffered ({self.speak_queue.merge}) queue={len(self.speak_queue)}"
-            + (f" · {item.task_id}" if item.task_id else ""),
+            (
+                f"Fake-done nudge buffered (q={len(self.speak_queue)})"
+                if kind == "fake_done_nudge"
+                else f"Speak buffered ({self.speak_queue.merge}) queue={len(self.speak_queue)}"
+                + (f" · {item.task_id}" if item.task_id else "")
+            ),
         )
         await self.drain_speak_queue()
 
@@ -1135,6 +1299,8 @@ class PhoneSession:
             "started": now,
             "task": task[:240],
             "last_hb": now,
+            "last_debug_act": 0.0,
+            "last_debug_sig": "",
             "source": source,
             "call_id": call_id,
             "phase": "task_written",
@@ -1192,6 +1358,14 @@ class PhoneSession:
                 f"⚠ Core DOWN — {task_id} is queued on disk but nothing will run it. "
                 f"Tap Start core or run: {core.get('how')}",
             )
+        elif core.get("pane_error"):
+            await self.activity(
+                "error",
+                f"⚠ Core pane error ({core.get('pane_error')}): "
+                f"{str(core.get('pane_snippet') or '')[:140]}",
+            )
+        dbg = pipeline_debug(task_id, "task_written")
+        await self.activity("work", f"Pipeline: {dbg['line']}", task_id=task_id)
         return task_id
 
     async def poll_results_once(self) -> None:
@@ -1233,6 +1407,7 @@ class PhoneSession:
                 phase = str(meta.get("phase") or "task_written")
                 if claimed and phase not in ("cc_processing", "result_file", "result_processed"):
                     meta["phase"] = "cc_processing"
+                    phase = "cc_processing"
                     await self.work_event(
                         "cc_processing",
                         task_id=task_id,
@@ -1250,15 +1425,31 @@ class PhoneSession:
                 last_hb = float(meta.get("last_hb") or 0)
                 if now - last_hb >= WORK_HEARTBEAT_S:
                     meta["last_hb"] = now
-                    # Sticky chip / task-list timer only — no Activity spam.
+                    dbg = pipeline_debug(task_id, phase)
+                    # Sticky chip / task-list timer + pipeline debug for HUD.
                     await self.work_event(
                         "processing",
                         task_id=task_id,
                         call_id=call_id,
                         elapsed_ms=elapsed_ms,
                         task=task_snippet,
-                        phase=str(meta.get("phase") or "task_written"),
+                        phase=phase,
+                        debug=dbg,
+                        debug_line=dbg.get("line"),
                     )
+                    # Activity: ~10s or when verdict/pane error changes (not every 2s).
+                    sig = f"{dbg.get('verdict')}|{dbg.get('pane_error')}|{dbg.get('feeder')}"
+                    last_act = float(meta.get("last_debug_act") or 0)
+                    if sig != meta.get("last_debug_sig") or now - last_act >= 10.0:
+                        meta["last_debug_act"] = now
+                        meta["last_debug_sig"] = sig
+                        kind = "error" if dbg.get("pane_error") or not dbg.get("core_alive") else "work"
+                        await self.activity(
+                            kind,
+                            f"Pipeline [{_fmt_elapsed(elapsed)}]: {dbg.get('line')}",
+                            task_id=task_id,
+                            elapsed_ms=elapsed_ms,
+                        )
                 continue
 
             # Result file present: CC finished → omni consumes → speak.
@@ -1372,7 +1563,10 @@ async def result_poller(app: web.Application) -> None:
         if ticks % 8 == 0 and sessions:
             try:
                 core = probe_core_status()
-                sig = f"{core['alive']}:{core.get('age_s')}:{core.get('pending_tasks')}:{core.get('status')}"
+                sig = (
+                    f"{core['alive']}:{core.get('age_s')}:{core.get('pending_tasks')}:"
+                    f"{core.get('status')}:{core.get('pane_error')}"
+                )
                 if sig != last_core_sig:
                     last_core_sig = sig
                     for s in sessions:
