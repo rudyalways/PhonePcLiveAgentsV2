@@ -34,31 +34,49 @@ Per Chi 2026-05-23 Discord: "we can make a new skill and include everything we n
 
 The sequence below MUST run in this order. Each step is naturally idempotent, so re-invocation is safe.
 
-### Step 1 — Task orphan check (optional)
+**Hard rule — owner/omni work beats boot ceremony.** If `<workspace>/tasks/task-*.txt` exists at any point during `/startup` (including while `/schedule-crons` is mid-run), **stop cron registration**, process those tasks (oldest first: do the work, write matching `results/<basename>`), then resume. Never say "I'll finish schedule-crons first" while owner tasks wait — that is the 2026-08-06 omni stall class (core `.alive` but work stuck for minutes). Queued `TASK_FILE:` injections from the tmux feeder count as the same obligation.
+
+### Step 0 — Boot readiness sentinel
+
+`start-cli.sh` already wrote `<workspace>/state/core-booting.json`. Leave it until the end of this skill. Do **not** call `mark-ready` until Step 4.
+
+### Step 1 — Pending owner tasks (before orphan-check / crons)
+
+```bash
+WS="$(bash scripts/sutando-config.sh workspace)"
+ls -1tr "$WS/tasks"/task-*.txt 2>/dev/null
+```
+
+If any files are listed: process **all** of them now (oldest first). Only after `tasks/` has no remaining `task-*.txt` continue to Step 2. If none, continue immediately.
+
+### Step 2 — Task orphan check (optional)
 
 Invoke `/task-orphan-check` IF the skill is installed (i.e. `$CLAUDE_CONFIG_DIR/skills/task-orphan-check/` exists). This is the recovery half of the post-#1049 redesign: scan `<workspace>/tasks/` for orphan tasks left over from a crash mid-execution, cross-reference per-side-effect markers (e.g. PR #1048's `.sending` files), archive completed tasks, write recovery sentinels for stuck ones. See the skill itself for the full procedure.
 
 If the skill is not installed, skip silently. `/startup` works without it — every other step is independent.
 
-Note: this step runs BEFORE step 2 so that the watcher (started by step 2's downstream) doesn't pick up an orphan task before recovery has classified it.
+Note: this step runs BEFORE schedule registration so the watcher (started early inside `/schedule-crons`) doesn't pick up an orphan task before recovery has classified it. If orphan-check leaves fresh `task-*.txt` for the watcher, process those before Step 3's slow cron work if `/schedule-crons` has not yet started the watcher.
 
-### Step 2 — Register schedules + start watcher
+### Step 3 — Register schedules + start watcher
 
-Invoke `/schedule-crons`. This handles:
-- Reading `skills/schedule-crons/crons.json`
+Invoke `/schedule-crons`. That skill **starts the streaming watcher before CronCreate** and itself yields to pending `task-*.txt`. It also handles:
+- Reading host `crons.json`
 - Calling `CronCreate` for each entry that isn't already scheduled
 - Ensuring a fallback `/proactive-loop` cron exists at `*/10 * * * *` if `crons.json` doesn't include one (post-#954 belt-and-suspenders) — **skipped entirely** when `python3 skills/proactive-loop/scripts/proactive-loop-enabled.py` prints `disabled` (`SUTANDO_PROACTIVE_LOOP_ENABLED=0`)
-- Starting the streaming task watcher via the `Monitor` tool (`bash src/watch-tasks-stream.sh`, persistent, description `"Streaming task watcher"`)
 
-### Step 3 — Confirm
+### Step 4 — Mark ready + confirm
+
+```bash
+python3 src/core_readiness.py mark-ready --source startup
+```
 
 Emit a one-line summary so the operator (or main session's first turn) sees what fired:
 
 ```
-/startup complete: orphan-check (N tasks recovered, M archived), schedules (K crons + watcher).
+/startup complete: orphan-check (N tasks recovered, M archived), schedules (K crons + watcher), core-ready.
 ```
 
-The orphan-check fields say `skipped (skill not installed)` if step 1 was skipped.
+The orphan-check fields say `skipped (skill not installed)` if step 2 was skipped.
 
 ## Sequence diagram
 
@@ -68,14 +86,15 @@ session start
     ▼
 /startup
     │
-    ├─► step 1:  /task-orphan-check (optional) ──► classifies + archives orphan tasks
+    ├─► step 1:  pending task-*.txt ──► process owner/omni work FIRST (or skip)
     │
-    ├─► step 2:  /schedule-crons ──┬─► step 1-3 (register crons.json entries)
-    │                               ├─► step 4 (proactive-loop fallback if missing; gated by SUTANDO_PROACTIVE_LOOP_ENABLED)
-    │                               ├─► step 5 (start watch-tasks-stream.sh via Monitor)
-    │                               └─► step 6 (confirm what was scheduled)
+    ├─► step 2:  /task-orphan-check (optional) ──► classifies + archives orphan tasks
     │
-    └─► step 3: emit summary
+    ├─► step 3:  /schedule-crons ──┬─► step 0 (yield + start watcher FIRST)
+    │                               ├─► register crons.json + proactive fallback
+    │                               └─► stamp + confirm
+    │
+    └─► step 4: mark-ready + emit summary
 ```
 
 ## Re-invoking in an already-running session
@@ -95,3 +114,4 @@ If you find yourself wanting to put logic IN `/startup`, ask whether it belongs 
 
 - v0.1.0 — 2026-05-23 — initial draft. Per Chi 2026-05-23 Discord exchange about #1049 redesign ("make a new skill and include everything we need at start"). `/startup` becomes the canonical CLI entry; `/schedule-crons` remains callable for manual cron re-registration. Migration: launchd plists + CLI scripts switch to `/startup`.
 - v0.2.0 — 2026-06-21 — removed the fresh-session briefing step and its session sentinel (that sub-skill was deleted). `/startup` now runs orphan-check → schedules + watcher → confirm; sub-skill idempotency replaces the former sentinel guard.
+- v0.3.0 — 2026-08-06 — yield to pending `tasks/task-*.txt` before cron ceremony; mark `core-ready` via `src/core_readiness.py` so omni HUD can distinguish alive vs ready (fixes boot-stall where feeder injected while schedule-crons ran for minutes).

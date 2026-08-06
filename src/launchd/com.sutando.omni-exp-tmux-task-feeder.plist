@@ -1,8 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Omni Monitor-less tmux task feeder. Runner must live outside ~/Documents (TCC).
-  Placeholders: __SUPPORT__ __HOME__ __BREW_BIN__
--->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>

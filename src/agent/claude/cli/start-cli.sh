@@ -67,6 +67,44 @@ CORE_ENV_ARGS=(-e SUTANDO_CORE_SESSION=1 -e SUTANDO_CORE_RUNTIME=claude)
 if [ "${SUTANDO_SELF_DEVELOPMENT_ENABLED+x}" = x ]; then
   CORE_ENV_ARGS+=(-e "SUTANDO_SELF_DEVELOPMENT_ENABLED=$SUTANDO_SELF_DEVELOPMENT_ENABLED")
 fi
+# Forward skip-startup so the core session (and SessionStart hooks) see the same
+# policy the launcher used for the initial prompt.
+if [ "${SUTANDO_SKIP_STARTUP+x}" = x ]; then
+  CORE_ENV_ARGS+=(-e "SUTANDO_SKIP_STARTUP=$SUTANDO_SKIP_STARTUP")
+fi
+
+# Boot prompt: default `/startup`. Omni / work-bridge launches set
+# SUTANDO_SKIP_STARTUP=1 so the core claims pending tasks immediately instead of
+# spending minutes inside /schedule-crons while omni work sits on disk.
+resolve_boot_prompt() {
+  if [ "${SUTANDO_SKIP_STARTUP:-0}" = "1" ]; then
+    BOOT_PROMPT="Process any pending files matching workspace/tasks/task-*.txt now (oldest first): read each, do the work, write workspace/results/<same basename>. Then start the streaming task watcher via the Monitor tool (command: bash src/watch-tasks-stream.sh, persistent: true, description: Streaming task watcher) if its PID sentinel is not already alive. Do NOT run /startup or /schedule-crons unless the owner explicitly asks. Idle for the next TASK_FILE."
+  else
+    BOOT_PROMPT="/startup"
+  fi
+}
+mark_core_booting() {
+  "$PY" "$REPO/src/core_readiness.py" mark-booting --reason "${1:-startup}" >/dev/null 2>&1 || true
+}
+mark_core_ready_if_skip() {
+  if [ "${SUTANDO_SKIP_STARTUP:-0}" = "1" ]; then
+    "$PY" "$REPO/src/core_readiness.py" mark-ready --source skip-startup >/dev/null 2>&1 || true
+  fi
+}
+# Monitor-less ASAP path: ensure the tmux task feeder is alive when we skip
+# /startup (no schedule-crons → no watch-tasks-stream Monitor).
+ensure_tmux_task_feeder_for_skip() {
+  [ "${SUTANDO_SKIP_STARTUP:-0}" = "1" ] || return 0
+  local installer="$REPO/src/install-omni-exp-tmux-task-feeder-launchd.sh"
+  if [ -f "$installer" ]; then
+    bash "$installer" install >/dev/null 2>&1 || bash "$installer" --restart >/dev/null 2>&1 || true
+  fi
+  # Fallback Documents scanner if launchd still isn't up.
+  if ! launchctl list 2>/dev/null | grep -q "com.sutando.omni-exp-tmux-task-feeder"; then
+    nohup bash "$REPO/src/omni-exp-watch-tasks-to-tmux-supervisor.sh" >/dev/null 2>&1 &
+  fi
+}
+resolve_boot_prompt
 
 tmux_available() {
   command -v tmux > /dev/null 2>&1
@@ -609,8 +647,9 @@ if tmux_session_exists; then
   # restart-core (kill core window → rerun this script) truly window-scoped.
   echo "  ⚠ $SESSION exists but core Claude is gone — healing core window (sibling windows preserved)" >&2
   apply_tmux_defaults
+  mark_core_booting heal
   CORE_CMD=(claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
-    ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} -- "/startup")
+    ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} -- "$BOOT_PROMPT")
   # -P -F prints the index the window ACTUALLY landed on: when index 0 is
   # occupied (e.g. a sibling drifted there) the fallback creates the core at a
   # nonzero index, and selecting a hardcoded :0 would activate the WRONG window
@@ -621,6 +660,8 @@ if tmux_session_exists; then
   # quiet gateway (same reason launch-sutando.sh creates siblings with -d).
   tmux -S "$TMUX_SOCKET" select-window -t "$SESSION:${healed_idx:-0}" 2>/dev/null || true
   ensure_core_monitor
+  mark_core_ready_if_skip
+  ensure_tmux_task_feeder_for_skip
   if [ -t 1 ]; then
     echo "Attaching to healed $SESSION (Ctrl-b d to detach)..."
     exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
@@ -652,9 +693,10 @@ if ! command -v tmux > /dev/null 2>&1; then
   echo "  ⚠ tmux not found — running without tmux wrapper"
   echo "    (Sutando.app's watcher-auto-restart won't work; brew install tmux to enable)"
   [ -n "${SUTANDO_CLAUDE_WORKING_DIR:-}" ] && cd "$SUTANDO_CLAUDE_WORKING_DIR"
+  mark_core_booting no-tmux
   exec claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
-    -- "/startup"
+    -- "$BOOT_PROMPT"
 fi
 
 # Explicit -S socket path so Sutando.app (which runs under a different
@@ -682,15 +724,17 @@ apply_tmux_defaults
 # working dir must go through `--restart` (kill-then-create), not a bare rerun.
 if [ -t 1 ]; then
   ensure_core_monitor   # backgrounded child survives the exec below
+  mark_core_booting tty
   exec tmux -S "$TMUX_SOCKET" new-session -A -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
-    -- "/startup"
+    -- "$BOOT_PROMPT"
 else
+  mark_core_booting detached
   tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" ${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} ${CWD_ARGS[@]+"${CWD_ARGS[@]}"} \
     claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --chrome --dangerously-skip-permissions --add-dir "$HOME" \
     ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} \
-    -- "/startup"
+    -- "$BOOT_PROMPT"
   # Verify the core actually came up before reporting success. Without this a
   # failed launch (tmux server refusal, claude crash-on-start, a bad flag) still
   # exits 0 and Sutando.app reports "Core restarted" while nothing is serving —
@@ -706,6 +750,8 @@ else
     [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "FAILED: core did not come up within ~5s"
     exit 1
   fi
+  mark_core_ready_if_skip
+  ensure_tmux_task_feeder_for_skip
   [ -n "$RESTART_REQUESTED" ] && log_restart_attempt "success: core live"
   ensure_core_monitor   # canonical session now exists — start the supervisor monitor
   if [ "$VISIBLE" = 1 ]; then

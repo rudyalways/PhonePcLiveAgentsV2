@@ -67,7 +67,10 @@ class QwenOmniSession:
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._reader: asyncio.Task | None = None
+        # Session-level heuristic only — Qwen can still reject image-after-commit
+        # unless audio lands immediately before the image (see append_image).
         self._audio_sent = False
+        self._send_lock = asyncio.Lock()
         self.responding = False
 
     @property
@@ -215,7 +218,7 @@ class QwenOmniSession:
             if asyncio.iscoroutine(result):
                 await result
 
-    async def append_audio(self, pcm16le: bytes) -> None:
+    async def _append_audio_unlocked(self, pcm16le: bytes) -> None:
         if not pcm16le:
             return
         b64 = base64.b64encode(pcm16le).decode("ascii")
@@ -228,37 +231,58 @@ class QwenOmniSession:
         )
         self._audio_sent = True
 
+    async def append_audio(self, pcm16le: bytes) -> None:
+        if not pcm16le:
+            return
+        async with self._send_lock:
+            await self._append_audio_unlocked(pcm16le)
+
     async def append_image(self, jpeg: bytes) -> None:
-        if not self._audio_sent:
-            # Omni requires audio before vision — send ~100ms silence pad
-            await self.append_audio(b"\x00\x00" * 1600)
+        """Append a camera JPEG. Always pads ~100ms silence first.
+
+        DashScope rejects `input_image_buffer.append` with
+        "Error append image before append audio" when the *current* input
+        buffer has no audio yet — including after VAD commit / response
+        boundaries, when a session-level `_audio_sent` flag would still be
+        True. Concurrent mic + vision uploads without a lock can also
+        interleave image ahead of the pad. Serialize and always pad.
+        """
+        if not jpeg:
+            return
+        # ~100ms of 16kHz mono PCM16 silence
+        silence = b"\x00\x00" * 1600
         b64 = base64.b64encode(jpeg).decode("ascii")
-        await self._send(
-            {
-                "type": "input_image_buffer.append",
-                "event_id": _eid("image"),
-                "image": b64,
-            }
-        )
+        async with self._send_lock:
+            await self._append_audio_unlocked(silence)
+            await self._send(
+                {
+                    "type": "input_image_buffer.append",
+                    "event_id": _eid("image"),
+                    "image": b64,
+                }
+            )
 
     async def cancel_response(self) -> None:
-        await self._send({"type": "response.cancel", "event_id": _eid("cancel")})
-        self.responding = False
+        async with self._send_lock:
+            await self._send({"type": "response.cancel", "event_id": _eid("cancel")})
+            self.responding = False
 
     async def prompt_turn(self, text: str) -> None:
         """PromptTrigger: nudge model with text; ensure audio exists; force response."""
-        if not self._audio_sent:
-            await self.append_audio(b"\x00\x00" * 1600)
-        # Prefer conversation item + response.create (manual-style force)
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "event_id": _eid("item"),
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": text}],
-                },
-            }
-        )
-        await self._send({"type": "response.create", "event_id": _eid("resp")})
+        silence = b"\x00\x00" * 1600
+        async with self._send_lock:
+            if not self._audio_sent:
+                await self._append_audio_unlocked(silence)
+            # Prefer conversation item + response.create (manual-style force)
+            await self._send(
+                {
+                    "type": "conversation.item.create",
+                    "event_id": _eid("item"),
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+            )
+            await self._send({"type": "response.create", "event_id": _eid("resp")})

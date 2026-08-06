@@ -11,9 +11,14 @@ wired here — step-1 pattern): #2402's pre-fire gate, #2400's preflight
 report, and the easy-restart flow can all call it.
 
 Static checks (default, fast, read-only):
-  * `.claude.json` in the target dir carries a non-empty `oauthAccount`
-  * credentials exist: `.credentials.json` on disk OR the macOS Keychain
-    item (`Claude Code-credentials`) — existence only, value never read
+  * API / proxy auth: non-empty `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+    or `CLAUDE_CODE_OAUTH_TOKEN` in process env OR in
+    `<config_dir>/settings.json` → `env` (Yunwu / OpenRouter / key-only
+    installs — no Claude `/login` required)
+  * else OAuth path: `.claude.json` carries a non-empty `oauthAccount`
+    AND credentials exist (`.credentials.json` on disk OR the macOS
+    Keychain item `Claude Code-credentials`) — existence only, value
+    never read
   * SSH context (`$SSH_CONNECTION`) — a locked keychain cannot be unlocked
     from an SSH-spawned process, so completing /login needs a GUI Terminal
 
@@ -36,6 +41,15 @@ import subprocess
 import sys
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+# Claude Code accepts these as non-interactive auth (API key or bearer-style
+# token). Process env wins for operators who export them; settings.json `env`
+# is where per-config-dir proxy setups (e.g. Yunwu) normally live.
+_API_AUTH_ENV_KEYS = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
 
 
 def keychain_has_credentials() -> bool:  # pragma: no cover - external I/O (security CLI)
@@ -65,6 +79,41 @@ def _oauth_account_present(config_dir: str) -> bool:
         return False
 
 
+def _nonempty_secret(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _settings_api_auth_present(config_dir: str) -> bool:
+    """True when <config_dir>/settings.json env carries a usable API/token auth.
+
+    Existence / non-empty only — values are never logged or returned.
+    Malformed / missing settings → False (fall through to OAuth checks).
+    """
+    path = os.path.join(config_dir, "settings.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    settings_env = data.get("env")
+    if not isinstance(settings_env, dict):
+        return False
+    return any(_nonempty_secret(settings_env.get(k)) for k in _API_AUTH_ENV_KEYS)
+
+
+def _process_api_auth_present(env) -> bool:
+    """True when the process env already carries a usable API/token auth."""
+    return any(_nonempty_secret(env.get(k, "")) for k in _API_AUTH_ENV_KEYS)
+
+
+def api_auth_present(config_dir: str, env=None) -> bool:
+    """True when API/proxy auth can boot the CLI without Claude `/login`."""
+    env = os.environ if env is None else env
+    return _process_api_auth_present(env) or _settings_api_auth_present(config_dir)
+
+
 def check_auth_state(config_dir: str, *, keychain_check=keychain_has_credentials,
                      env=None) -> dict:
     """Pure decision over the target config dir's auth state.
@@ -76,6 +125,13 @@ def check_auth_state(config_dir: str, *, keychain_check=keychain_has_credentials
     env = os.environ if env is None else env
     ssh = bool(env.get("SSH_CONNECTION"))
     reasons = []
+
+    # API / proxy auth (settings.json or process env) does not need oauthAccount
+    # or Keychain — Claude Code boots with ANTHROPIC_* alone. Without this,
+    # Yunwu/OpenRouter hosts false-abort restart.sh (#auth-preflight gap).
+    if api_auth_present(config_dir, env):
+        return {"verdict": "ok", "reasons": [], "remedy": None, "ssh": ssh,
+                "config_dir": config_dir}
 
     oauth_ok = _oauth_account_present(config_dir)
     if not oauth_ok:

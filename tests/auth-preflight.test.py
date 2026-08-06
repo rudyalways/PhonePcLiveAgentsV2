@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Tests for src/auth_preflight.py — the auth-state probe (sonichi#2396/#2402).
 
-Covers the pure decision (oauthAccount x credentials-file x keychain matrix),
-the SSH-context remedy, JSON/exit-code CLI behavior. The keychain check and
-env are injected; nothing here touches a real keychain, SSH session, or the
-claude binary (the --live path is external I/O, excluded by design).
+Covers the pure decision (oauthAccount x credentials-file x keychain matrix,
+plus API/proxy auth via settings.json env or process env), the SSH-context
+remedy, JSON/exit-code CLI behavior. The keychain check and env are injected;
+nothing here touches a real keychain, SSH session, or the claude binary (the
+--live path is external I/O, excluded by design).
 
 Run: python3 tests/auth-preflight.test.py
 """
@@ -138,12 +139,77 @@ class TestDecision(unittest.TestCase):
             self.assertFalse(r["ssh"])
             self.assertTrue(r["remedy"].startswith("needs GUI /login"))
 
+    def test_settings_anthropic_auth_token_ok_without_oauth(self):
+        # Yunwu / proxy installs: token lives in settings.json env, no
+        # oauthAccount and no Keychain — must still pass the boot gate.
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "settings.json"), "w") as f:
+                json.dump({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://yunwu.ai",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-test-token",
+                        "ANTHROPIC_API_KEY": "",
+                    }
+                }, f)
+            r = check_auth_state(td, keychain_check=lambda: False, env={})
+            self.assertEqual(r["verdict"], "ok")
+            self.assertIsNone(r["remedy"])
+
+    def test_settings_anthropic_api_key_ok_without_oauth(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "settings.json"), "w") as f:
+                json.dump({"env": {"ANTHROPIC_API_KEY": "sk-ant-test"}}, f)
+            r = check_auth_state(td, keychain_check=lambda: False, env={})
+            self.assertEqual(r["verdict"], "ok")
+
+    def test_settings_empty_api_secrets_still_require_login(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "settings.json"), "w") as f:
+                json.dump({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://yunwu.ai",
+                        "ANTHROPIC_AUTH_TOKEN": "  ",
+                        "ANTHROPIC_API_KEY": "",
+                    }
+                }, f)
+            r = check_auth_state(td, keychain_check=lambda: False, env={})
+            self.assertEqual(r["verdict"], "login_required")
+
+    def test_process_env_anthropic_auth_token_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = check_auth_state(
+                td, keychain_check=lambda: False,
+                env={"ANTHROPIC_AUTH_TOKEN": "sk-from-process"})
+            self.assertEqual(r["verdict"], "ok")
+
+    def test_malformed_settings_json_falls_through_to_login_required(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "settings.json"), "w") as f:
+                f.write("{not json")
+            r = check_auth_state(td, keychain_check=lambda: False, env={})
+            self.assertEqual(r["verdict"], "login_required")
+
+
+def _clear_api_auth_env():
+    """main() reads real os.environ; strip API/token keys so CLI tests stay hermetic."""
+    saved = {}
+    for k in auth_preflight._API_AUTH_ENV_KEYS:
+        if k in os.environ:
+            saved[k] = os.environ.pop(k)
+    return saved
+
+
+def _restore_api_auth_env(saved):
+    for k, v in saved.items():
+        os.environ[k] = v
+
 
 class TestCli(unittest.TestCase):
     def test_exit_2_and_json_on_fresh_dir(self):
         with tempfile.TemporaryDirectory() as td:
             orig = auth_preflight.keychain_has_credentials
             auth_preflight.keychain_has_credentials = lambda: False
+            saved = _clear_api_auth_env()
             try:
                 import io
                 from contextlib import redirect_stdout
@@ -152,6 +218,7 @@ class TestCli(unittest.TestCase):
                     rc = main(["--config-dir", td, "--json"])
             finally:
                 auth_preflight.keychain_has_credentials = orig
+                _restore_api_auth_env(saved)
             self.assertEqual(rc, 2)
             out = json.loads(buf.getvalue())
             self.assertEqual(out["verdict"], "login_required")
@@ -167,10 +234,27 @@ class TestCli(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("OK", buf.getvalue())
 
+    def test_exit_0_on_settings_api_auth(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "settings.json"), "w") as f:
+                json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-cli-test"}}, f)
+            saved = _clear_api_auth_env()
+            try:
+                import io
+                from contextlib import redirect_stdout
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = main(["--config-dir", td])
+            finally:
+                _restore_api_auth_env(saved)
+            self.assertEqual(rc, 0)
+            self.assertIn("OK", buf.getvalue())
+
     def test_human_output_login_required_prints_reasons_and_remedy(self):
         with tempfile.TemporaryDirectory() as td:
             orig = auth_preflight.keychain_has_credentials
             auth_preflight.keychain_has_credentials = lambda: False
+            saved = _clear_api_auth_env()
             try:
                 import io
                 from contextlib import redirect_stdout
@@ -179,6 +263,7 @@ class TestCli(unittest.TestCase):
                     rc = main(["--config-dir", td])
             finally:
                 auth_preflight.keychain_has_credentials = orig
+                _restore_api_auth_env(saved)
             out = buf.getvalue()
             self.assertEqual(rc, 2)
             self.assertIn("LOGIN_REQUIRED", out)

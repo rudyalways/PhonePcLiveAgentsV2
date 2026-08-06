@@ -500,7 +500,11 @@ function ensureTask(key, patch = {}) {
   if (patch.debug_line != null) t.debugLine = patch.debug_line;
   if (patch.debug && patch.debug.line) t.debugLine = patch.debug.line;
   if (patch.debug) {
-    t.blocked = !!(patch.debug.pane_error || patch.debug.core_alive === false);
+    t.blocked = !!(
+      patch.debug.pane_error
+      || patch.debug.core_alive === false
+      || patch.debug.core_ready === false
+    );
   }
   taskStore.set(t.id, t);
   t._stepChanged = t.step !== prevStep || t.failed !== prevFailed;
@@ -555,6 +559,8 @@ function applyWorkLifecycle(msg) {
     if (msg.task) t.task = String(msg.task);
     if (msg.preview) t.preview = String(msg.preview);
     advanceTask(t, 5);
+    t.debugLine = "";
+    t.blocked = false;
   } else if (state === "already_queued") {
     // Same work still in flight — attach to existing card, stay waiting.
     if (msg.task) t.task = String(msg.task);
@@ -574,11 +580,19 @@ function applyWorkLifecycle(msg) {
     advanceTask(t, 4);
   } else if (state === "result") {
     advanceTask(t, 4);
+    // Drop stale WAITING/feeder pipeline text once the result is back.
+    t.debugLine = "";
+    t.blocked = false;
   } else if (state === "result_processed" || state === "speak_queued" || state === "speak_started") {
-    if (state === "result_processed") advanceTask(t, 5);
+    if (state === "result_processed") {
+      advanceTask(t, 5);
+      t.debugLine = "";
+      t.blocked = false;
+    }
   } else if (state === "timeout") {
     t.failed = true;
     if (t.step < 1) advanceTask(t, 1);
+    t.debugLine = "";
   }
   // Heartbeat-only updates: patch wait/debug in place (no list reshuffle).
   const heartbeatOnly = (state === "waiting" || state === "processing") && t.step === stepBefore;
@@ -659,7 +673,8 @@ function renderTasks() {
     card.className = "task-card" + (done ? " done" : "") + (t.failed ? " fail" : "");
     const title = t.task || t.tool || shortTaskId(t.id) || "task";
     const preview = t.failed ? "timeout / failed" : (t.preview || "");
-    const debug = t.debugLine || "";
+    // Never show pipeline WAITING text on a finished card (stale debugLine).
+    const debug = (!done && !t.failed && t.debugLine) ? t.debugLine : "";
     card.innerHTML =
       `<div class="task-meta">${metaHtmlFor(t)}</div>` +
       `<div class="task-title">${escapeHtml(title)}</div>` +
@@ -843,8 +858,18 @@ function setCoreStatus(msg) {
   const pend = msg.pending_tasks != null ? ` · ${msg.pending_tasks} queued` : "";
   const paneErr = msg.pane_error || "";
   const paneTag = paneErr ? ` · ${paneErr}` : "";
-  if (msg.alive && !paneErr) {
-    setChip(chipCore, `Core: up ${age}${pend}`, "on");
+  const ready = !!msg.ready;
+  const booting = !!msg.booting || (msg.alive && !ready && !paneErr);
+  if (msg.alive && ready && !paneErr) {
+    setChip(chipCore, `Core: ready ${age}${pend}`, "on");
+    if (msg.can_stop !== false) {
+      coreBtn.textContent = "Stop core";
+      coreBtn.classList.add("show", "stop");
+    } else {
+      coreBtn.classList.remove("show", "stop");
+    }
+  } else if (msg.alive && booting && !paneErr) {
+    setChip(chipCore, `Core: booting ${age}${pend}`, "busy");
     if (msg.can_stop !== false) {
       coreBtn.textContent = "Stop core";
       coreBtn.classList.add("show", "stop");
@@ -869,7 +894,12 @@ function setCoreStatus(msg) {
       coreBtn.classList.remove("show", "stop");
     }
   }
-  const tip = [msg.pane_snippet, msg.how ? `Start: ${msg.how}` : ""].filter(Boolean).join("\n");
+  const tip = [
+    msg.ready_reason ? `ready_reason=${msg.ready_reason}` : "",
+    msg.watcher_alive != null ? `watcher=${msg.watcher_alive ? "up" : "down"}` : "",
+    msg.pane_snippet,
+    msg.how ? `Start: ${msg.how}` : "",
+  ].filter(Boolean).join("\n");
   chipCore.title = tip;
 }
 
@@ -982,7 +1012,11 @@ function handleMsg(msg) {
       upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
       logAct("work", `${turn}CC processing${id ? " " + id : ""}`);
     } else if (msg.state === "processing" || msg.state === "waiting") {
-      const blocked = !!(msg.debug && (msg.debug.pane_error || msg.debug.core_alive === false));
+      const blocked = !!(msg.debug && (
+        msg.debug.pane_error
+        || msg.debug.core_alive === false
+        || msg.debug.core_ready === false
+      ));
       const label = blocked
         ? `Work: BLOCKED ${wait}`
         : (msg.phase === "cc_processing" ? `Work: CC ${wait}` : `Work: wait ${wait}`);

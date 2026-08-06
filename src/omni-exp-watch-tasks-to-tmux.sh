@@ -8,6 +8,12 @@
 # Enable via SUTANDO_TMUX_TASK_FEEDER=1|auto (startup.sh). Poll loop so the
 # process does not exit when fswatch dies. Tracks local "done" markers because
 # omni may delete results/ files after speaking.
+#
+# ASAP policy (2026-08-06):
+#   - When the core pane looks idle, inject ALL pending tasks (burst into Claude
+#     queue) instead of head-of-line blocking on one inflight.
+#   - Re-nudge stuck inflight after STUCK_S (default 15s, was 60s).
+#   - Abandon after MAX_NUDGES so one orphan cannot block the queue forever.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +28,9 @@ DONE_DIR="$STATE/omni-exp-watch-tasks-to-tmux.done"
 PID_FILE="$STATE/omni-exp-watch-tasks-to-tmux.pid"
 LOCK_DIR="$STATE/omni-exp-watch-tasks-to-tmux.lock"
 POLL_S="${SUTANDO_TMUX_TASK_FEEDER_POLL_S:-1}"
-STUCK_S="${SUTANDO_TMUX_TASK_FEEDER_STUCK_S:-60}"
+STUCK_S="${SUTANDO_TMUX_TASK_FEEDER_STUCK_S:-15}"
+MAX_NUDGES="${SUTANDO_TMUX_TASK_FEEDER_MAX_NUDGES:-2}"
+BURST_MAX="${SUTANDO_TMUX_TASK_FEEDER_BURST_MAX:-8}"
 
 mkdir -p "$(dirname "$LOG")" "$STATE" "$RESULTS" "$DONE_DIR"
 
@@ -58,17 +66,35 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "$$" > "$PID_FILE"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) feeder start pid=$$ poll=${POLL_S}s stuck=${STUCK_S}s" >>"$LOG"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) feeder start pid=$$ poll=${POLL_S}s stuck=${STUCK_S}s max_nudges=${MAX_NUDGES} burst=${BURST_MAX}" >>"$LOG"
 
 session_ready() {
   tmux -S "$SOCK" has-session -t "$SESSION" 2>/dev/null
 }
 
+# True when the core pane looks free to accept new TASK_FILE prompts.
+core_idle() {
+  local pane
+  pane="$(tmux -S "$SOCK" capture-pane -t "$SESSION" -p -S -12 2>/dev/null)" || return 1
+  # Busy markers first (tool / thinking UI).
+  if printf '%s' "$pane" | grep -qiE 'Bash\(|Reading |Running |✽|✳|✶|Infusing|Brewing|Leavening|Slithering|Musing|Worked for|ctrl\+o to expand'; then
+    return 1
+  fi
+  # Idle / ready-for-input markers.
+  if printf '%s' "$pane" | grep -qE 'Idling\.|Press up to edit queued messages'; then
+    return 0
+  fi
+  # Bare prompt line without an active tool spinner above.
+  if printf '%s' "$pane" | tail -n 6 | grep -qE '^❯[[:space:]]*$|^❯[[:space:]]+'; then
+    return 0
+  fi
+  return 1
+}
+
 is_done() {
   local base="$1"
   # Only real completion signals. Do NOT treat a missing task file as done —
-  # core may not have claimed it yet, or another feeder raced a delete; that
-  # false-done was clearing launchd inbox markers while HUD stayed on Task file.
+  # core may not have claimed it yet, or another feeder raced a delete.
   [[ -f "$DONE_DIR/$base" ]] && return 0
   [[ -f "$RESULTS/$base" ]] && return 0
   return 1
@@ -94,8 +120,6 @@ inject() {
     return 1
   fi
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) inject $base" >>"$LOG"
-  # Prefer a fresh prompt; don't Escape if it would kill in-flight work —
-  # only send when pane looks idle is hard, so send as queued message.
   local msg
   msg="TASK_FILE: $base — Read ${path}, do the work, write ${RESULTS}/${base}. Then idle for the next TASK_FILE."
   printf '%s' "$msg" | tmux -S "$SOCK" load-buffer -
@@ -105,7 +129,7 @@ inject() {
   return 0
 }
 
-oldest_pending() {
+list_pending() {
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     base=$(basename "$f")
@@ -114,13 +138,16 @@ oldest_pending() {
       continue
     fi
     echo "$base"
-    return 0
   done < <(ls -tr "$TASKS"/task-*.txt 2>/dev/null)
-  return 1
+}
+
+oldest_pending() {
+  list_pending | head -n 1
 }
 
 inflight_base=""
 inflight_at=0
+inflight_nudges=0
 
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   session_ready && break
@@ -130,11 +157,15 @@ done
 while true; do
   # Harvest completions (result may appear and then be deleted by omni).
   if [[ -n "$inflight_base" ]]; then
-    if [[ -f "$RESULTS/$inflight_base" ]] || [[ ! -f "$TASKS/$inflight_base" ]]; then
+    if is_done "$inflight_base" || [[ -f "$RESULTS/$inflight_base" ]]; then
       mark_done "$inflight_base"
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) done $inflight_base" >>"$LOG"
       inflight_base=""
       inflight_at=0
+      inflight_nudges=0
+    elif [[ ! -f "$TASKS/$inflight_base" ]]; then
+      # Claimed/archived without result yet — keep waiting; do not mark done.
+      :
     fi
   fi
   for f in "$RESULTS"/task-*.txt; do
@@ -142,25 +173,67 @@ while true; do
     mark_done "$(basename "$f")"
   done
 
-  base="$(oldest_pending || true)"
-  if [[ -z "${base:-}" ]]; then
+  pending=()
+  while IFS= read -r _p; do
+    [[ -n "$_p" ]] || continue
+    pending+=("$_p")
+  done < <(list_pending)
+  if [[ ${#pending[@]} -eq 0 ]]; then
     sleep "$POLL_S"
     continue
   fi
 
   now=$(date +%s)
+
+  # Idle + backlog: burst-inject every pending task into Claude's queue.
+  if core_idle; then
+    n=0
+    for base in "${pending[@]}"; do
+      if [[ "$n" -ge "$BURST_MAX" ]]; then
+        break
+      fi
+      if inject "$base"; then
+        inflight_base="$base"
+        inflight_at=$now
+        inflight_nudges=0
+        n=$((n + 1))
+        sleep 0.15
+      fi
+    done
+    if [[ "$n" -gt 1 ]]; then
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) idle-burst injected $n task(s)" >>"$LOG"
+    fi
+    sleep "$POLL_S"
+    continue
+  fi
+
+  # Busy core: HOL only; re-nudge / abandon stuck head.
+  base="${pending[0]}"
   if [[ -n "$inflight_base" ]] && ! is_done "$inflight_base"; then
-    if (( now - inflight_at < STUCK_S )); then
+    if [[ $((now - inflight_at)) -lt "$STUCK_S" ]]; then
       sleep "$POLL_S"
       continue
     fi
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) re-nudge $inflight_base (stuck ${STUCK_S}s)" >>"$LOG"
+    inflight_nudges=$((inflight_nudges + 1))
+    if [[ "$inflight_nudges" -gt "$MAX_NUDGES" ]]; then
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) abandon $inflight_base after ${MAX_NUDGES} nudges (unblock queue)" >>"$LOG"
+      mark_done "$inflight_base"
+      inflight_base=""
+      inflight_at=0
+      inflight_nudges=0
+      sleep "$POLL_S"
+      continue
+    fi
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) re-nudge $inflight_base (${inflight_nudges}/${MAX_NUDGES})" >>"$LOG"
     base="$inflight_base"
   fi
 
   if inject "$base"; then
+    if [[ "$base" != "$inflight_base" ]]; then
+      inflight_nudges=0
+    fi
     inflight_base="$base"
-    inflight_at=$(date +%s)
+    inflight_at=$now
   fi
   sleep "$POLL_S"
 done

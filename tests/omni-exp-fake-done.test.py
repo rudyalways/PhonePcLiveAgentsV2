@@ -12,9 +12,12 @@ sys.path.insert(0, str(REPO / "src"))
 from omni_exp_result_speak import (  # noqa: E402
     DELIVER_RETRY_DELAYS_S,
     FRAME_TASK_RESULT_INSTRUCTION,
+    WORK_RESULT_DONE_EPILOGUE,
     extract_task_result_body,
     frame_task_result_prompt,
     is_fake_done_claim,
+    is_stale_wait_claim,
+    is_wait_meta_task,
 )
 from omni_exp_speak_queue import SpeakItem, SpeakQueue  # noqa: E402
 
@@ -78,6 +81,41 @@ check(
     not is_fake_done_claim(
         claim, tools_this_response=0, trust_done_claim=True
     ),
+)
+
+wait_zh = "我还在等你上一个问题的搜索结果，请稍等一下。"
+check(
+    "wait speech with empty pending is stale",
+    is_stale_wait_claim(wait_zh, tools_this_response=0, pending_work_count=0),
+)
+check(
+    "wait speech while work pending is allowed",
+    not is_stale_wait_claim(wait_zh, tools_this_response=0, pending_work_count=1),
+)
+check(
+    "work_result speak exempt from stale-wait mute",
+    not is_stale_wait_claim(
+        wait_zh,
+        tools_this_response=0,
+        pending_work_count=0,
+        prompt_reason="work_result",
+    ),
+)
+check(
+    "wait-meta task detected",
+    is_wait_meta_task("等待之前的搜索结果完成，并总结结果给用户"),
+)
+check(
+    "concrete search is not wait-meta",
+    not is_wait_meta_task("搜索图片中的监狱"),
+)
+check(
+    "epilogue tells model not to keep waiting",
+    "Do NOT say you are still waiting" in WORK_RESULT_DONE_EPILOGUE,
+)
+check(
+    "framed prompt stays upstream-parity without epilogue",
+    WORK_RESULT_DONE_EPILOGUE not in frame_task_result_prompt("X"),
 )
 
 q = SpeakQueue(merge="serial")

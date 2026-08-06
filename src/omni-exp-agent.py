@@ -36,13 +36,17 @@ from dotenv import load_dotenv
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+from core_readiness import probe_core_readiness  # noqa: E402
 from omni_exp_provider_qwen import QwenOmniSession  # noqa: E402
 from omni_exp_result_speak import (  # noqa: E402
     DELIVER_RETRY_DELAYS_S,
     TRUST_DONE_CLAIM_S,
+    WORK_RESULT_DONE_EPILOGUE,
     extract_task_result_body,
     frame_task_result_prompt,
     is_fake_done_claim,
+    is_stale_wait_claim,
+    is_wait_meta_task,
 )
 from omni_exp_scene import SceneChangeSensor  # noqa: E402
 from omni_exp_speak_queue import SpeakItem, SpeakQueue  # noqa: E402
@@ -99,6 +103,7 @@ SCENE_NOSPEAK_BACKOFF_AFTER = int(_env_omni_exp("SCENE_NOSPEAK_BACKOFF_AFTER", "
 SCENE_NOSPEAK_BACKOFF_MULT = float(_env_omni_exp("SCENE_NOSPEAK_BACKOFF_MULT", "3"))
 # Fake-done nudge: at most one re-prompt per this many seconds (stops nudge loops).
 FAKE_DONE_NUDGE_COOLDOWN_S = float(_env_omni_exp("FAKE_DONE_NUDGE_COOLDOWN_S", "20"))
+STALE_WAIT_NUDGE_COOLDOWN_S = float(_env_omni_exp("STALE_WAIT_NUDGE_COOLDOWN_S", "12"))
 # Work-result speak drain (docs/omni-exp-agent-design.md ready_merge): serial|concat|latest
 WORK_RESULT_MERGE = _env_omni_exp("WORK_RESULT_MERGE", "serial").strip().lower()
 SPEAK_QUEUE_MAX = int(_env_omni_exp("SPEAK_QUEUE_MAX", "32"))
@@ -180,17 +185,32 @@ def mark_feeder_done(task_id: str) -> None:
 
 def _launchd_feeder_running() -> bool:
     """Prefer the TCC-safe launchd inbox feeder over the Documents scanner."""
+    label = "com.sutando.omni-exp-tmux-task-feeder"
     try:
         uid = os.getuid()
         out = subprocess.check_output(
-            ["launchctl", "print", f"gui/{uid}/com.sutando.omni-exp-tmux-task-feeder"],
+            ["launchctl", "print", f"gui/{uid}/{label}"],
             text=True,
             timeout=3,
             stderr=subprocess.DEVNULL,
         )
-        return "state = running" in out or "\tpid = " in out
+        if "state = running" in out or "\tpid = " in out:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # bootstrap API sometimes broken while load -w still registered the job.
+    try:
+        out = subprocess.check_output(
+            ["launchctl", "list"], text=True, timeout=3, stderr=subprocess.DEVNULL
+        )
+        for line in out.splitlines():
+            if label not in line:
+                continue
+            pid = line.split()[0]
+            return pid.isdigit()
     except (OSError, subprocess.SubprocessError):
         return False
+    return False
 
 
 def _stop_documents_task_feeder() -> None:
@@ -574,6 +594,11 @@ def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
         verdict = "BLOCKED: rate limit — core stalling on API"
     elif not core.get("alive"):
         verdict = "BLOCKED: sutando-core DOWN — task sits on disk"
+    elif core.get("booting") or (core.get("alive") and not core.get("ready")):
+        verdict = (
+            "BLOCKED: sutando-core BOOTING (/startup) — not ready for work yet "
+            f"· reason={core.get('ready_reason') or 'booting'}"
+        )
     elif phase == "task_written" and on_disk and "inject" not in feeder.lower() and "nudge" not in feeder.lower():
         verdict = "WAITING: task on disk; feeder has not injected into tmux yet"
     elif phase == "task_written" and on_disk:
@@ -581,7 +606,10 @@ def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
     elif phase == "cc_processing":
         verdict = "RUNNING?: task claimed (file gone/archived) — waiting for results/"
     else:
-        verdict = f"phase={phase} · core={'up' if core.get('alive') else 'DOWN'}"
+        verdict = (
+            f"phase={phase} · core="
+            f"{'ready' if core.get('ready') else ('up' if core.get('alive') else 'DOWN')}"
+        )
 
     line = (
         f"{verdict} · feeder={feeder[:80]} · "
@@ -595,6 +623,7 @@ def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
         "line": line[:320],
         "phase": phase,
         "core_alive": bool(core.get("alive")),
+        "core_ready": bool(core.get("ready")),
         "pane_error": pane_err,
         "pane_snippet": str(core.get("pane_snippet") or "")[:160],
         "feeder": feeder[:160],
@@ -607,15 +636,42 @@ def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
 
 
 def probe_core_status() -> dict[str, Any]:
-    """Read workspace heartbeat + core-status.json (same signals as health-check)."""
-    alive_path = WORKSPACE / "state" / "cores" / f"{HOST_LABEL}.alive"
-    age_s: float | None = None
-    alive = False
+    """Heartbeat (.alive) + readiness (not mid-/startup) + core-status.json."""
+    pane = probe_core_pane_error()
+    # Capture a short pane text for boot-marker detection (best-effort).
+    pane_text = ""
+    try:
+        pane_text = subprocess.check_output(
+            [
+                "tmux",
+                "-S",
+                TMUX_SOCKET,
+                "capture-pane",
+                "-t",
+                TMUX_SESSION,
+                "-p",
+                "-S",
+                "-30",
+            ],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pane_text = str(pane.get("snippet") or "")
+
+    readiness = probe_core_readiness(
+        WORKSPACE,
+        host=HOST_LABEL,
+        alive_max_age_s=CORE_ALIVE_MAX_AGE_S,
+        pane_text=pane_text,
+    )
+    alive = bool(readiness.get("alive"))
+    age_s = readiness.get("age_s")
     payload: dict[str, Any] = {}
+    alive_path = WORKSPACE / "state" / "cores" / f"{HOST_LABEL}.alive"
     if alive_path.exists():
         try:
-            age_s = max(0.0, time.time() - alive_path.stat().st_mtime)
-            alive = age_s <= CORE_ALIVE_MAX_AGE_S
             raw = json.loads(alive_path.read_text())
             if isinstance(raw, dict):
                 payload = raw
@@ -641,10 +697,13 @@ def probe_core_status() -> dict[str, Any]:
         )
     except Exception:
         pass
-    pane = probe_core_pane_error()
     return {
         "alive": alive,
-        "age_s": None if age_s is None else round(age_s, 1),
+        "ready": bool(readiness.get("ready")),
+        "booting": bool(readiness.get("booting")),
+        "ready_reason": readiness.get("reason") or "",
+        "watcher_alive": bool(readiness.get("watcher_alive")),
+        "age_s": age_s,
         "host": HOST_LABEL,
         "status": core_status or payload.get("status"),
         "step": step,
@@ -706,13 +765,19 @@ def start_sutando_core() -> dict[str, Any]:
         with open(log_path, "a", encoding="utf-8") as logf:
             logf.write(f"\n--- start {datetime.now(timezone.utc).isoformat()} ---\n")
             logf.flush()
+            # Skip /startup so omni work is not blocked behind schedule-crons.
+            env = {
+                **os.environ,
+                "SUTANDO_CORE_SESSION": "1",
+                "SUTANDO_SKIP_STARTUP": "1",
+            }
             proc = subprocess.Popen(
                 args,
                 cwd=str(REPO),
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
-                env={**os.environ, "SUTANDO_CORE_SESSION": "1"},
+                env=env,
             )
         _ensure_core_heartbeat()
         # Give heartbeat a moment so the next probe can flip to UP.
@@ -832,14 +897,21 @@ INSTRUCTIONS = _env_omni_exp(
         "- work: THE default tool. Call it for any non-trivial request. "
         "Also called core, submit a task, send to core, ask the core, "
         "delegate to core — these all mean call this tool. "
-        "Returns pending — say you started / are working on it, then wait for the result. "
+        "Returns pending — say you started / are working on it once, then stay quiet "
+        "until a TASK_RESULT arrives. "
         "Call work in the SAME turn before claiming any PC action is done.\n"
         "\n"
         "CRITICAL RULES:\n"
         "- NEVER pretend you called a tool. NEVER say done / already opened / 已经帮你 "
         "without actually calling work in this turn.\n"
         "- NEVER say you can't do that — call work and let the core handle it.\n"
-        "- If a prior work call is still pending, say you are still waiting — do not invent success.\n"
+        "- Only say you are still waiting when a work call is in flight and you have "
+        "NOT yet received its TASK_RESULT. After you summarize a TASK_RESULT, that "
+        "task is DONE — do not keep saying 还在等 / still waiting for it.\n"
+        "- Never call work with 'wait for the previous result' — that creates a useless "
+        "extra task. Just wait, or handle the user's new request.\n"
+        "- If the user asks something new, call work for that new request (or answer "
+        "camera/simple questions directly) instead of only repeating that you are waiting.\n"
         "- If you KNOW the answer from camera/context alone, answer directly; otherwise call work.\n"
         "- When in doubt, call work.\n"
         "\n"
@@ -953,6 +1025,7 @@ class PhoneSession:
         self._pending_prompt_reason: str | None = None
         self._scene_nospeak_streak = 0
         self._last_fake_done_nudge_at = 0.0
+        self._last_stale_wait_nudge_at = 0.0
         # When set (epoch), success-language with tools=0 is trusted (already_done).
         self._trust_done_claim_until = 0.0
         # task_ids whose work_result speak actually started (or HTML fallback fired).
@@ -998,7 +1071,7 @@ class PhoneSession:
             kind = str(item.meta.get("kind") or "")
         # Fake-done nudges are model-correction prompts, not user tasks — Activity
         # only. Emitting work_event without task_id used to spawn spam cards.
-        if kind != "fake_done_nudge":
+        if kind not in ("fake_done_nudge", "stale_wait_nudge"):
             await self.work_event(
                 "speak_queued",
                 task_id=item.task_id,
@@ -1011,6 +1084,8 @@ class PhoneSession:
             (
                 f"Fake-done nudge buffered (q={len(self.speak_queue)})"
                 if kind == "fake_done_nudge"
+                else f"Stale-wait nudge buffered (q={len(self.speak_queue)})"
+                if kind == "stale_wait_nudge"
                 else f"Speak buffered ({self.speak_queue.merge}) queue={len(self.speak_queue)}"
                 + (f" · {item.task_id}" if item.task_id else "")
             ),
@@ -1175,10 +1250,16 @@ class PhoneSession:
         await self.activity("session", f"Tasks dir: {TASKS_DIR}")
         core = probe_core_status()
         await self.push_core_status(core)
-        if core["alive"]:
+        if core.get("ready"):
             await self.activity(
                 "session",
-                f"Sutando-core UP · age={core.get('age_s')}s · pending={core.get('pending_tasks')}",
+                f"Sutando-core READY · age={core.get('age_s')}s · pending={core.get('pending_tasks')}",
+            )
+        elif core["alive"]:
+            await self.activity(
+                "session",
+                f"Sutando-core UP but not ready ({core.get('ready_reason')}) · "
+                f"age={core.get('age_s')}s · pending={core.get('pending_tasks')}",
             )
         else:
             await self.activity(
@@ -1233,13 +1314,27 @@ class PhoneSession:
                 prompt_reason=prompt_reason,
                 trust_done_claim=trust_done,
             )
+            stale_wait = is_stale_wait_claim(
+                text,
+                tools_this_response=self._tools_this_response,
+                pending_work_count=len(self._pending_work),
+                prompt_reason=prompt_reason,
+            )
             if fake_done:
                 # Don't play audio that claims a PC action that never ran.
+                suppress = True
+            elif stale_wait:
+                # Result already delivered; don't keep saying "还在等…".
                 suppress = True
             elif trust_done and prompt_reason != "work_result":
                 # Consumed the already_done trust window on this speak.
                 self._trust_done_claim_until = 0.0
-            scene_quiet = prompt_reason == "scene_change" and suppress and not fake_done
+            scene_quiet = (
+                prompt_reason == "scene_change"
+                and suppress
+                and not fake_done
+                and not stale_wait
+            )
             await self.send(
                 {
                     "type": "stream",
@@ -1248,6 +1343,7 @@ class PhoneSession:
                     "suppressed": suppress,
                     "tools_called": self._tools_this_response,
                     "fake_done": fake_done,
+                    "stale_wait": stale_wait,
                     "turn_id": self._turn_id,
                     "prompt_reason": prompt_reason,
                 }
@@ -1260,6 +1356,8 @@ class PhoneSession:
                         "text": (
                             "(blocked: claimed action without work)"
                             if fake_done
+                            else "(blocked: stale wait — nothing pending)"
+                            if stale_wait
                             else "(no speak)"
                             if suppress
                             else text
@@ -1301,14 +1399,20 @@ class PhoneSession:
                 )
                 if can_nudge:
                     self._last_fake_done_nudge_at = now_nudge
+                    wait_line = (
+                        "A prior work call is still pending — say you are still waiting once, "
+                        "then stay quiet until TASK_RESULT."
+                        if pending
+                        else "Nothing is pending — call work with a concrete task if the user "
+                        "still wants the action, or answer their latest request."
+                    )
                     await self.enqueue_speak(
                         SpeakItem(
                             reason="work_result",
                             prompt_text=(
                                 "[System] You just claimed a PC action finished but did NOT "
                                 "call the work tool in that turn — nothing ran. "
-                                "If the user still wants it, call work now with a concrete task. "
-                                "If a prior work call is still pending, say you are still waiting. "
+                                f"{wait_line} "
                                 "Do not claim success again without calling work."
                             ),
                             preview="fake-done nudge",
@@ -1320,6 +1424,39 @@ class PhoneSession:
                         "work",
                         f"{self._turn_tag()} Fake-done nudge skipped (cooldown "
                         f"{FAKE_DONE_NUDGE_COOLDOWN_S:.0f}s)",
+                    )
+            elif stale_wait:
+                self._scene_nospeak_streak = 0
+                await self.activity(
+                    "work",
+                    f"{self._turn_tag()} Blocked stale wait — nothing pending",
+                )
+                now_nudge = time.time()
+                can_nudge = (
+                    self.qwen is not None
+                    and (now_nudge - self._last_stale_wait_nudge_at)
+                    >= STALE_WAIT_NUDGE_COOLDOWN_S
+                )
+                if can_nudge:
+                    self._last_stale_wait_nudge_at = now_nudge
+                    await self.enqueue_speak(
+                        SpeakItem(
+                            reason="work_result",
+                            prompt_text=(
+                                "[System] Nothing is pending — prior work already finished. "
+                                "Do NOT say you are still waiting. Respond to the user's latest "
+                                "request: answer directly if it's camera/simple, otherwise call "
+                                "work with a concrete new task."
+                            ),
+                            preview="stale-wait nudge",
+                            meta={"kind": "stale_wait_nudge"},
+                        )
+                    )
+                elif self.qwen:
+                    await self.activity(
+                        "work",
+                        f"{self._turn_tag()} Stale-wait nudge skipped (cooldown "
+                        f"{STALE_WAIT_NUDGE_COOLDOWN_S:.0f}s)",
                     )
             elif prompt_reason == "scene_change":
                 if suppress:
@@ -1349,10 +1486,11 @@ class PhoneSession:
                 self.gate.cooldowns_ms["scene_change"] = SCENE_COOLDOWN_MS
             await self.status("listening" if not self._pending_work else "working")
             logger.info(
-                "response.done turn=%s tools=%s fake_done=%s scene_quiet=%s chars=%s text=%s",
+                "response.done turn=%s tools=%s fake_done=%s stale_wait=%s scene_quiet=%s chars=%s text=%s",
                 self._turn_id,
                 self._tools_this_response,
                 fake_done,
+                stale_wait,
                 scene_quiet,
                 len(text),
                 text[:120],
@@ -1657,12 +1795,40 @@ class PhoneSession:
         """
         key = normalize_work_task(task)
         now = time.time()
+        # "Wait for previous result" is not real work — never enqueue another task.
+        if is_wait_meta_task(task):
+            if self._pending_work:
+                tid = next(iter(self._pending_work))
+                note = (
+                    f"Not queued — that was only 'wait for prior result'. "
+                    f"{tid} is already in flight. Say you're waiting once, then stay "
+                    "quiet until TASK_RESULT. Do NOT call work again just to wait."
+                )
+                await self.activity("work", f"DEDUPÉ wait_meta → {tid}: {task[:60]}")
+                return tid, "already_queued", note
+            # Prefer most recent completion if any.
+            if self._recent_done:
+                tid = max(self._recent_done.values(), key=lambda v: v[0])[1]
+                note = (
+                    f"Not queued — prior work already finished ({tid}). "
+                    "Summarize that result if asked; do NOT say you are still waiting. "
+                    "Call work only for a new concrete request."
+                )
+                await self.activity("work", f"DEDUPÉ wait_meta already_done → {tid}: {task[:60]}")
+                return tid, "already_done", note
+            note = (
+                "Not queued — nothing is pending. Do not say you are waiting. "
+                "Call work with a concrete new task if the user wants something done."
+            )
+            await self.activity("work", f"DEDUPÉ wait_meta idle: {task[:60]}")
+            return "task-none", "already_done", note
         # Same work already in flight — do not open Baidu again.
         for tid, meta in self._pending_work.items():
             if normalize_work_task(str(meta.get("task") or "")) == key:
                 note = (
                     f"Same task already in flight as {tid} — NOT queued again. "
-                    "Tell the user you're still waiting; do NOT claim a new open."
+                    "Tell the user you're still waiting once; do NOT claim a new open, "
+                    "and do NOT call work again just to wait."
                 )
                 await self.activity("work", f"DEDUPÉ already_queued → {tid}: {task[:60]}")
                 return tid, "already_queued", note
@@ -1777,6 +1943,13 @@ class PhoneSession:
                 "error",
                 f"⚠ Core DOWN — {task_id} is queued on disk but nothing will run it. "
                 f"Tap Start core or run: {core.get('how')}",
+            )
+        elif core.get("booting") or not core.get("ready"):
+            await self.activity(
+                "work",
+                f"⚠ Core booting/not ready ({core.get('ready_reason')}) — "
+                f"{task_id} waits until /startup finishes (or use skip-startup boot).",
+                task_id=task_id,
             )
         elif core.get("pane_error"):
             await self.activity(
@@ -1947,7 +2120,10 @@ class PhoneSession:
                 await self.enqueue_speak(
                     SpeakItem(
                         reason="work_result",
-                        prompt_text=frame_task_result_prompt(text[:1500]),
+                        prompt_text=(
+                            frame_task_result_prompt(text[:1500])
+                            + WORK_RESULT_DONE_EPILOGUE
+                        ),
                         task_id=task_id,
                         preview=text[:120],
                         meta={"elapsed_ms": elapsed_ms, "call_id": call_id},
@@ -2008,7 +2184,8 @@ async def result_poller(app: web.Application) -> None:
             try:
                 core = probe_core_status()
                 sig = (
-                    f"{core['alive']}:{core.get('age_s')}:{core.get('pending_tasks')}:"
+                    f"{core['alive']}:{core.get('ready')}:{core.get('booting')}:"
+                    f"{core.get('age_s')}:{core.get('pending_tasks')}:"
                     f"{core.get('status')}:{core.get('pane_error')}"
                 )
                 if sig != last_core_sig:

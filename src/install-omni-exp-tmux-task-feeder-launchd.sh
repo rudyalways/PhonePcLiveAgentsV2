@@ -9,6 +9,7 @@ LABEL="com.sutando.omni-exp-tmux-task-feeder"
 OLD_LABELS=("com.sutando.tmux-task-feeder" "com.sutando.omni-tmux-task-feeder")
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$REPO/src/launchd/$LABEL.plist"
+SRC_FEEDER="$REPO/src/omni-exp-watch-tasks-to-tmux-inbox.sh"
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 SUPPORT="$HOME/Library/Application Support/Sutando/omni-exp-feeder"
 DOMAIN="gui/$(id -u)"
@@ -33,111 +34,42 @@ bootout_if_loaded() {
       sleep 0.3
     done
   fi
+  # Legacy load path may still hold the job when bootstrap API is broken.
+  launchctl unload "$DEST" 2>/dev/null || true
+}
+
+# Prefer bootstrap; on macOS "Bootstrap failed: 5" fall back to load -w
+# (observed 2026-08-06 — bootstrap I/O error while load -w succeeds).
+load_agent() {
+  local err
+  if err="$(launchctl bootstrap "$DOMAIN" "$DEST" 2>&1)"; then
+    echo "Loaded $SERVICE via bootstrap (inbox-mode KeepAlive)"
+    return 0
+  fi
+  echo "  bootstrap failed ($err) — trying launchctl load -w" >&2
+  if launchctl load -w "$DEST" 2>/dev/null; then
+    echo "Loaded $SERVICE via load -w (inbox-mode KeepAlive)"
+    return 0
+  fi
+  echo "ERROR: could not load $SERVICE (bootstrap + load -w both failed)" >&2
+  return 1
 }
 
 materialize() {
   mkdir -p "$SUPPORT/inbox" "$SUPPORT/state"
-  # Generate TCC-safe feeder (no exec of ~/Documents scripts, inbox-driven).
-  cat > "$SUPPORT/omni-exp-watch-tasks-to-tmux.sh" <<EOF
-#!/bin/bash
-set -u
-REPO="$REPO"
-WS="$WORKSPACE"
-SUPPORT="$SUPPORT"
-SOCK="\${SUTANDO_TMUX_SOCKET:-/tmp/sutando-tmux.sock}"
-SESSION="\${SUTANDO_TMUX_SESSION:-sutando-core}"
-TASKS="\$WS/tasks"
-RESULTS="\$WS/results"
-INBOX="\$SUPPORT/inbox"
-LOG="\$SUPPORT/omni-exp-watch-tasks-to-tmux.log"
-STATE="\$SUPPORT/state"
-DONE_DIR="\$STATE/omni-exp-watch-tasks-to-tmux.done"
-PID_FILE="\$STATE/omni-exp-watch-tasks-to-tmux.pid"
-LOCK_DIR="\$STATE/omni-exp-watch-tasks-to-tmux.lock"
-POLL_S="\${SUTANDO_TMUX_TASK_FEEDER_POLL_S:-1}"
-STUCK_S="\${SUTANDO_TMUX_TASK_FEEDER_STUCK_S:-45}"
-# After this many re-nudges without a done-marker, abandon and drain the next inbox
-# item (prevents one orphan from head-of-line blocking Safari/etc.).
-MAX_NUDGES="\${SUTANDO_TMUX_TASK_FEEDER_MAX_NUDGES:-2}"
-mkdir -p "\$INBOX" "\$STATE" "\$DONE_DIR"
-if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
-  old="\$(cat "\$PID_FILE" 2>/dev/null || true)"
-  if [[ -n "\${old:-}" ]] && kill -0 "\$old" 2>/dev/null; then
-    echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) already running pid=\$old" >>"\$LOG"
-    exit 0
+  if [[ ! -f "$SRC_FEEDER" ]]; then
+    echo "ERROR: missing $SRC_FEEDER" >&2
+    exit 1
   fi
-  rm -rf "\$LOCK_DIR"; mkdir "\$LOCK_DIR" 2>/dev/null || true
-fi
-cleanup() {
-  [[ -f "\$PID_FILE" && "\$(cat "\$PID_FILE" 2>/dev/null)" == "\$\$" ]] && rm -f "\$PID_FILE"
-  rm -rf "\$LOCK_DIR"
-}
-trap cleanup EXIT INT TERM
-echo "\$\$" > "\$PID_FILE"
-echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) feeder start pid=\$\$ inbox-mode" >>"\$LOG"
-session_ready() { tmux -S "\$SOCK" has-session -t "\$SESSION" 2>/dev/null; }
-# TCC: LaunchAgents cannot read ~/Documents — never probe \$RESULTS/\$TASKS for done.
-# Omni-exp (or install seed) writes \$DONE_DIR/<basename> when a result is consumed.
-is_done() { [[ -f "\$DONE_DIR/\$1" ]]; }
-mark_done() { : > "\$DONE_DIR/\$1"; rm -f "\$INBOX/\$1" 2>/dev/null || true; }
-inject() {
-  local base="\$1" path="\$TASKS/\$base"
-  session_ready || { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) defer \$base" >>"\$LOG"; return 1; }
-  echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) inject \$base" >>"\$LOG"
-  local msg="TASK_FILE: \$base — Read \${path}, do the work, write \${RESULTS}/\${base}. Then idle for the next TASK_FILE."
-  printf '%s' "\$msg" | tmux -S "\$SOCK" load-buffer -
-  tmux -S "\$SOCK" paste-buffer -t "\$SESSION" 2>/dev/null || true
-  sleep 0.08
-  tmux -S "\$SOCK" send-keys -t "\$SESSION" Enter 2>/dev/null || true
-}
-oldest_pending() {
-  while IFS= read -r f; do
-    [[ -n "\$f" ]] || continue
-    base=\$(basename "\$f")
-    case "\$base" in task-*.txt) ;; *) continue ;; esac
-    is_done "\$base" && { mark_done "\$base"; continue; }
-    echo "\$base"; return 0
-  done < <(ls -tr "\$INBOX"/task-*.txt 2>/dev/null)
-  return 1
-}
-# Do not seed from \$TASKS here — LaunchAgent gets Operation not permitted on Documents.
-inflight_base=""; inflight_at=0; inflight_nudges=0
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do session_ready && break; sleep 1; done
-while true; do
-  if [[ -n "\$inflight_base" ]] && is_done "\$inflight_base"; then
-    mark_done "\$inflight_base"
-    echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) done \$inflight_base" >>"\$LOG"
-    inflight_base=""; inflight_at=0; inflight_nudges=0
-  fi
-  base="\$(oldest_pending || true)"
-  if [[ -z "\${base:-}" ]]; then sleep "\$POLL_S"; continue; fi
-  now=\$(date +%s)
-  if [[ -n "\$inflight_base" ]] && ! is_done "\$inflight_base"; then
-    if (( now - inflight_at < STUCK_S )); then sleep "\$POLL_S"; continue; fi
-    inflight_nudges=\$((inflight_nudges + 1))
-    if (( inflight_nudges > MAX_NUDGES )); then
-      echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) abandon \$inflight_base after \${MAX_NUDGES} nudges (unblock inbox)" >>"\$LOG"
-      mark_done "\$inflight_base"
-      inflight_base=""; inflight_at=0; inflight_nudges=0
-      sleep "\$POLL_S"
-      continue
-    fi
-    echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) re-nudge \$inflight_base (\$inflight_nudges/\$MAX_NUDGES)" >>"\$LOG"
-    base="\$inflight_base"
-  fi
-  if inject "\$base"; then
-    if [[ "\$base" != "\$inflight_base" ]]; then inflight_nudges=0; fi
-    inflight_base="\$base"; inflight_at=\$(date +%s)
-  fi
-  sleep "\$POLL_S"
-done
-EOF
+  cp "$SRC_FEEDER" "$SUPPORT/omni-exp-watch-tasks-to-tmux.sh"
   chmod +x "$SUPPORT/omni-exp-watch-tasks-to-tmux.sh"
   cat > "$SUPPORT/run-feeder.sh" <<EOF
 #!/bin/bash
 set -u
 cd /tmp || true
-exec /bin/bash "$SUPPORT/omni-exp-watch-tasks-to-tmux.sh"
+export SUTANDO_FEEDER_WS='$WORKSPACE'
+export SUTANDO_FEEDER_SUPPORT='$SUPPORT'
+exec /bin/bash "\$SUTANDO_FEEDER_SUPPORT/omni-exp-watch-tasks-to-tmux.sh"
 EOF
   chmod +x "$SUPPORT/run-feeder.sh"
   # Seed current backlog into inbox from this interactive shell (has Documents access).
@@ -166,16 +98,27 @@ case "$cmd" in
     pkill -f "$SUPPORT/omni-exp-watch-tasks-to-tmux" 2>/dev/null || true
     pkill -f "Application Support/Sutando/feeder" 2>/dev/null || true
     pkill -f "Application Support/Sutando/omni-feeder" 2>/dev/null || true
+    # Prefer launchd over Documents scanner (avoids double TASK_FILE paste).
+    pkill -f "$REPO/src/omni-exp-watch-tasks-to-tmux.sh" 2>/dev/null || true
+    pkill -f "omni-exp-watch-tasks-to-tmux-supervisor" 2>/dev/null || true
     sleep 0.3
     materialize
-    sed \
-      -e "s|__SUPPORT__|$SUPPORT|g" \
-      -e "s|__BREW_BIN__|$BREW_BIN|g" \
-      -e "s|__HOME__|$HOME|g" \
-      "$TEMPLATE" > "$DEST"
+    # Strip XML comments — some launchctl paths choke on them (Bootstrap 5).
+    python3 - "$TEMPLATE" "$DEST" "$SUPPORT" "$BREW_BIN" "$HOME" <<'PY'
+import re, sys
+src, dest, support, brew, home = sys.argv[1:6]
+text = open(src, encoding="utf-8").read()
+text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+text = (
+    text.replace("__SUPPORT__", support)
+    .replace("__BREW_BIN__", brew)
+    .replace("__HOME__", home)
+)
+open(dest, "w", encoding="utf-8").write(text)
+PY
+    plutil -lint "$DEST" >/dev/null
     bootout_if_loaded
-    launchctl bootstrap "$DOMAIN" "$DEST"
-    echo "Loaded $SERVICE (inbox-mode KeepAlive)"
+    load_agent
     ;;
   --uninstall|uninstall)
     bootout_if_loaded
@@ -189,15 +132,18 @@ case "$cmd" in
     echo Uninstalled
     ;;
   --status|status)
-    if launchctl print "$SERVICE" >/dev/null 2>&1; then
-      launchctl print "$SERVICE" | grep -E '^\s+(state|pid|last exit code|runs)' || true
+    if launchctl print "$SERVICE" >/dev/null 2>&1 || launchctl list 2>/dev/null | grep -q "$LABEL"; then
+      launchctl print "$SERVICE" 2>/dev/null | grep -E '^\s+(state|pid|last exit code|runs)' || \
+        launchctl list | grep "$LABEL" || true
     else echo "(not loaded)"; fi
     echo "inbox: $(ls "$SUPPORT/inbox"/task-*.txt 2>/dev/null | wc -l | tr -d ' ') pending notifies"
     ;;
   --restart|restart)
-    if ! launchctl print "$SERVICE" >/dev/null 2>&1; then exec bash "$0" install; fi
+    if ! launchctl print "$SERVICE" >/dev/null 2>&1 && ! launchctl list 2>/dev/null | grep -q "$LABEL"; then
+      exec bash "$0" install
+    fi
     materialize
-    launchctl kickstart -k "$SERVICE"
+    launchctl kickstart -k "$SERVICE" 2>/dev/null || launchctl load -w "$DEST" 2>/dev/null || true
     bash "$0" --status
     ;;
   *) echo "Usage: $0 [install|--uninstall|--status|--restart]" >&2; exit 2 ;;
