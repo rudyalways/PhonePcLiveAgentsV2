@@ -46,8 +46,17 @@ def qwen_input_transcription_config() -> dict[str, str] | None:
     }
 
 
+DEFAULT_QWEN_OMNI_REALTIME_MODEL = "qwen3.5-omni-plus-realtime"
+
+
 def qwen_default_realtime_model() -> str:
+    """Voice-agent / LiveKit model (unchanged: REALTIME_MODEL)."""
     return os.environ.get("REALTIME_MODEL", "qwen3.5-omni-plus-realtime")
+
+
+def qwen_omni_realtime_model() -> str:
+    """Omni-agent only — does not change voice-agent resolution."""
+    return os.environ.get("QWEN_OMNI_REALTIME_MODEL") or DEFAULT_QWEN_OMNI_REALTIME_MODEL
 
 
 def qwen_default_output_voice() -> str:

@@ -16,8 +16,8 @@ import aiohttp
 
 from qwen_realtime_compat import (
     qwen_default_output_voice,
-    qwen_default_realtime_model,
     qwen_input_transcription_config,
+    qwen_omni_realtime_model,
     qwen_turn_detection_config,
 )
 
@@ -58,7 +58,7 @@ class QwenOmniSession:
         self.api_key = api_key
         self.on_event = on_event
         self.instructions = instructions
-        self.model = model or qwen_default_realtime_model()
+        self.model = model or qwen_omni_realtime_model()
         raw_base = base_url or os.environ.get("REALTIME_BASE_URL") or DEFAULT_BASE_URL
         self.base_url = raw_base
         self.voice = voice or qwen_default_output_voice()

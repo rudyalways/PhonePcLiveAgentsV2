@@ -74,9 +74,15 @@ async def run(args: argparse.Namespace) -> int:
     base = args.base_url or os.environ.get("REALTIME_BASE_URL", DEFAULT_BASE_URL)
     if not base.rstrip("/").endswith("/realtime"):
         base = base.rstrip("/") + "/realtime"
-    model = args.model or os.environ.get("REALTIME_MODEL", DEFAULT_MODEL)
+    model = (
+        args.model
+        or os.environ.get("QWEN_OMNI_REALTIME_MODEL")
+        or os.environ.get("REALTIME_MODEL")
+        or DEFAULT_MODEL
+    )
     url = build_ws_url(base, model)
-    print(f"Connecting: {url}")
+    print(f"model: {model}")
+    print(f"Connecting: {url.split('?')[0]}?model=<redacted>")
 
     flags = {
         "session_created": False,

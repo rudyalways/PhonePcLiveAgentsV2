@@ -60,6 +60,7 @@ describe('resolveRealtimeConfig', () => {
 		process.env.DASHSCOPE_API_KEY = 'sk-test-key-1234567890';
 		const cfg = resolveRealtimeConfig();
 		assert.equal(cfg.provider, 'qwen');
+		assert.equal(cfg.model, 'qwen3.5-omni-plus-realtime');
 		assert.equal(cfg.capabilities.vision, 'input_image_buffer');
 		assert.equal(cfg.capabilities.requiresAudioBeforeVision, true);
 		assert.equal(cfg.transcriptionModel, 'qwen3-asr-flash-realtime');
