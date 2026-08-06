@@ -151,6 +151,11 @@
   .act.assistant { color: #ffe6b8; }
   .act.system, .act.session { color: #b8ffd2; }
   .act.work { color: #86efac; }
+  .act.core { color: #a5b4fc; }
+  #chip-core.bad { border-color: var(--danger); color: #ffb4a8; }
+  #core-btn { display: none; }
+  #core-btn.show { display: inline-block; }
+  #core-btn.stop { background: var(--danger); color: #fff; }
   canvas { display: none; }
 </style>
 </head>
@@ -170,6 +175,7 @@
     <span class="chip" id="chip-stream">Stream: idle</span>
     <span class="chip" id="chip-trigger">Trigger: —</span>
     <span class="chip" id="chip-work">Work: —</span>
+    <span class="chip" id="chip-core">Core: —</span>
   </div>
   <div id="partial">
     <div class="label" id="partial-label">live</div>
@@ -198,7 +204,8 @@
   <button type="button" id="mic-btn" class="on">Mic on</button>
   <button type="button" id="flip-btn">Flip</button>
   <button type="button" id="ask-btn">Ask view</button>
-  <button type="button" id="work-btn">Core…</button>
+  <button type="button" id="work-btn">Task…</button>
+  <button type="button" id="core-btn">Start core</button>
   <button type="button" id="disc-btn" class="danger">End</button>
 </div>
 <canvas id="snap"></canvas>
@@ -221,8 +228,11 @@ const chipAsr = document.getElementById("chip-asr");
 const chipStream = document.getElementById("chip-stream");
 const chipTrigger = document.getElementById("chip-trigger");
 const chipWork = document.getElementById("chip-work");
+const chipCore = document.getElementById("chip-core");
+const coreBtn = document.getElementById("core-btn");
 
 let ws = null;
+let coreAlive = false;
 let workStartedAt = 0;
 let stream = null;
 let audioCtx = null;
@@ -427,9 +437,37 @@ function resetLiveUi() {
   setChip(chipStream, "Stream: idle");
   setChip(chipTrigger, "Trigger: —");
   setChip(chipWork, "Work: —");
+  setChip(chipCore, "Core: —");
+  coreBtn.classList.remove("show", "stop");
+  coreBtn.textContent = "Start core";
   workStartedAt = 0;
   showPartial("", "");
   lastAsr = "";
+}
+
+function setCoreStatus(msg) {
+  coreAlive = !!msg.alive;
+  const age = msg.age_s == null ? "?" : (msg.age_s < 120 ? msg.age_s + "s" : Math.round(msg.age_s / 60) + "m");
+  const pend = msg.pending_tasks != null ? ` · ${msg.pending_tasks} queued` : "";
+  if (msg.alive) {
+    setChip(chipCore, `Core: up ${age}${pend}`, "on");
+    if (msg.can_stop !== false) {
+      coreBtn.textContent = "Stop core";
+      coreBtn.classList.add("show", "stop");
+    } else {
+      coreBtn.classList.remove("show", "stop");
+    }
+  } else {
+    setChip(chipCore, `Core: DOWN (${age})${pend}`, "bad");
+    if (msg.can_start !== false) {
+      coreBtn.textContent = "Start core";
+      coreBtn.classList.add("show");
+      coreBtn.classList.remove("stop");
+    } else {
+      coreBtn.classList.remove("show", "stop");
+    }
+  }
+  chipCore.title = msg.how ? `Start: ${msg.how}` : "";
 }
 
 function fmtMs(ms) {
@@ -486,7 +524,8 @@ function handleMsg(msg) {
       setChip(chipVad, "VAD: quiet", "on");
     }
   } else if (msg.type === "stream") {
-    if (msg.state === "started") setChip(chipStream, "Stream: out", "busy");
+    const turn = msg.turn_id ? `[${msg.turn_id}] ` : "";
+    if (msg.state === "started") setChip(chipStream, `Stream: ${turn || ""}out`.trim(), "busy");
     else if (msg.state === "audio") setChip(chipStream, `Stream: audio×${msg.chunks || 0}`, "busy");
     else if (msg.state === "done") {
       setChip(chipStream, msg.suppressed ? "Stream: suppressed" : "Stream: idle", msg.suppressed ? "hot" : "on");
@@ -497,6 +536,7 @@ function handleMsg(msg) {
     setChip(chipTrigger, `Trigger: ${msg.reason || "?"}`, msg.state === "fired" || msg.state === "queued" ? "hot" : "");
     logAct("trigger", `Trigger ${label}` + (msg.why ? ` (${msg.why})` : ""));
   } else if (msg.type === "work") {
+    const turn = msg.turn_id ? `[${msg.turn_id}] ` : "";
     const taskId = msg.task_id || "";
     const id = taskId.replace(/^task-/, "…");
     const wait = fmtMs(msg.elapsed_ms);
@@ -505,11 +545,11 @@ function handleMsg(msg) {
       const params = msg.arguments
         || (msg.parameters ? JSON.stringify(msg.parameters) : "");
       setChip(chipWork, `Work: tool ${tool}`, "hot");
-      logAct("work", `Tool call: ${tool}(${params})`);
+      logAct("work", `${turn}Tool call: ${tool}(${params})`);
     } else if (msg.state === "queued") {
       workStartedAt = Date.now();
       setChip(chipWork, "Work: queued", "busy");
-      logAct("work", `Task queued${id ? " " + id : ""} · ${msg.task || ""}`);
+      logAct("work", `${turn}Task queued${id ? " " + id : ""} · ${msg.task || ""}`);
       upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
     } else if (msg.state === "processing" || msg.state === "waiting") {
       setChip(chipWork, `Work: wait ${wait}`, "busy");
@@ -526,6 +566,11 @@ function handleMsg(msg) {
       logAct("work", `Task timed out after ${wait}${id ? " · " + id : ""}`);
       workStartedAt = 0;
     }
+  } else if (msg.type === "core") {
+    setCoreStatus(msg);
+  } else if (msg.type === "core_start" || msg.type === "core_stop") {
+    logAct(msg.ok ? "core" : "error", msg.message || msg.type);
+    setCoreStatus(msg);
   } else if (msg.type === "activity") {
     const message = msg.message || "";
     // Ignore legacy server heartbeats if any still arrive.
@@ -626,6 +671,14 @@ document.getElementById("work-btn").onclick = () => {
   if (task && ws?.readyState === 1) {
     ws.send(JSON.stringify({ type: "control", action: "work", task }));
   }
+};
+coreBtn.onclick = () => {
+  if (ws?.readyState !== 1) return;
+  coreBtn.disabled = true;
+  const action = coreAlive ? "stop_core" : "start_core";
+  logAct("core", action === "start_core" ? "Starting sutando-core…" : "Stopping sutando-core…");
+  ws.send(JSON.stringify({ type: "control", action }));
+  setTimeout(() => { coreBtn.disabled = false; }, 5000);
 };
 document.getElementById("disc-btn").onclick = () => stopAll();
 document.getElementById("act-clear").onclick = (e) => {

@@ -21,7 +21,9 @@ import json
 import logging
 import os
 import re
+import socket
 import ssl
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -67,6 +69,203 @@ SCENE_COOLDOWN_MS = int(os.environ.get("OMNI_SCENE_COOLDOWN_MS", "10000"))
 AUTH_REQUIRED = os.environ.get("OMNI_AUTH_REQUIRED", "1").lower() in ("1", "true", "yes")
 WORK_HEARTBEAT_S = float(os.environ.get("OMNI_WORK_HEARTBEAT_S", "2"))
 WORK_TIMEOUT_S = float(os.environ.get("OMNI_WORK_TIMEOUT_S", "600"))
+# .alive mtime younger than this → core considered up (matches health-check ~90s).
+CORE_ALIVE_MAX_AGE_S = float(os.environ.get("OMNI_CORE_ALIVE_MAX_AGE_S", "90"))
+ALLOW_START_CORE = os.environ.get("OMNI_ALLOW_START_CORE", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+START_CLI = REPO / "src" / "agent" / "start-cli.sh"
+HEARTBEAT_PY = REPO / "src" / "core_heartbeat.py"
+TMUX_SOCKET = os.environ.get("SUTANDO_TMUX_SOCKET", "/tmp/sutando-tmux.sock")
+TMUX_SESSION = os.environ.get("SUTANDO_TMUX_SESSION", "sutando-core")
+LOGS_DIR = WORKSPACE / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _host_label() -> str:
+    try:
+        out = subprocess.check_output(
+            ["bash", str(REPO / "scripts" / "sutando-config.sh"), "host-label"],
+            cwd=str(REPO),
+            text=True,
+            timeout=5,
+        )
+        label = out.strip()
+        if label:
+            return label
+    except Exception:
+        pass
+    return socket.gethostname().split(".")[0] or "local"
+
+
+HOST_LABEL = _host_label()
+
+
+def probe_core_status() -> dict[str, Any]:
+    """Read workspace heartbeat + core-status.json (same signals as health-check)."""
+    alive_path = WORKSPACE / "state" / "cores" / f"{HOST_LABEL}.alive"
+    age_s: float | None = None
+    alive = False
+    payload: dict[str, Any] = {}
+    if alive_path.exists():
+        try:
+            age_s = max(0.0, time.time() - alive_path.stat().st_mtime)
+            alive = age_s <= CORE_ALIVE_MAX_AGE_S
+            raw = json.loads(alive_path.read_text())
+            if isinstance(raw, dict):
+                payload = raw
+        except Exception:
+            pass
+    step = None
+    core_status = None
+    status_path = WORKSPACE / "state" / "core-status.json"
+    if status_path.exists():
+        try:
+            st = json.loads(status_path.read_text())
+            if isinstance(st, dict):
+                core_status = st.get("status")
+                step = st.get("step")
+        except Exception:
+            pass
+    pending = 0
+    try:
+        pending = sum(
+            1
+            for p in TASKS_DIR.glob("task-*.txt")
+            if not (RESULTS_DIR / f"{p.stem}.txt").exists()
+        )
+    except Exception:
+        pass
+    return {
+        "alive": alive,
+        "age_s": None if age_s is None else round(age_s, 1),
+        "host": HOST_LABEL,
+        "status": core_status or payload.get("status"),
+        "step": step,
+        "pending_tasks": pending,
+        "can_start": ALLOW_START_CORE and START_CLI.is_file(),
+        "can_stop": ALLOW_START_CORE,
+        "how": f"bash {START_CLI.relative_to(REPO)}" if START_CLI.is_file() else "bash src/startup.sh",
+    }
+
+
+def _ensure_core_heartbeat() -> None:
+    """start-cli alone does not refresh .alive — startup.sh normally starts this."""
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", "src/core_heartbeat.py"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if found.returncode == 0 and found.stdout.strip():
+            return
+    except Exception:
+        pass
+    if not HEARTBEAT_PY.is_file():
+        return
+    log_path = LOGS_DIR / "core-heartbeat.log"
+    with open(log_path, "a", encoding="utf-8") as logf:
+        subprocess.Popen(
+            [sys.executable, str(HEARTBEAT_PY)],
+            cwd=str(REPO),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    logger.info("Started core_heartbeat.py")
+
+
+def start_sutando_core() -> dict[str, Any]:
+    """Detach-launch canonical core (start-cli.sh) + heartbeat. No-op if already alive."""
+    st = probe_core_status()
+    if st["alive"]:
+        _ensure_core_heartbeat()
+        return {"ok": True, "started": False, "message": "core already alive", **probe_core_status()}
+    if not ALLOW_START_CORE:
+        return {
+            "ok": False,
+            "started": False,
+            "message": "OMNI_ALLOW_START_CORE=0 — start manually: " + st["how"],
+            **st,
+        }
+    if not START_CLI.is_file():
+        return {"ok": False, "started": False, "message": "start-cli.sh missing", **st}
+    log_path = LOGS_DIR / "omni-start-core.log"
+    try:
+        # Prefer --force-restart when a stale tmux session may be blocking a fresh start.
+        args = ["bash", str(START_CLI), "--force-restart"]
+        with open(log_path, "a", encoding="utf-8") as logf:
+            logf.write(f"\n--- start {datetime.now(timezone.utc).isoformat()} ---\n")
+            logf.flush()
+            proc = subprocess.Popen(
+                args,
+                cwd=str(REPO),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env={**os.environ, "SUTANDO_CORE_SESSION": "1"},
+            )
+        _ensure_core_heartbeat()
+        # Give heartbeat a moment so the next probe can flip to UP.
+        time.sleep(1.5)
+        logger.info("Started sutando-core via %s pid=%s log=%s", args, proc.pid, log_path)
+        st2 = probe_core_status()
+        return {
+            "ok": True,
+            "started": True,
+            "pid": proc.pid,
+            "log": str(log_path),
+            "message": (
+                f"start-cli launched (pid {proc.pid}); "
+                + ("core UP" if st2["alive"] else f"wait for .alive < {int(CORE_ALIVE_MAX_AGE_S)}s")
+            ),
+            **st2,
+        }
+    except Exception as e:
+        logger.exception("start core failed: %s", e)
+        return {"ok": False, "started": False, "message": str(e), **st}
+
+
+def stop_sutando_core() -> dict[str, Any]:
+    """Stop the canonical tmux sutando-core session."""
+    if not ALLOW_START_CORE:
+        return {
+            "ok": False,
+            "stopped": False,
+            "message": "OMNI_ALLOW_START_CORE=0 — stop blocked",
+            **probe_core_status(),
+        }
+    try:
+        r = subprocess.run(
+            ["tmux", "-S", TMUX_SOCKET, "kill-session", "-t", TMUX_SESSION],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        # Also drop watcher session if present (codex path).
+        subprocess.run(
+            ["tmux", "-S", TMUX_SOCKET, "kill-session", "-t", f"{TMUX_SESSION}-watcher"],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        time.sleep(0.5)
+        st = probe_core_status()
+        ok = r.returncode == 0 or not st["alive"]
+        msg = (
+            "sutando-core stopped"
+            if ok
+            else f"kill-session rc={r.returncode}: {(r.stderr or r.stdout or '').strip()}"
+        )
+        logger.info("stop_sutando_core: %s", msg)
+        return {"ok": ok, "stopped": ok, "message": msg, **st}
+    except Exception as e:
+        logger.exception("stop core failed: %s", e)
+        return {"ok": False, "stopped": False, "message": str(e), **probe_core_status()}
 
 # Tool name + description aligned with voice (task-bridge.ts workTool) and
 # LiveKit (livekit-agent.py work) — same contract: name=work, param=task.
@@ -235,6 +434,21 @@ class PhoneSession:
         self._audio_buf: list[str] = []
         self._tools_this_response = 0
         self._handled_call_ids: set[str] = set()
+        # Monotonic model-response id for Activity logs (t1, t2, …).
+        # Qwen often does tool call on tN then a speech-only ack on tN+1.
+        self._turn_seq = 0
+        self._turn_id = "-"
+
+    def _begin_turn(self, data: dict[str, Any] | None = None) -> str:
+        self._turn_seq += 1
+        resp = (data or {}).get("response") if isinstance((data or {}).get("response"), dict) else {}
+        provider_id = str((resp or {}).get("id") or (data or {}).get("response_id") or "")
+        short = provider_id[-8:] if len(provider_id) >= 8 else provider_id
+        self._turn_id = f"t{self._turn_seq}" + (f"/{short}" if short else "")
+        return self._turn_id
+
+    def _turn_tag(self) -> str:
+        return f"[{self._turn_id}]"
 
     async def send(self, payload: dict[str, Any]) -> None:
         if self.ws.closed or self._closed:
@@ -245,10 +459,24 @@ class PhoneSession:
         await self.send({"type": "status", "state": state})
 
     async def activity(self, kind: str, message: str, **extra: Any) -> None:
-        await self.send({"type": "activity", "kind": kind, "message": message, **extra})
+        await self.send(
+            {
+                "type": "activity",
+                "kind": kind,
+                "message": message,
+                "turn_id": self._turn_id,
+                **extra,
+            }
+        )
 
     async def work_event(self, state: str, **extra: Any) -> None:
-        await self.send({"type": "work", "state": state, **extra})
+        await self.send(
+            {"type": "work", "state": state, "turn_id": self._turn_id, **extra}
+        )
+
+    async def push_core_status(self, st: dict[str, Any] | None = None) -> None:
+        payload = st or probe_core_status()
+        await self.send({"type": "core", **payload})
 
     async def start_qwen(self) -> None:
         api_key = (os.environ.get("DASHSCOPE_API_KEY") or "").strip()
@@ -275,6 +503,19 @@ class PhoneSession:
         await self.status("listening")
         await self.activity("session", f"Qwen ready ({self.qwen.model}) · tool: work")
         await self.activity("session", f"Tasks dir: {TASKS_DIR}")
+        core = probe_core_status()
+        await self.push_core_status(core)
+        if core["alive"]:
+            await self.activity(
+                "session",
+                f"Sutando-core UP · age={core.get('age_s')}s · pending={core.get('pending_tasks')}",
+            )
+        else:
+            await self.activity(
+                "error",
+                "Sutando-core DOWN — work() will queue but not finish. "
+                f"Start: {core.get('how')} (or tap Start core)",
+            )
 
     async def _on_qwen_event(self, data: dict[str, Any]) -> None:
         et = data.get("type", "")
@@ -293,9 +534,12 @@ class PhoneSession:
             self._assistant_text = ""
             self._audio_buf = []
             self._tools_this_response = 0
+            turn = self._begin_turn(data)
             await self.status("responding")
-            await self.send({"type": "stream", "state": "started"})
-            await self.activity("stream", "Response streaming…")
+            await self.send(
+                {"type": "stream", "state": "started", "turn_id": turn}
+            )
+            await self.activity("stream", f"{self._turn_tag()} Response streaming…")
         elif et == "response.done":
             self.gate.end_response()
             text = self._assistant_text.strip()
@@ -316,6 +560,7 @@ class PhoneSession:
                     "suppressed": suppress,
                     "tools_called": self._tools_this_response,
                     "fake_done": fake_done,
+                    "turn_id": self._turn_id,
                 }
             )
             if text:
@@ -338,16 +583,25 @@ class PhoneSession:
                 for chunk in self._audio_buf:
                     await self.send({"type": "audio.out", "format": "pcm16le_24k", "data": chunk})
             self._audio_buf = []
+            # After work() returns, Qwen often starts a NEW response.created that
+            # only speaks ("Working on it…") with tools=0. That is normal — do not
+            # log it as "no tool delegated" when a task is already pending.
             if self._tools_this_response == 0 and text and not suppress:
-                await self.activity(
-                    "work",
-                    "No work/tool delegated this turn (model spoke only)",
-                )
+                if self._pending_work:
+                    await self.activity(
+                        "work",
+                        f"{self._turn_tag()} Spoke only (OK — work already queued on an earlier turn)",
+                    )
+                else:
+                    await self.activity(
+                        "work",
+                        f"{self._turn_tag()} No work/tool delegated (model spoke only)",
+                    )
             if fake_done:
                 pending = len(self._pending_work)
                 await self.activity(
                     "work",
-                    "Blocked fake claim — spoke success without calling work"
+                    f"{self._turn_tag()} Blocked fake claim — spoke success without calling work"
                     + (f" ({pending} task(s) still pending)" if pending else ""),
                 )
                 if self.qwen:
@@ -362,7 +616,8 @@ class PhoneSession:
                         await self.activity("error", f"fake-done nudge failed: {e}")
             await self.status("listening" if not self._pending_work else "working")
             logger.info(
-                "response.done tools=%s fake_done=%s chars=%s text=%s",
+                "response.done turn=%s tools=%s fake_done=%s chars=%s text=%s",
+                self._turn_id,
                 self._tools_this_response,
                 fake_done,
                 len(text),
@@ -370,7 +625,7 @@ class PhoneSession:
             )
             await self.activity(
                 "stream",
-                "Response done"
+                f"{self._turn_tag()} Response done"
                 + (" (suppressed)" if suppress else f" · {len(text)} chars")
                 + f" · tools={self._tools_this_response}",
             )
@@ -458,14 +713,15 @@ class PhoneSession:
         params, params_exact = _parse_tool_parameters(arguments)
         # Exact name + full parameter JSON (no truncation) for audit.
         logger.info(
-            "TOOL_CALL tool=%s parameters=%s call_id=%s",
+            "TOOL_CALL turn=%s tool=%s parameters=%s call_id=%s",
+            self._turn_id,
             name,
             params_exact,
             call_id,
         )
         await self.activity(
             "work",
-            f"Tool call: {name}({params_exact})",
+            f"{self._turn_tag()} Tool call: {name}({params_exact})",
         )
         await self.work_event(
             "tool_called",
@@ -517,12 +773,16 @@ class PhoneSession:
                 },
             )
         logger.info(
-            "TOOL_CALL tool=%s → queued %s parameters=%s",
+            "TOOL_CALL turn=%s tool=%s → queued %s parameters=%s",
+            self._turn_id,
             name,
             task_id,
             params_exact,
         )
-        await self.activity("work", f"Tool {name}({params_exact}) → queued {task_id}")
+        await self.activity(
+            "work",
+            f"{self._turn_tag()} Tool {name}({params_exact}) → queued {task_id}",
+        )
 
     async def handle_audio(self, b64: str) -> None:
         if not self.qwen:
@@ -631,10 +891,18 @@ class PhoneSession:
         )
         await self.activity(
             "work",
-            f"Task queued ({source}): {task_id} — {task[:80]}",
+            f"{self._turn_tag()} Task queued ({source}): {task_id} — {task[:80]}",
             task_id=task_id,
             elapsed_ms=0,
         )
+        core = probe_core_status()
+        await self.push_core_status(core)
+        if not core["alive"]:
+            await self.activity(
+                "error",
+                f"⚠ Core DOWN — {task_id} is queued on disk but nothing will run it. "
+                f"Tap Start core or run: {core.get('how')}",
+            )
         return task_id
 
     async def poll_results_once(self) -> None:
@@ -713,6 +981,8 @@ class PhoneSession:
 
 
 async def result_poller(app: web.Application) -> None:
+    last_core_sig: str | None = None
+    ticks = 0
     while True:
         sessions: list[PhoneSession] = list(app["sessions"])
         for s in sessions:
@@ -720,6 +990,18 @@ async def result_poller(app: web.Application) -> None:
                 await s.poll_results_once()
             except Exception as e:
                 logger.warning("result poll: %s", e)
+        ticks += 1
+        # Push core liveness every ~4s (or on change) so the HUD stays honest.
+        if ticks % 8 == 0 and sessions:
+            try:
+                core = probe_core_status()
+                sig = f"{core['alive']}:{core.get('age_s')}:{core.get('pending_tasks')}:{core.get('status')}"
+                if sig != last_core_sig:
+                    last_core_sig = sig
+                    for s in sessions:
+                        await s.push_core_status(core)
+            except Exception as e:
+                logger.warning("core status push: %s", e)
         await asyncio.sleep(0.5)
 
 
@@ -764,6 +1046,24 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     await session.handle_manual_prompt(str(data.get("text") or "Describe what you see."))
                 elif action == "work":
                     await session.enqueue_work(str(data.get("task") or ""), source="manual")
+                elif action == "core_status":
+                    await session.push_core_status()
+                elif action == "start_core":
+                    result = await asyncio.to_thread(start_sutando_core)
+                    await session.send({"type": "core_start", **result})
+                    await session.push_core_status()
+                    await session.activity(
+                        "session" if result.get("ok") else "error",
+                        result.get("message") or json.dumps(result)[:200],
+                    )
+                elif action == "stop_core":
+                    result = await asyncio.to_thread(stop_sutando_core)
+                    await session.send({"type": "core_stop", **result})
+                    await session.push_core_status()
+                    await session.activity(
+                        "session" if result.get("ok") else "error",
+                        result.get("message") or json.dumps(result)[:200],
+                    )
                 elif action == "ping":
                     await session.send({"type": "pong", "ts": time.time()})
             else:
