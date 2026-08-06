@@ -3,7 +3,10 @@
 Env: `OMNI_EXP_MODE=research`  
 Aliases: `research_mode`, `scene_research`.
 
-**Implemented in code** (`src/omni_exp_mode.py` + `src/omni-exp-agent.py`):
+Meeting / whiteboard note capture (audio-first, no deck every utterance):
+[`omni-exp-whiteboard-meeting-capture.md`](./omni-exp-whiteboard-meeting-capture.md).
+
+**Implemented in code** (`src/omni_exp_mode.py` + `src/omni-exp-agent.py` + `src/omni_exp_research_capture.py`):
 
 | Surface | What |
 |---|---|
@@ -16,7 +19,7 @@ Aliases: `research_mode`, `scene_research`.
 
 ## Intent
 
-Turn phone camera + mic into a **research capture loop**: notice topics from the scene and speech, expand them into multi-angle research, and deliver a short **PPT-like HTML deck** (1–2 slides concatenated into one file) with **auto-play** and **auto-explanation**. Draft the research narrative in Markdown first, then render HTML.
+Turn phone camera + mic into a **research capture loop**: notice topics from the scene and speech, expand them into multi-angle research, and deliver a **PPT-like HTML deck** (one file; **one major topic per slide**, typically 3–8) with **auto-play** and **~10–20s auto-explanation** per slide. Draft the research narrative in Markdown first, then render HTML.
 
 ## Responsibility split (same as other modes)
 
@@ -72,14 +75,17 @@ Canonical prompt stamped on every research task: `RESEARCH_TASK_SYSTEM` in `src/
 
 **Simplified Chinese (简体中文) required** for all user-facing deck copy: titles, thesis, bullets, lane labels, follow-ups, narration, control labels (`播放/暂停`, `静音`). `html lang="zh-CN"`. Proper nouns may stay original. Markdown briefings should also be Chinese.
 
-#### Slide topics (1–2 slides in one file)
+#### Slide topics (topic-paged; do not crush into 2)
 
 | Slide | When | Content |
 |---|---|---|
-| **1 — 全景 / 论点** | Always | 中文标题（≤16字）, 一句论点, 3–5 要点, optional 来源标签（论文 / 创业公司 / 大厂） |
-| **2 — 深挖 / 行动** | If enough substance | 论文 · 创业公司 · 大厂 · 社区讨论 · 投资视角 (各1–2条). 页脚 2–4 条待办 |
+| **1 — 全景 / 论点** | Always | 中文标题（≤16字）, 一句论点, 3–5 要点, optional 来源标签 |
+| **2…N-1 — one hook each** | Each major MD topic/chapter | Title + thesis + 3–5 bullets. Do not merge unrelated chapters. |
+| **Last — 资源 / 行动** | Always if links/todos exist | Links + 2–4 待办; optional direction lanes |
 
-Curate for a standup briefing — do not dump raw notes.
+Counter chrome: `主题 i/N` (or `主题 i/N · 页 a/b` when a topic spans two pages). Bare `2/2` is only valid when there are really two topics. Cap at 10 slides.
+
+Narration: **10–20 seconds** spoken Chinese per slide (~45–90 汉字).
 
 #### Format (PPT-like)
 

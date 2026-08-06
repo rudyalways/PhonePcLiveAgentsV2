@@ -46,6 +46,7 @@ from omni_exp_mode import (  # noqa: E402
     task_system_suffix,
     work_tool_description,
 )
+from omni_exp_research_capture import ResearchSessionBuffer  # noqa: E402
 from omni_exp_result_speak import (  # noqa: E402
     DELIVER_RETRY_DELAYS_S,
     TRUST_DONE_CLAIM_S,
@@ -101,6 +102,16 @@ SCENE_CHANGE_ENABLED = _env_omni_exp("SCENE_CHANGE", "1").lower() in ("1", "true
 SCENE_COOLDOWN_MS = int(_env_omni_exp("SCENE_COOLDOWN_MS", "30000"))
 # Mean abs-diff on 64×36 gray thumb (0–255). Higher = fewer false scene fires.
 SCENE_ENTER_THRESHOLD = float(_env_omni_exp("SCENE_THRESHOLD", "28"))
+# Research / whiteboard meeting capture buffer (docs/omni-exp-whiteboard-meeting-capture.md).
+RESEARCH_FLUSH_IDLE_S = float(_env_omni_exp("RESEARCH_FLUSH_IDLE_S", "90"))
+RESEARCH_FLUSH_MIN_INTERVAL_S = float(
+    _env_omni_exp("RESEARCH_FLUSH_MIN_INTERVAL_S", "45")
+)
+# Optional research-only MAD threshold (lower = more sensitive). Empty → SCENE_THRESHOLD.
+_RESEARCH_SCENE_THRESHOLD_RAW = _env_omni_exp("RESEARCH_SCENE_THRESHOLD", "").strip()
+RESEARCH_SCENE_THRESHOLD = (
+    float(_RESEARCH_SCENE_THRESHOLD_RAW) if _RESEARCH_SCENE_THRESHOLD_RAW else None
+)
 # Upload near-dupe skip (MAD). Independent of SCENE_THRESHOLD so quiet scene
 # fires do not starve the rolling vision window (main omni uses ~18*0.35).
 UPLOAD_DEDUPE_THRESHOLD = float(_env_omni_exp("UPLOAD_DEDUPE", str(18.0 * 0.35)))
@@ -851,6 +862,12 @@ OMNI_EXP_MODE = normalize_omni_exp_mode(_env_omni_exp("MODE", "research"))
 # Research capture loop needs scene_change; force on (override OMNI_EXP_SCENE_CHANGE=0).
 if OMNI_EXP_MODE == "research":
     SCENE_CHANGE_ENABLED = True
+    # Slightly more sensitive MAD for whiteboard pans when override is set;
+    # default RESEARCH_SCENE_THRESHOLD=22 if neither env is customized via RESEARCH_*.
+    if RESEARCH_SCENE_THRESHOLD is not None:
+        SCENE_ENTER_THRESHOLD = RESEARCH_SCENE_THRESHOLD
+    elif not _env_omni_exp("SCENE_THRESHOLD", "").strip():
+        SCENE_ENTER_THRESHOLD = 22.0
 # Optional full prompt override (OMNI_EXP_INSTRUCTIONS) wins over mode defaults.
 _INSTRUCTIONS_OVERRIDE = _env_omni_exp("INSTRUCTIONS", "")
 INSTRUCTIONS = build_omni_exp_instructions(
@@ -954,6 +971,12 @@ class PhoneSession:
             upload_dedupe_threshold=UPLOAD_DEDUPE_THRESHOLD,
             upload_keepalive_s=UPLOAD_KEEPALIVE_S,
         )
+        self.research_buf: ResearchSessionBuffer | None = None
+        if OMNI_EXP_MODE == "research":
+            self.research_buf = ResearchSessionBuffer(
+                flush_idle_s=RESEARCH_FLUSH_IDLE_S,
+                flush_min_interval_s=RESEARCH_FLUSH_MIN_INTERVAL_S,
+            )
         # Latest JPEG from the client (even if upload was skipped) for speech keyframes.
         self._last_jpeg: bytes | None = None
         self.qwen: QwenOmniSession | None = None
@@ -1214,8 +1237,9 @@ class PhoneSession:
         elif OMNI_EXP_MODE == "research":
             await self.activity(
                 "session",
-                "RESEARCH mode — capture scene/audio topics; deep research → "
-                "MD then auto-play HTML deck (see docs/omni-exp-research-mode.md)",
+                "RESEARCH mode — ASR/scene meeting capture + optional deep deck "
+                f"(scene_thr={SCENE_ENTER_THRESHOLD}; "
+                "docs/omni-exp-whiteboard-meeting-capture.md)",
             )
         core = probe_core_status()
         await self.push_core_status(core)
@@ -1514,6 +1538,15 @@ class PhoneSession:
                     {"type": "transcript", "role": "user", "text": tx, "final": True}
                 )
                 await self.activity("asr", f"ASR: {tx[:120]}")
+                if self.research_buf is not None:
+                    hooks = self.research_buf.add_asr(tx)
+                    if hooks:
+                        kinds = ",".join(sorted({h.kind for h in hooks}))
+                        await self.activity(
+                            "research",
+                            f"Capture hooks ({kinds}): {tx[:100]}",
+                        )
+                    await self.maybe_flush_research_capture(reason="asr")
         elif et == "response.function_call_arguments.done" or (
             "function_call" in et and et.endswith(".done")
         ):
@@ -1698,6 +1731,8 @@ class PhoneSession:
         await self.send({"type": "trigger", "reason": "scene_change", "state": "fired"})
         # One line at fire time; [[NO_SPEAK]] outcome is collapsed on response.done.
         await self.activity("trigger", "Auto trigger: scene_change")
+        if self.research_buf is not None:
+            self.research_buf.add_scene_note("scene_change fired (camera)")
         ok, why = await self._try_start_prompt("scene_change", SCENE_PROMPT)
         if not ok:
             await self.activity("trigger", f"scene_change start failed: {why}")
@@ -1753,6 +1788,35 @@ class PhoneSession:
             n += 1
             logger.info("RECLAIM result task_id=%s age=%.1fs", task_id, age)
         return n
+
+    async def maybe_flush_research_capture(
+        self, *, reason: str = "tick", force: bool = False
+    ) -> None:
+        """Flush ResearchSessionBuffer to sutando-core when policy says so."""
+        buf = self.research_buf
+        if buf is None:
+            return
+        # Peek last ASR for deep-cue without requiring caller to pass text.
+        last_tx = buf.asr_lines[-1][1] if buf.asr_lines else ""
+        deep = buf.wants_deep(last_tx) if reason == "asr" else False
+        kind = buf.should_flush(force=force, deep=deep)
+        if kind == "none":
+            return
+        body = buf.build_flush_task(kind)
+        tid, status, _note = await self.enqueue_work(
+            body, source=f"research_{kind.replace('-', '_')}"
+        )
+        if status == "queued":
+            buf.mark_flushed()
+            await self.activity(
+                "research",
+                f"Flush {kind} → {tid} ({reason}) · {buf.snapshot()}",
+            )
+        else:
+            await self.activity(
+                "research",
+                f"Flush {kind} skipped ({status}): {tid}",
+            )
 
     async def enqueue_work(
         self, task: str, *, source: str = "manual", call_id: str | None = None
@@ -1828,7 +1892,7 @@ class PhoneSession:
         )
         if call_id:
             content += f"call_id: {call_id}\n"
-        content += task_system_suffix(OMNI_EXP_MODE)
+        content += task_system_suffix(OMNI_EXP_MODE, task_body)
         path = TASKS_DIR / f"{task_id}.txt"
         path.write_text(content)
         # TCC-safe notify for launchd feeder (cannot scan ~/Documents/tasks).
@@ -2141,6 +2205,12 @@ async def result_poller(app: web.Application) -> None:
                 await s.poll_results_once()
             except Exception as e:
                 logger.warning("result poll: %s", e)
+            # Idle capture flush (audio-first meeting buffer).
+            if ticks % 4 == 0 and s.research_buf is not None:
+                try:
+                    await s.maybe_flush_research_capture(reason="idle_tick")
+                except Exception as e:
+                    logger.warning("research flush tick: %s", e)
         # No attached phone session → still retire finished task+result pairs so
         # feeder/core don't keep re-driving them (Baidu re-open loop).
         if not sessions and ticks % 4 == 0:

@@ -7,7 +7,8 @@ Split of responsibility:
 ``normal_with_gui`` is a no-op for core (empty stamp) and uses the baseline voice
 prompt / work-tool wording (same shape as pre-mode omni-exp).
 
-Design note for ``research``: docs/omni-exp-research-mode.md
+Design notes: docs/omni-exp-research-mode.md,
+docs/omni-exp-whiteboard-meeting-capture.md
 """
 
 from __future__ import annotations
@@ -100,38 +101,34 @@ _NO_GUI_HTML_MIDDLE = (
 )
 
 _RESEARCH_MIDDLE = (
-    "MODE: research (active) — you are a live research capture front-end.\n"
-    "MONITOR camera + mic continuously. Extract durable hooks whenever they appear:\n"
-    "- search topics (names, products, papers, companies, jargon on screen or spoken)\n"
-    "- research questions\n"
-    "- todos / follow-ups\n"
-    "- notes / facts worth keeping\n"
-    "- meeting notes or a short meeting summary if it looks like a talk/whiteboard\n"
+    "MODE: research (active) — you are a live research / meeting-capture front-end.\n"
+    "MONITOR camera + mic. Prefer accumulating hooks; the host also auto-buffers ASR "
+    "and may flush meeting notes without you calling work.\n"
+    "Hooks to notice: topics; research questions; todos/follow-ups; notes; "
+    "meeting/whiteboard summary bullets.\n"
     "\n"
-    "When you have a coherent NEW hook (or a batch of related ones), call work with a "
-    "structured brief, for example:\n"
-    "  Research capture: <topic>. Context: <what was seen/heard>. "
-    "Hooks: topics=…; questions=…; todos=…; notes=…. "
+    "Call work only when:\n"
+    "(1) User explicitly asks for deep research / deck / PPT / 深度研究 / 做个deck, OR\n"
+    "(2) A clear NEW research topic needs the full pipeline (not every todo).\n"
+    "Structured deep brief example:\n"
+    "  Research capture: <topic>. Context: …. Hooks: …. "
     "Run full research pipeline (MD then auto-play HTML deck).\n"
-    "Batch related hooks; do not spam one task per word. Re-call only for a distinct new topic.\n"
-    "- Say one short line that you're researching; do not invent findings.\n"
-    "- Core does multi-angle deep research and builds a Simplified-Chinese auto-play "
-    "HTML deck — you only speak the TASK_RESULT summary.\n"
+    "For ordinary todos/summary, prefer a short ack — do NOT demand a deck every utterance.\n"
+    "- Say one short line; do not invent findings.\n"
     "- Phrase work as non-GUI research (curl/fetch/CLI), never 'open Google and search'.\n"
     "\n"
-    "For EVERYTHING else that is not a pure camera description, call work under this mode.\n"
-    "\n"
     "TOOLS:\n"
-    "- work: capture → deep research → Markdown first → 1–2 slide auto-play HTML deck "
-    "with auto-explanation. Same wait/result rules as always.\n"
+    "- work: optional deep path → Markdown first → Chinese auto-play HTML deck. "
+    "Meeting-note capture often runs without this tool. Same wait/result rules.\n"
     "\n"
 )
 
 _RESEARCH_SCENE_OVERRIDE = (
-    "\nSCENE CHANGE OVERRIDE (research mode): If the new scene has a researchable "
-    "topic, product, paper, slide, whiteboard, or spoken hook, call work with a "
-    "capture brief (structured hooks) instead of [[NO_SPEAK]]. "
-    "Use [[NO_SPEAK]] only when nothing researchable appeared.\n"
+    "\nSCENE CHANGE OVERRIDE (research mode): Prefer [[NO_SPEAK]] for routine "
+    "whiteboard/camera motion — the host buffers a scene note for meeting flush. "
+    "Call work only if the scene clearly needs deep research / a deck "
+    "(new product/paper/company to investigate), with a capture brief. "
+    "Do not open a deck for every scribble.\n"
 )
 
 _SCENE_PROMPT_DEFAULT = (
@@ -140,14 +137,14 @@ _SCENE_PROMPT_DEFAULT = (
 )
 
 _SCENE_PROMPT_RESEARCH = (
-    "[Proactive: scene_change] Research-capture scan. Look at the new scene (and any "
-    "on-screen text). If you see a researchable topic, product, paper, company, slide, "
-    "or whiteboard, call work NOW with a structured brief: "
+    "[Proactive: scene_change] Research-capture scan. Default reply: [[NO_SPEAK]] "
+    "(host already notes the scene for meeting capture). "
+    "Call work ONLY if the new scene clearly needs deep research / a deck "
+    "(new product, paper, company, or explicit research ask on screen), with: "
     "Research capture: <topic>. Context: <what is visible>. "
     "Hooks: topics=…; questions=…; todos=…; notes=…. "
     "Run full research pipeline (MD then auto-play HTML deck). "
-    "Speak at most one short acknowledgment. "
-    "If nothing researchable / same as before, reply exactly [[NO_SPEAK]]."
+    "Speak at most one short acknowledgment. Otherwise [[NO_SPEAK]]."
 )
 
 _WORK_TOOL_DESC_NORMAL = (
@@ -169,9 +166,10 @@ _WORK_TOOL_DESC_NO_GUI_HTML = (
 )
 
 _WORK_TOOL_DESC_RESEARCH = (
-    "Delegate scene/audio research capture to core: extract topics/todos/notes, "
-    "deep-research multiple directions, write Markdown first, then a 1–2 slide "
-    "auto-play HTML deck with auto-explanation; open the HTML. Speak a short summary."
+    "Delegate deep research to core when asked: multi-angle non-GUI research, "
+    "Markdown first, then a Chinese auto-play HTML deck (one slide per major topic); "
+    "open the HTML. Do not use for routine todos — meeting notes may auto-flush "
+    "separately. Speak a short summary when ready."
 )
 
 # Source of truth for sutando-core execution (appended to task files).
@@ -200,7 +198,26 @@ NO_GUI_HTML_TASK_SYSTEM = (
     "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
 )
 
-# Sutando-core switchable prompt for OMNI_EXP_MODE=research.
+# Capture-only stamp: meeting notes MD, no HTML deck.
+# Spec: docs/omni-exp-whiteboard-meeting-capture.md
+RESEARCH_CAPTURE_FLUSH_TASK_SYSTEM = (
+    "===SUTANDO SYSTEM INSTRUCTIONS===\n"
+    "RESEARCH CAPTURE-FLUSH — you are sutando-core. "
+    "Spec: docs/omni-exp-whiteboard-meeting-capture.md\n"
+    "This task is meeting/whiteboard note capture ONLY.\n"
+    "- Parse topics, todos, research_followups, notes, summary_cues, recent_asr, "
+    "scene_notes from the task body.\n"
+    "- Append/update workspace/data/omni-research/meeting-YYYYMMDD.md "
+    "(mkdir -p as needed) in Simplified Chinese where natural: "
+    "topics; todos/action items; research follow-ups; short running summary.\n"
+    "- Do NOT run deep multi-angle research.\n"
+    "- Do NOT build or open an HTML deck / PPT.\n"
+    "- Results file: 1–3 sentence phone summary of what was added to the notes "
+    "(paths ok). Keep it speakable.\n"
+    "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
+)
+
+# Sutando-core switchable prompt for OMNI_EXP_MODE=research (deep / deck).
 # HTML deck contract: topics / format / autoplay / auto-explain.
 RESEARCH_TASK_SYSTEM = (
     "===SUTANDO SYSTEM INSTRUCTIONS===\n"
@@ -220,23 +237,36 @@ RESEARCH_TASK_SYSTEM = (
     "(mkdir -p as needed) in Simplified Chinese: capture summary; per-direction findings "
     "+ links; follow-ups. (Source titles/URLs may stay in original language.)\n"
     "\n"
-    "### D) HTML DECK (required) — ONE file, 1–2 PPT slides concatenated\n"
+    "### D) HTML DECK (required) — ONE file, topic-paged PPT slides\n"
     "Path: workspace/data/omni-research/<slug>-deck.html\n"
     "Build from the Markdown. Deck CSS/UI inline. "
     "Exception: in-browser TTS may load a JS runtime + download a Chinese speech model "
     "once, then cache it locally (Cache API / IndexedDB) for offline replay.\n"
     "\n"
-    "#### D1) Slide topics (choose 1 or 2) — Chinese labels on slides\n"
-    "Always include Slide 1. Add Slide 2 only if you have enough substance.\n"
-    "- SLIDE 1 — 全景 / 论点\n"
-    "  中文标题（≤16字）. 一句中文论点. 3–5条中文要点. "
-    "可选 2–3 个来源标签（论文 / 创业公司 / 大厂）.\n"
-    "- SLIDE 2 — 深挖 / 行动（optional）\n"
-    "  五条中文分栏：论文 | 创业公司 | 大厂 | 社区讨论 | 投资视角 "
-    "(各1–2条; 无内容则省略). 页脚：2–4条中文待办/跟进.\n"
-    "Do NOT dump raw research. Curate for a standup-style briefing in Chinese.\n"
+    "#### D1) Slide topics — ONE MAJOR TOPIC PER SLIDE (do not crush into 2)\n"
+    "Enumerate the distinct research/meeting hooks from the MD (chapters, products, "
+    "questions, resource packs, etc.). Typical deck: 3–8 slides. Cap at 10.\n"
+    "- SLIDE 1 — 全景 / 论点 (always): book/product/topic identity + one thesis + "
+    "3–5 bullets + optional source chips.\n"
+    "- SLIDES 2…N-1 — one major hook each (e.g. Ch4 值迭代, Ch5 蒙特卡罗, Ch6 随机近似). "
+    "Title ≤16字; thesis; 3–5 bullets. Do NOT merge unrelated chapters onto one slide.\n"
+    "- LAST SLIDE — 资源 / 行动: links + 2–4 待办/跟进; optional lanes "
+    "(论文|创业公司|大厂|社区|投资) only if they fit THIS closing slide.\n"
+    "If one topic truly needs two pages, split it — never fake a short total.\n"
+    "FORBIDDEN: shipping only 2 slides when the MD clearly has ≥3 separable topics "
+    "(that makes counter 2/2 misleading).\n"
     "\n"
-    "#### D2) Format (PPT-like) + LANGUAGE\n"
+    "#### D2) Counter chrome (required) — topic-aware, not a fake 2/2\n"
+    "- Each slide element MUST set data-topic-index (1-based) and data-topic-total (=N).\n"
+    "- If a topic spans 2 pages: also data-page-index and data-page-total on those slides.\n"
+    "- Visible counter format:\n"
+    "  * Single page per topic: 「主题 i/N」 (e.g. 主题 1/5)\n"
+    "  * Multi-page topic: 「主题 i/N · 页 a/b」 (e.g. 主题 2/5 · 页 1/2)\n"
+    "- Progress dots = one per slide (real slide count). Do NOT label as bare i/2 "
+    "unless N really is 2 topics.\n"
+    "- html lang=\"zh-CN\".\n"
+    "\n"
+    "#### D3) Format (PPT-like) + LANGUAGE\n"
     "- LANGUAGE (required): All user-facing HTML copy MUST be Simplified Chinese (简体中文) — "
     "titles, thesis, bullets, lane labels, follow-ups, #explain narration, and control "
     "labels (e.g. 播放/暂停, 静音, 讲解). Proper nouns / product names may stay in original "
@@ -247,12 +277,13 @@ RESEARCH_TASK_SYSTEM = (
     "- Visual: background #12141a; text #f2f2f0; accent #3d9cf0. Fonts: -apple-system, "
     "\"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", sans-serif. "
     "No purple neon, no emoji decoration, no cluttered card grids.\n"
-    "- Chrome: slide counter (e.g. 1/2), progress dots, 播放/暂停, 静音讲解.\n"
-    "- html lang=\"zh-CN\".\n"
+    "- Chrome: topic counter (主题 i/N [· 页 a/b]), progress dots, 播放/暂停, 静音讲解.\n"
     "\n"
-    "#### D3) Auto-explain — in-browser model download + local TTS (required)\n"
-    "- Every slide MUST include a Chinese narration transcript (2–4 spoken sentences):\n"
+    "#### D4) Auto-explain — 10–20s per slide (required)\n"
+    "- Every slide MUST include a Chinese narration transcript aimed at "
+    "**10–20 seconds spoken** (~45–90 汉字; 1–3 short sentences):\n"
     "  * data-narration=\"…\" on the slide element, AND visible in #explain.\n"
+    "- Do NOT write minute-long narrations. Prefer one idea per slide.\n"
     "- PRIMARY TTS path (do this in the HTML, not via core pre-baked mp3):\n"
     "  (1) On first open, show a small status:「正在下载语音模型…」then fetch a "
     "browser-runnable Chinese TTS stack (e.g. onnxruntime-web / transformers.js / "
@@ -267,13 +298,14 @@ RESEARCH_TASK_SYSTEM = (
     "- Mute: skip audio, still show transcript; use timer fallback for advance.\n"
     "- UI: show model state 下载中 / 就绪 / 失败; allow retry download.\n"
     "\n"
-    "#### D4) Auto-play — MUST adapt to explanation duration\n"
-    "- Do NOT use a fixed 10s when local/model TTS or speechSynthesis is speaking.\n"
+    "#### D5) Auto-play — MUST adapt to explanation duration (target 10–20s)\n"
+    "- Do NOT use a fixed timer when local/model TTS or speechSynthesis is speaking.\n"
     "- Advance rule (when not muted / not reduced-motion):\n"
     "  * Local model TTS / generated AudioBuffer: onended → next slide "
     "(progress tracks playback position / duration).\n"
     "  * Else if speechSynthesis fallback: utterance.onend → next slide.\n"
-    "  * Else (mute / TTS unavailable): timer = max(8s, ~0.35s × char_count/2), cap 20s.\n"
+    "  * Else (mute / TTS unavailable): timer clamp to [10s, 20s] from narration length "
+    "(~0.22s × 汉字数, min 10s, max 20s).\n"
     "- Start only after model is 就绪 (or fallback is chosen). If still 下载中, wait "
     "(do not advance on a blind timer).\n"
     "- Loop to slide 1 after the last slide.\n"
@@ -356,10 +388,23 @@ def scene_prompt_for_mode(mode: str) -> str:
     return _SCENE_PROMPT_DEFAULT
 
 
-def task_system_suffix(mode: str) -> str:
+def research_task_kind(task_body: str) -> str:
+    """Return ``capture-flush`` | ``deep`` for research-mode task routing."""
+    b = (task_body or "").lower()
+    if "[research-capture-flush]" in b:
+        return "capture-flush"
+    if "[research-deep]" in b or "[research-mode]" in b:
+        return "deep"
+    if b.startswith("research capture:"):
+        return "deep"
+    return "deep"
+
+
+def task_system_suffix(mode: str, task_body: str = "") -> str:
     """Extra block appended to task files so core honors the mode.
 
     ``normal_with_gui`` → empty string (no-op for core).
+    Research: capture-flush stamp vs full deck stamp from task tags.
     """
     m = normalize_omni_exp_mode(mode)
     if m == "no_gui":
@@ -367,6 +412,8 @@ def task_system_suffix(mode: str) -> str:
     if m == "no_gui_html_output":
         return "\n" + NO_GUI_HTML_TASK_SYSTEM
     if m == "research":
+        if research_task_kind(task_body) == "capture-flush":
+            return "\n" + RESEARCH_CAPTURE_FLUSH_TASK_SYSTEM
         return "\n" + RESEARCH_TASK_SYSTEM
     return ""
 
@@ -376,6 +423,12 @@ def format_work_task(mode: str, task: str) -> str:
     body = (task or "").strip()
     if normalize_omni_exp_mode(mode) != "research":
         return body
-    if body.lower().startswith("research capture:") or "[research-mode]" in body.lower():
+    low = body.lower()
+    if (
+        low.startswith("research capture:")
+        or "[research-mode]" in low
+        or "[research-deep]" in low
+        or "[research-capture-flush]" in low
+    ):
         return body
     return f"[research-mode] {body}"

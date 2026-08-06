@@ -108,7 +108,16 @@ check(
 check(
     "research HTML slide topics specified",
     "SLIDE 1 — 全景 / 论点" in stamp
-    and "SLIDE 2 — 深挖 / 行动" in stamp,
+    and "ONE MAJOR TOPIC PER SLIDE" in stamp
+    and "主题 i/N" in stamp,
+)
+check(
+    "research forbids fake 2/2 when many topics",
+    "FORBIDDEN" in stamp and "2/2 misleading" in stamp,
+)
+check(
+    "research narration 10–20s",
+    "10–20 seconds" in stamp or "10–20s" in stamp,
 )
 check(
     "research HTML requires Simplified Chinese",
@@ -124,7 +133,7 @@ check(
     "research auto-play adapts to local TTS end",
     "onended → next slide" in stamp
     and "utterance.onend → next slide" in stamp
-    and "Do NOT use a fixed 10s" in stamp
+    and "clamp to [10s, 20s]" in stamp
     and "下载中" in stamp,
 )
 check(
@@ -141,14 +150,19 @@ check(
     "auto-play HTML deck" in work_tool_description("research"),
 )
 check(
-    "research scene prompt asks for work capture",
-    "call work NOW" in scene_prompt_for_mode("research")
+    "research scene prompt defaults NO_SPEAK",
+    "Default reply: [[NO_SPEAK]]" in scene_prompt_for_mode("research")
+    and "Call work ONLY" in scene_prompt_for_mode("research")
     and "Research capture:" in scene_prompt_for_mode("research"),
 )
 check(
     "default scene prompt keeps NO_SPEAK",
     "[[NO_SPEAK]]" in scene_prompt_for_mode("normal_with_gui")
-    and "call work NOW" not in scene_prompt_for_mode("normal_with_gui"),
+    and "Call work ONLY" not in scene_prompt_for_mode("normal_with_gui"),
+)
+check(
+    "research voice prefers accumulate",
+    "Prefer accumulating" in research or "auto-buffers ASR" in research,
 )
 check(
     "research formats task tag",
