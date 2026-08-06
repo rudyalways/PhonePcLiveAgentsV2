@@ -8,8 +8,8 @@ Phases:
   P3  work() → tasks/results → speak/inject result
 
 Usage:
-  .venv/bin/python src/omni-agent.py
-  Open https://<host>:7090/omni on the phone (TLS cert in state/).
+  .venv/bin/python src/omni-exp-agent.py
+  Open https://<host>:7090/omni-exp on the phone (TLS cert in state/).
 """
 
 from __future__ import annotations
@@ -36,9 +36,10 @@ from dotenv import load_dotenv
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from omni_provider_qwen import QwenOmniSession  # noqa: E402
-from omni_scene import SceneChangeSensor  # noqa: E402
-from omni_turn_gate import TurnGate, TurnRequest  # noqa: E402
+from omni_exp_provider_qwen import QwenOmniSession  # noqa: E402
+from omni_exp_scene import SceneChangeSensor  # noqa: E402
+from omni_exp_speak_queue import SpeakItem, SpeakQueue  # noqa: E402
+from omni_exp_turn_gate import TurnGate, TurnRequest  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
 
 load_dotenv(REPO / ".env")
@@ -47,15 +48,27 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
-logger = logging.getLogger("omni-agent")
+logger = logging.getLogger("omni-exp-agent")
 
-PORT = int(os.environ.get("OMNI_PORT", "7090"))
+
+def _env_omni_exp(key: str, default: str = "") -> str:
+    """Prefer OMNI_EXP_*; fall back to legacy OMNI_* for one transition."""
+    exp = os.environ.get(f"OMNI_EXP_{key}")
+    if exp is not None:
+        return exp
+    legacy = os.environ.get(f"OMNI_{key}")
+    if legacy is not None:
+        return legacy
+    return default
+
+
+PORT = int(_env_omni_exp("PORT", "7090"))
 SRC_DIR = Path(__file__).resolve().parent
 STATE_DIR = REPO / "state"
 CERT_FILE = STATE_DIR / "server.crt"
 KEY_FILE = STATE_DIR / "server.key"
 USERS_FILE = SRC_DIR / "users.json"
-CLIENT_HTML = SRC_DIR / "omni-client.html"
+CLIENT_HTML = SRC_DIR / "omni-exp-client.html"
 
 WORKSPACE = resolve_workspace()
 TASKS_DIR = WORKSPACE / "tasks"
@@ -64,22 +77,41 @@ TASKS_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 STATE_DIR.mkdir(exist_ok=True)
 
-SCENE_CHANGE_ENABLED = os.environ.get("OMNI_SCENE_CHANGE", "1").lower() in ("1", "true", "yes")
-SCENE_COOLDOWN_MS = int(os.environ.get("OMNI_SCENE_COOLDOWN_MS", "10000"))
-AUTH_REQUIRED = os.environ.get("OMNI_AUTH_REQUIRED", "1").lower() in ("1", "true", "yes")
-WORK_HEARTBEAT_S = float(os.environ.get("OMNI_WORK_HEARTBEAT_S", "2"))
-WORK_TIMEOUT_S = float(os.environ.get("OMNI_WORK_TIMEOUT_S", "600"))
+SCENE_CHANGE_ENABLED = _env_omni_exp("SCENE_CHANGE", "1").lower() in ("1", "true", "yes")
+# Default 30s — 10s was chatty when the phone hand/lighting kept re-triggering.
+SCENE_COOLDOWN_MS = int(_env_omni_exp("SCENE_COOLDOWN_MS", "30000"))
+# Mean abs-diff on 64×36 gray thumb (0–255). Higher = fewer false scene fires.
+SCENE_ENTER_THRESHOLD = float(_env_omni_exp("SCENE_THRESHOLD", "28"))
+# After this many consecutive [[NO_SPEAK]] scene replies, multiply cooldown.
+SCENE_NOSPEAK_BACKOFF_AFTER = int(_env_omni_exp("SCENE_NOSPEAK_BACKOFF_AFTER", "2"))
+SCENE_NOSPEAK_BACKOFF_MULT = float(_env_omni_exp("SCENE_NOSPEAK_BACKOFF_MULT", "3"))
+# Fake-done nudge: at most one re-prompt per this many seconds (stops nudge loops).
+FAKE_DONE_NUDGE_COOLDOWN_S = float(_env_omni_exp("FAKE_DONE_NUDGE_COOLDOWN_S", "20"))
+# Work-result speak drain (docs/omni-exp-agent-design.md ready_merge): serial|concat|latest
+WORK_RESULT_MERGE = _env_omni_exp("WORK_RESULT_MERGE", "serial").strip().lower()
+SPEAK_QUEUE_MAX = int(_env_omni_exp("SPEAK_QUEUE_MAX", "32"))
+AUTH_REQUIRED = _env_omni_exp("AUTH_REQUIRED", "1").lower() in ("1", "true", "yes")
+WORK_HEARTBEAT_S = float(_env_omni_exp("WORK_HEARTBEAT_S", "2"))
+WORK_TIMEOUT_S = float(_env_omni_exp("WORK_TIMEOUT_S", "600"))
 # .alive mtime younger than this → core considered up (matches health-check ~90s).
-CORE_ALIVE_MAX_AGE_S = float(os.environ.get("OMNI_CORE_ALIVE_MAX_AGE_S", "90"))
-ALLOW_START_CORE = os.environ.get("OMNI_ALLOW_START_CORE", "1").lower() in (
+CORE_ALIVE_MAX_AGE_S = float(_env_omni_exp("CORE_ALIVE_MAX_AGE_S", "90"))
+ALLOW_START_CORE = _env_omni_exp("ALLOW_START_CORE", "1").lower() in (
     "1",
     "true",
     "yes",
 )
 START_CLI = REPO / "src" / "agent" / "start-cli.sh"
 HEARTBEAT_PY = REPO / "src" / "core_heartbeat.py"
+TMUX_FEEDER = REPO / "src" / "omni-exp-watch-tasks-to-tmux-supervisor.sh"
 TMUX_SOCKET = os.environ.get("SUTANDO_TMUX_SOCKET", "/tmp/sutando-tmux.sock")
 TMUX_SESSION = os.environ.get("SUTANDO_TMUX_SESSION", "sutando-core")
+# Keep Monitor-less cores fed when omni writes tasks (OpenRouter / no Monitor).
+ENSURE_TMUX_FEEDER = os.environ.get("SUTANDO_TMUX_TASK_FEEDER", "auto").lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 LOGS_DIR = WORKSPACE / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -101,6 +133,38 @@ def _host_label() -> str:
 
 
 HOST_LABEL = _host_label()
+
+
+def ensure_tmux_task_feeder() -> None:
+    """Start omni-exp-watch-tasks-to-tmux supervisor if not already alive (Monitor fallback)."""
+    if not ENSURE_TMUX_FEEDER or not TMUX_FEEDER.is_file():
+        return
+    pid_path = WORKSPACE / "state" / "omni-exp-watch-tasks-to-tmux-supervisor.pid"
+    try:
+        if pid_path.is_file():
+            old = int((pid_path.read_text() or "0").strip() or "0")
+            if old > 0:
+                os.kill(old, 0)
+                out = subprocess.check_output(
+                    ["ps", "-p", str(old), "-o", "args="],
+                    text=True,
+                    timeout=2,
+                )
+                if "omni-exp-watch-tasks-to-tmux-supervisor" in out:
+                    return
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        subprocess.Popen(
+            ["bash", str(TMUX_FEEDER)],
+            cwd=str(REPO),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.info("Started tmux task feeder supervisor (Monitor fallback)")
+    except Exception as e:
+        logger.warning("Could not start tmux task feeder: %s", e)
 
 
 def probe_core_status() -> dict[str, Any]:
@@ -188,7 +252,7 @@ def start_sutando_core() -> dict[str, Any]:
         return {
             "ok": False,
             "started": False,
-            "message": "OMNI_ALLOW_START_CORE=0 — start manually: " + st["how"],
+            "message": "OMNI_EXP_ALLOW_START_CORE=0 — start manually: " + st["how"],
             **st,
         }
     if not START_CLI.is_file():
@@ -235,7 +299,7 @@ def stop_sutando_core() -> dict[str, Any]:
         return {
             "ok": False,
             "stopped": False,
-            "message": "OMNI_ALLOW_START_CORE=0 — stop blocked",
+            "message": "OMNI_EXP_ALLOW_START_CORE=0 — stop blocked",
             **probe_core_status(),
         }
     try:
@@ -294,11 +358,11 @@ WORK_TOOL: dict[str, Any] = {
 # System prompt borrows voice/LiveKit DEFAULT BEHAVIOR + CRITICAL RULES
 # (voice-agent-config.ts / livekit-agent.py), trimmed for phone camera+mic
 # (no Zoom/meeting/inline keystroke tools on this surface).
-INSTRUCTIONS = os.environ.get(
-    "OMNI_INSTRUCTIONS",
+INSTRUCTIONS = _env_omni_exp(
+    "INSTRUCTIONS",
     (
         "You are Sutando, a personal AI that belongs entirely to the user. "
-        "You are on the user's phone camera and mic (omni). Keep spoken replies to 2–3 sentences.\n"
+        "You are on the user's phone camera and mic (omni-exp). Keep spoken replies to 2–3 sentences.\n"
         "\n"
         "DEFAULT BEHAVIOR: Call work for almost everything.\n"
         "You are the voice/vision interface. The Sutando core (Claude Code) is the brain.\n"
@@ -425,7 +489,7 @@ class PhoneSession:
         self.username = username
         self.gate = TurnGate()
         self.gate.cooldowns_ms["scene_change"] = SCENE_COOLDOWN_MS
-        self.scene = SceneChangeSensor()
+        self.scene = SceneChangeSensor(enter_threshold=SCENE_ENTER_THRESHOLD)
         self.qwen: QwenOmniSession | None = None
         # task_id -> {started, task, last_hb, source, call_id?}
         self._pending_work: dict[str, dict[str, Any]] = {}
@@ -438,6 +502,13 @@ class PhoneSession:
         # Qwen often does tool call on tN then a speech-only ack on tN+1.
         self._turn_seq = 0
         self._turn_id = "-"
+        # Which PromptTrigger started the in-flight model response (if any).
+        self._pending_prompt_reason: str | None = None
+        self._scene_nospeak_streak = 0
+        self._last_fake_done_nudge_at = 0.0
+        # Buffer PromptTriggers (work results / nudges) until response.done.
+        self.speak_queue = SpeakQueue(merge=WORK_RESULT_MERGE, max_items=SPEAK_QUEUE_MAX)
+        self._drain_lock = asyncio.Lock()
 
     def _begin_turn(self, data: dict[str, Any] | None = None) -> str:
         self._turn_seq += 1
@@ -446,6 +517,78 @@ class PhoneSession:
         short = provider_id[-8:] if len(provider_id) >= 8 else provider_id
         self._turn_id = f"t{self._turn_seq}" + (f"/{short}" if short else "")
         return self._turn_id
+
+    async def _try_start_prompt(self, reason: str, text: str) -> tuple[bool, str]:
+        """Start a PromptTrigger, reserving the turn *before* await (avoids race)."""
+        if not self.qwen:
+            return False, "no_qwen"
+        req = TurnRequest(kind="prompt", reason=reason, prompt_text=text)
+        ok, why = self.gate.allow(req)
+        if not ok:
+            return False, why
+        self.gate.mark_fired(req)
+        # Reserve immediately — response.created arrives later; without this,
+        # a second prompt_turn in the same poll loop races past allow().
+        self.gate.begin_response()
+        self._pending_prompt_reason = reason
+        try:
+            await self.qwen.prompt_turn(text)
+        except Exception:
+            self.gate.end_response()
+            self._pending_prompt_reason = None
+            raise
+        return True, "ok"
+
+    async def enqueue_speak(self, item: SpeakItem) -> None:
+        self.speak_queue.push(item)
+        await self.work_event(
+            "speak_queued",
+            task_id=item.task_id,
+            queue_len=len(self.speak_queue),
+            merge=self.speak_queue.merge,
+            preview=(item.preview or "")[:80],
+        )
+        await self.activity(
+            "work",
+            f"Speak buffered ({self.speak_queue.merge}) queue={len(self.speak_queue)}"
+            + (f" · {item.task_id}" if item.task_id else ""),
+        )
+        await self.drain_speak_queue()
+
+    async def drain_speak_queue(self) -> None:
+        """Start at most one buffered prompt when the session is idle."""
+        async with self._drain_lock:
+            if self.gate.responding or self.gate.voice_active:
+                return
+            if not self.speak_queue:
+                return
+            item = self.speak_queue.take()
+            if not item:
+                return
+            left = len(self.speak_queue)
+            await self.activity(
+                "work",
+                f"Speaking buffered turn…"
+                + (f" ({left} still queued)" if left else "")
+                + (f" · {item.task_id}" if item.task_id else ""),
+            )
+            try:
+                ok, why = await self._try_start_prompt(item.reason, item.prompt_text)
+            except Exception as e:
+                await self.activity("error", f"Speak drain failed: {e}")
+                self.speak_queue.push_front(item)
+                return
+            if not ok:
+                self.speak_queue.push_front(item)
+                await self.activity("work", f"Speak drain deferred: {why}")
+                return
+            await self.work_event(
+                "speak_started",
+                task_id=item.task_id,
+                queue_len=left,
+                merge=self.speak_queue.merge,
+                preview=(item.preview or "")[:80],
+            )
 
     def _turn_tag(self) -> str:
         return f"[{self._turn_id}]"
@@ -470,9 +613,9 @@ class PhoneSession:
         )
 
     async def work_event(self, state: str, **extra: Any) -> None:
-        await self.send(
-            {"type": "work", "state": state, "turn_id": self._turn_id, **extra}
-        )
+        # Always include turn_id for HUD task-card metadata (unless caller overrides).
+        payload = {"type": "work", "state": state, "turn_id": self._turn_id, **extra}
+        await self.send(payload)
 
     async def push_core_status(self, st: dict[str, Any] | None = None) -> None:
         payload = st or probe_core_status()
@@ -539,10 +682,14 @@ class PhoneSession:
             await self.send(
                 {"type": "stream", "state": "started", "turn_id": turn}
             )
-            await self.activity("stream", f"{self._turn_tag()} Response streaming…")
+            # Scene probes are frequent; log streaming only for user-facing turns.
+            if self._pending_prompt_reason != "scene_change":
+                await self.activity("stream", f"{self._turn_tag()} Response streaming…")
         elif et == "response.done":
             self.gate.end_response()
             text = self._assistant_text.strip()
+            prompt_reason = self._pending_prompt_reason
+            self._pending_prompt_reason = None
             suppress = "[[NO_SPEAK]]" in text
             fake_done = bool(
                 text
@@ -552,6 +699,7 @@ class PhoneSession:
             if fake_done:
                 # Don't play audio that claims a PC action that never ran.
                 suppress = True
+            scene_quiet = prompt_reason == "scene_change" and suppress and not fake_done
             await self.send(
                 {
                     "type": "stream",
@@ -561,9 +709,10 @@ class PhoneSession:
                     "tools_called": self._tools_this_response,
                     "fake_done": fake_done,
                     "turn_id": self._turn_id,
+                    "prompt_reason": prompt_reason,
                 }
             )
-            if text:
+            if text and not scene_quiet:
                 await self.send(
                     {
                         "type": "transcript",
@@ -598,37 +747,88 @@ class PhoneSession:
                         f"{self._turn_tag()} No work/tool delegated (model spoke only)",
                     )
             if fake_done:
+                self._scene_nospeak_streak = 0
                 pending = len(self._pending_work)
                 await self.activity(
                     "work",
                     f"{self._turn_tag()} Blocked fake claim — spoke success without calling work"
                     + (f" ({pending} task(s) still pending)" if pending else ""),
                 )
-                if self.qwen:
-                    try:
-                        await self.qwen.prompt_turn(
-                            "[System] You just claimed a PC action finished but did NOT "
-                            "call the work tool in that turn — nothing ran. "
-                            "If the user still wants it, call work now with a concrete task. "
-                            "If a prior work call is still pending, say you are still waiting."
+                now_nudge = time.time()
+                can_nudge = (
+                    self.qwen is not None
+                    and (now_nudge - self._last_fake_done_nudge_at) >= FAKE_DONE_NUDGE_COOLDOWN_S
+                )
+                if can_nudge:
+                    self._last_fake_done_nudge_at = now_nudge
+                    await self.enqueue_speak(
+                        SpeakItem(
+                            reason="work_result",
+                            prompt_text=(
+                                "[System] You just claimed a PC action finished but did NOT "
+                                "call the work tool in that turn — nothing ran. "
+                                "If the user still wants it, call work now with a concrete task. "
+                                "If a prior work call is still pending, say you are still waiting. "
+                                "Do not claim success again without calling work."
+                            ),
+                            preview="fake-done nudge",
+                            meta={"kind": "fake_done_nudge"},
                         )
-                    except Exception as e:
-                        await self.activity("error", f"fake-done nudge failed: {e}")
+                    )
+                elif self.qwen:
+                    await self.activity(
+                        "work",
+                        f"{self._turn_tag()} Fake-done nudge skipped (cooldown "
+                        f"{FAKE_DONE_NUDGE_COOLDOWN_S:.0f}s)",
+                    )
+            elif prompt_reason == "scene_change":
+                if suppress:
+                    self._scene_nospeak_streak += 1
+                    # Stretch cooldown after repeated "nothing new" scene probes.
+                    if self._scene_nospeak_streak >= SCENE_NOSPEAK_BACKOFF_AFTER:
+                        stretched = int(
+                            SCENE_COOLDOWN_MS
+                            * SCENE_NOSPEAK_BACKOFF_MULT
+                            * min(self._scene_nospeak_streak - SCENE_NOSPEAK_BACKOFF_AFTER + 1, 4)
+                        )
+                        self.gate.cooldowns_ms["scene_change"] = stretched
+                    await self.activity(
+                        "trigger",
+                        f"{self._turn_tag()} scene_change → nothing new"
+                        + (
+                            f" (backoff {self.gate.cooldowns_ms['scene_change']}ms)"
+                            if self._scene_nospeak_streak >= SCENE_NOSPEAK_BACKOFF_AFTER
+                            else ""
+                        ),
+                    )
+                else:
+                    self._scene_nospeak_streak = 0
+                    self.gate.cooldowns_ms["scene_change"] = SCENE_COOLDOWN_MS
+            else:
+                self._scene_nospeak_streak = 0
+                self.gate.cooldowns_ms["scene_change"] = SCENE_COOLDOWN_MS
             await self.status("listening" if not self._pending_work else "working")
             logger.info(
-                "response.done turn=%s tools=%s fake_done=%s chars=%s text=%s",
+                "response.done turn=%s tools=%s fake_done=%s scene_quiet=%s chars=%s text=%s",
                 self._turn_id,
                 self._tools_this_response,
                 fake_done,
+                scene_quiet,
                 len(text),
                 text[:120],
             )
-            await self.activity(
-                "stream",
-                f"{self._turn_tag()} Response done"
-                + (" (suppressed)" if suppress else f" · {len(text)} chars")
-                + f" · tools={self._tools_this_response}",
-            )
+            if not scene_quiet:
+                await self.activity(
+                    "stream",
+                    f"{self._turn_tag()} Response done"
+                    + (" (suppressed)" if suppress else f" · {len(text)} chars")
+                    + f" · tools={self._tools_this_response}",
+                )
+            # Design drain: after response.done, start next buffered PromptTrigger.
+            try:
+                await self.drain_speak_queue()
+            except Exception as e:
+                await self.activity("error", f"speak drain: {e}")
         elif et in ("response.audio.delta", "response.output_audio.delta"):
             delta = data.get("delta") or data.get("audio") or ""
             if delta:
@@ -816,11 +1016,14 @@ class PhoneSession:
             await self.activity("trigger", f"Scene change skipped: {why}")
             return
         assert self.qwen
-        self.gate.mark_fired(req)
         await self.status("proactive")
         await self.send({"type": "trigger", "reason": "scene_change", "state": "fired"})
+        # One line at fire time; [[NO_SPEAK]] outcome is collapsed on response.done.
         await self.activity("trigger", "Auto trigger: scene_change")
-        await self.qwen.prompt_turn(SCENE_PROMPT)
+        ok, why = await self._try_start_prompt("scene_change", SCENE_PROMPT)
+        if not ok:
+            await self.activity("trigger", f"scene_change start failed: {why}")
+            await self.status("listening" if not self._pending_work else "working")
 
     async def handle_manual_prompt(self, text: str) -> None:
         req = TurnRequest(kind="prompt", reason="manual", prompt_text=text)
@@ -830,10 +1033,12 @@ class PhoneSession:
             await self.activity("trigger", f"Manual prompt blocked: {why}")
             return
         assert self.qwen
-        self.gate.mark_fired(req)
         await self.send({"type": "trigger", "reason": "manual", "state": "fired"})
         await self.activity("trigger", "Manual: Ask view")
-        await self.qwen.prompt_turn(text)
+        ok, why = await self._try_start_prompt("manual", text)
+        if not ok:
+            await self.send({"type": "error", "message": f"prompt blocked: {why}"})
+            await self.activity("trigger", f"Manual prompt start failed: {why}")
 
     async def enqueue_work(
         self, task: str, *, source: str = "manual", call_id: str | None = None
@@ -854,6 +1059,21 @@ class PhoneSession:
             content += f"call_id: {call_id}\n"
         path = TASKS_DIR / f"{task_id}.txt"
         path.write_text(content)
+        # TCC-safe notify for launchd feeder (cannot scan ~/Documents/tasks).
+        try:
+            inbox = (
+                Path.home()
+                / "Library"
+                / "Application Support"
+                / "Sutando"
+                / "omni-exp-feeder"
+                / "inbox"
+            )
+            inbox.mkdir(parents=True, exist_ok=True)
+            (inbox / f"{task_id}.txt").write_text(task_id + "\n")
+        except Exception as e:
+            logger.warning("feeder inbox notify failed: %s", e)
+        ensure_tmux_task_feeder()
         now = time.time()
         self._pending_work[task_id] = {
             "started": now,
@@ -861,6 +1081,7 @@ class PhoneSession:
             "last_hb": now,
             "source": source,
             "call_id": call_id,
+            "phase": "task_written",
         }
         logger.info(
             "ENQUEUE_WORK via=%s task_id=%s call_id=%s task=%s",
@@ -882,16 +1103,28 @@ class PhoneSession:
                 "source": source,
             }
         )
+        # Lifecycle: tool_called (earlier) → task_written → … → result_processed
+        await self.work_event(
+            "task_written",
+            task_id=task_id,
+            call_id=call_id,
+            source=source,
+            task=task[:160],
+            elapsed_ms=0,
+            path=str(path),
+        )
+        # Keep legacy "queued" for older clients / sticky wait rows.
         await self.work_event(
             "queued",
             task_id=task_id,
+            call_id=call_id,
             source=source,
             task=task[:160],
             elapsed_ms=0,
         )
         await self.activity(
             "work",
-            f"{self._turn_tag()} Task queued ({source}): {task_id} — {task[:80]}",
+            f"{self._turn_tag()} Task file written ({source}): {task_id} — {task[:80]}",
             task_id=task_id,
             elapsed_ms=0,
         )
@@ -911,73 +1144,159 @@ class PhoneSession:
             meta = self._pending_work[task_id]
             started = float(meta.get("started") or now)
             elapsed = now - started
+            elapsed_ms = int(elapsed * 1000)
+            task_path = TASKS_DIR / f"{task_id}.txt"
+            archive_path = TASKS_DIR / "archive" / f"{task_id}.txt"
             result = RESULTS_DIR / f"{task_id}.txt"
+            task_snippet = str(meta.get("task") or "")[:80]
+            call_id = meta.get("call_id")
+
             if not result.exists():
                 if elapsed > WORK_TIMEOUT_S:
                     del self._pending_work[task_id]
                     await self.work_event(
                         "timeout",
                         task_id=task_id,
-                        elapsed_ms=int(elapsed * 1000),
+                        call_id=call_id,
+                        elapsed_ms=elapsed_ms,
+                        task=task_snippet,
                     )
                     await self.activity(
                         "work",
                         f"Task TIMEOUT after {_fmt_elapsed(elapsed)}: {task_id}",
                         task_id=task_id,
-                        elapsed_ms=int(elapsed * 1000),
+                        elapsed_ms=elapsed_ms,
                     )
                     if not self._pending_work:
                         await self.status("listening")
                     continue
+
+                # Task file gone (or archived) but no result yet → core claimed it.
+                claimed = (not task_path.exists()) or archive_path.exists()
+                phase = str(meta.get("phase") or "task_written")
+                if claimed and phase not in ("cc_processing", "result_file", "result_processed"):
+                    meta["phase"] = "cc_processing"
+                    await self.work_event(
+                        "cc_processing",
+                        task_id=task_id,
+                        call_id=call_id,
+                        elapsed_ms=elapsed_ms,
+                        task=task_snippet,
+                    )
+                    await self.activity(
+                        "work",
+                        f"CC processing {task_id} (task file claimed)",
+                        task_id=task_id,
+                        elapsed_ms=elapsed_ms,
+                    )
+
                 last_hb = float(meta.get("last_hb") or 0)
                 if now - last_hb >= WORK_HEARTBEAT_S:
                     meta["last_hb"] = now
-                    # Sticky chip only — do NOT append Activity rows (spam).
+                    # Sticky chip / task-list timer only — no Activity spam.
                     await self.work_event(
                         "processing",
                         task_id=task_id,
-                        elapsed_ms=int(elapsed * 1000),
-                        task=str(meta.get("task") or "")[:80],
+                        call_id=call_id,
+                        elapsed_ms=elapsed_ms,
+                        task=task_snippet,
+                        phase=str(meta.get("phase") or "task_written"),
                     )
                 continue
 
+            # Result file present: CC finished → omni consumes → speak.
             text = result.read_text().strip()
+            meta["phase"] = "result_file"
+            await self.work_event(
+                "result_file",
+                task_id=task_id,
+                call_id=call_id,
+                elapsed_ms=elapsed_ms,
+                preview=text[:120],
+                task=task_snippet,
+            )
+            # "cc_done" = core wrote the result (same moment we see the file).
+            await self.work_event(
+                "cc_done",
+                task_id=task_id,
+                call_id=call_id,
+                elapsed_ms=elapsed_ms,
+                preview=text[:120],
+                task=task_snippet,
+            )
             del self._pending_work[task_id]
             try:
                 result.unlink(missing_ok=True)
-                (TASKS_DIR / f"{task_id}.txt").unlink(missing_ok=True)
+                task_path.unlink(missing_ok=True)
             except Exception:
                 pass
             await self.work_event(
                 "result",
                 task_id=task_id,
-                elapsed_ms=int(elapsed * 1000),
+                call_id=call_id,
+                elapsed_ms=elapsed_ms,
                 preview=text[:120],
+                task=task_snippet,
             )
             await self.activity(
                 "work",
                 f"Task RESULT after {_fmt_elapsed(elapsed)}: {task_id} — {text[:100]}",
                 task_id=task_id,
-                elapsed_ms=int(elapsed * 1000),
+                elapsed_ms=elapsed_ms,
             )
             await self.send({"type": "transcript", "role": "assistant", "text": text[:2000]})
-            if self.qwen:
-                req = TurnRequest(
-                    kind="prompt",
-                    reason="work_result",
-                    prompt_text=(
-                        f"[System: Core finished in {_fmt_elapsed(elapsed)}. "
-                        f"Speak this result to the user briefly.]\n\n{text[:1500]}"
-                    ),
+            # Skip speaking backlog-cleanup markers (still mark processed).
+            if text.startswith("[cleared]"):
+                await self.work_event(
+                    "result_processed",
+                    task_id=task_id,
+                    call_id=call_id,
+                    elapsed_ms=elapsed_ms,
+                    preview=text[:120],
+                    task=task_snippet,
+                    spoke=False,
+                    skipped="cleared",
                 )
-                ok, why = self.gate.allow(req)
-                if ok:
-                    self.gate.mark_fired(req)
-                    await self.activity("work", "Speaking task result to user…")
-                    await self.qwen.prompt_turn(req.prompt_text)
-                else:
-                    await self.activity("work", f"Could not speak result yet: {why}")
-            await self.status("listening" if not self._pending_work else "working")
+            elif self.qwen:
+                await self.enqueue_speak(
+                    SpeakItem(
+                        reason="work_result",
+                        prompt_text=(
+                            f"[System: Core finished in {_fmt_elapsed(elapsed)}. "
+                            f"Speak this result to the user briefly.]\n\n{text[:1500]}"
+                        ),
+                        task_id=task_id,
+                        preview=text[:120],
+                        meta={"elapsed_ms": elapsed_ms, "call_id": call_id},
+                    )
+                )
+                await self.work_event(
+                    "result_processed",
+                    task_id=task_id,
+                    call_id=call_id,
+                    elapsed_ms=elapsed_ms,
+                    preview=text[:120],
+                    task=task_snippet,
+                    spoke=False,
+                    queued=True,
+                    queue_len=len(self.speak_queue),
+                )
+            else:
+                await self.work_event(
+                    "result_processed",
+                    task_id=task_id,
+                    call_id=call_id,
+                    elapsed_ms=elapsed_ms,
+                    preview=text[:120],
+                    task=task_snippet,
+                    spoke=False,
+                    speak_blocked="no_qwen",
+                )
+            await self.status(
+                "listening"
+                if not self._pending_work and not self.speak_queue and not self.gate.responding
+                else "working"
+            )
 
 
 async def result_poller(app: web.Application) -> None:
@@ -1081,7 +1400,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 async def index(_request: web.Request) -> web.StreamResponse:
     if not CLIENT_HTML.exists():
-        return web.Response(text="omni-client.html missing", status=404)
+        return web.Response(text="omni-exp-client.html missing", status=404)
     return web.FileResponse(CLIENT_HTML)
 
 
@@ -1104,6 +1423,9 @@ async def on_cleanup(app: web.Application) -> None:
 def make_app() -> web.Application:
     app = web.Application(client_max_size=16 * 1024 * 1024)
     app.router.add_get("/", index)
+    app.router.add_get("/omni-exp", index)
+    app.router.add_get("/omni-exp-client.html", index)
+    # Legacy aliases (pre omni-exp rename) — same client
     app.router.add_get("/omni", index)
     app.router.add_get("/omni-client.html", index)
     app.router.add_get("/ws", ws_handler)
@@ -1129,7 +1451,7 @@ def main() -> None:
             KEY_FILE,
             CERT_FILE,
         )
-    print(f"Omni agent at {proto}://0.0.0.0:{PORT}/omni  (ws: {proto.replace('http','ws')}://…/ws)", flush=True)
+    print(f"Omni-exp agent at {proto}://0.0.0.0:{PORT}/omni-exp  (ws: {proto.replace('http','ws')}://…/ws)", flush=True)
     web.run_app(app, host="0.0.0.0", port=PORT, ssl_context=ssl_ctx, print=None)
 
 

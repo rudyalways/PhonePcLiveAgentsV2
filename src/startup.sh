@@ -614,6 +614,17 @@ if [ -f "$WATCHER_PID_FILE" ]; then
   rm -f "$WATCHER_PID_FILE"
 fi
 
+# Reap stale Monitor-less tmux task feeder (OpenRouter / no-Monitor cores).
+FEEDER_PID_FILE="$WORKSPACE/state/omni-exp-watch-tasks-to-tmux.pid"
+if [ -f "$FEEDER_PID_FILE" ]; then
+  STALE_FEEDER="$(cat "$FEEDER_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$STALE_FEEDER" ] && ps -p "$STALE_FEEDER" -o args= 2>/dev/null | grep -q "omni-exp-watch-tasks-to-tmux"; then
+    kill "$STALE_FEEDER" 2>/dev/null || true
+    echo "  ✓ reaped stale omni-exp-watch-tasks-to-tmux feeder (pid $STALE_FEEDER)"
+  fi
+  rm -f "$FEEDER_PID_FILE"
+fi
+
 # Post-M0: repo-root tasks/results/data are NOT created. Pre-M0 this block
 # ran `mkdir -p tasks results data` as back-compat for unmigrated scripts —
 # but with everything routed through $WORKSPACE/{tasks,results,data} via the
@@ -1260,6 +1271,57 @@ elif grep -qE '^[[:space:]]*TWILIO_ACCOUNT_SID=[^[:space:]]' .env 2>/dev/null; t
   fi
 else
   echo "  ~ conversation server (no Twilio creds — optional)"
+fi
+
+# Monitor-less task feeder — injects TASK_FILE lines into sutando-core tmux when
+# Claude Code Monitor is unavailable (common on OpenRouter / non-Anthropic cores).
+# Default: auto (on when ANTHROPIC_BASE_URL contains "openrouter"), or force with
+# SUTANDO_TMUX_TASK_FEEDER=1. Off with =0. Does NOT replace Monitor when present;
+# duplicate prompts are harmless (core ignores already-done tasks).
+_FEEDER_MODE="${SUTANDO_TMUX_TASK_FEEDER:-auto}"
+_WANT_FEEDER=0
+case "$_FEEDER_MODE" in
+  1|true|yes|on) _WANT_FEEDER=1 ;;
+  0|false|no|off) _WANT_FEEDER=0 ;;
+  *)
+    case "${ANTHROPIC_BASE_URL:-}" in
+      *openrouter*) _WANT_FEEDER=1 ;;
+    esac
+    # Also honor OpenRouter key present in claude-sutando settings (no BASE_URL).
+    if [ "$_WANT_FEEDER" = "0" ] && [ -f "$WORKSPACE/.claude-sutando/settings.json" ]; then
+      if grep -qi 'openrouter' "$WORKSPACE/.claude-sutando/settings.json" 2>/dev/null; then
+        _WANT_FEEDER=1
+      fi
+    fi
+    ;;
+esac
+if [ "$_WANT_FEEDER" = "1" ]; then
+  _FEEDER_SVC="gui/$(id -u)/com.sutando.omni-exp-tmux-task-feeder"
+  if launchctl print "$_FEEDER_SVC" >/dev/null 2>&1; then
+    echo "  ✓ tmux task feeder (launchd KeepAlive)"
+  elif [ -f "$REPO/src/install-omni-exp-tmux-task-feeder-launchd.sh" ]; then
+    echo "  Starting tmux task feeder (launchd KeepAlive)..."
+    bash "$REPO/src/install-omni-exp-tmux-task-feeder-launchd.sh" install \
+      || echo "  ✗ tmux task feeder launchd failed"
+  else
+    echo "  ✗ tmux task feeder installer missing"
+  fi
+else
+  echo "  ~ tmux task feeder (off — set SUTANDO_TMUX_TASK_FEEDER=1 or use OpenRouter)"
+fi
+
+# Omni-exp (phone HTML experimental; separate from voice-agent omni camera+mic). Opt-in: OMNI_EXP_AUTO_START=1
+# Must be launchd — agent-shell nohup children die when the tool shell exits.
+if [ "${OMNI_EXP_AUTO_START:-${OMNI_AUTO_START:-0}}" = "1" ]; then
+  _OMNI_SVC="gui/$(id -u)/com.sutando.omni-exp-agent"
+  if launchctl print "$_OMNI_SVC" >/dev/null 2>&1 \
+    && lsof -nP -iTCP:"${OMNI_EXP_PORT:-${OMNI_PORT:-7090}}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "  ✓ omni-exp (launchd KeepAlive on ${OMNI_EXP_PORT:-${OMNI_PORT:-7090}})"
+  else
+    echo "  Starting omni-exp (launchd KeepAlive)..."
+    bash "$REPO/src/start-omni-exp.sh" --daemon \
+      || echo "  ✗ omni-exp failed — see $WORKSPACE/logs/omni-exp-agent.log"
+  fi
 fi
 
 echo ""

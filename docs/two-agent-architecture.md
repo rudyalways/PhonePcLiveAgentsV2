@@ -10,16 +10,16 @@ Sutando splits work across two agents: a realtime VLM voice front-end, and a Cla
 
 ### Surfaces (same role, different implementations)
 
-| | Voice agent | LiveKit agent |
-|---|---|---|
-| File | `src/voice-agent.ts` | `src/livekit-agent.py` |
-| Surface | Web UI / desktop mic (bodhi `VoiceSession`) | Phone app over LiveKit room |
-| Agent name in code | `main` | `SutandoAgent` |
-| Transport | Browser ↔ voice server ↔ Gemini/Qwen | Phone ↔ LiveKit ↔ Gemini/Qwen |
-| Tool set | Full | Small subset |
-| Bridge to core | `work` → `tasks/` → `results/` | Same idea |
+| | Voice agent | LiveKit agent | Omni-exp (experimental) |
+|---|---|---|---|
+| File | `src/voice-agent.ts` | `src/livekit-agent.py` | `src/omni-exp-agent.py` |
+| Surface | Web UI / desktop mic (bodhi `VoiceSession`); omni/webcam support lives here when enabled | Phone app over LiveKit room | Phone browser HTML camera+mic (`/omni-exp`) |
+| Agent name in code | `main` | `SutandoAgent` | omni-exp session |
+| Transport | Browser ↔ voice server ↔ Gemini/Qwen | Phone ↔ LiveKit ↔ Gemini/Qwen | Phone ↔ omni-exp WSS ↔ Qwen Omni Realtime |
+| Tool set | Full | Small subset | `work` (+ core start/stop HUD) |
+| Bridge to core | `work` → `tasks/` → `results/` | Same idea | Same idea |
 
-They are **not** one shared agent class. LiveKit is a thinner, phone-oriented reimplementation of the same pattern — not the TypeScript voice agent reused.
+They are **not** one shared agent class. LiveKit is a thinner, phone-oriented reimplementation of the same pattern — not the TypeScript voice agent reused. **Omni-exp** is a separate experimental stack (`omni-exp-*` files); do not fold it into voice-agent.
 
 ### Tool sets
 

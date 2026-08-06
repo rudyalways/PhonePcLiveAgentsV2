@@ -2,7 +2,7 @@
 
 Source: [Alibaba Cloud Model Studio — Qwen-Omni-Realtime](https://www.alibabacloud.com/help/en/model-studio/realtime)
 
-Agent design / decision log: [omni-agent-design.md](./omni-agent-design.md)
+Agent design / decision log: [omni-exp-agent-design.md](./omni-exp-agent-design.md)
 
 ## Mental model
 

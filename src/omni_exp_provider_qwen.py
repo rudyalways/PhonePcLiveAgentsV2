@@ -21,7 +21,7 @@ from qwen_realtime_compat import (
     qwen_turn_detection_config,
 )
 
-logger = logging.getLogger("omni-agent.qwen")
+logger = logging.getLogger("omni-exp-agent.qwen")
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api-ws/v1/realtime"
 
@@ -81,7 +81,7 @@ class QwenOmniSession:
             url,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "User-Agent": "Sutando-omni-agent/0.1",
+                "User-Agent": "Sutando-omni-exp-agent/0.1",
             },
         )
         # Drain session.created before starting the shared reader (avoid race).

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sutando — omni-exp (experimental phone agent) launchd job (template).
+
+  CRITICAL: ProgramArguments + WorkingDirectory + logs MUST live outside
+  ~/Documents (and other TCC-protected folders). LaunchAgents that point into
+  Documents fail with "Operation not permitted" / exit 78 EX_CONFIG.
+  Installer materializes a runner under:
+    ~/Library/Application Support/Sutando/omni-exp/
+
+  Placeholders:
+    __SUPPORT__   — Application Support/Sutando/omni-exp
+    __HOME__      — $HOME
+    __BREW_BIN__  — brew bin
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.omni-exp-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__SUPPORT__/run-omni-exp.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__SUPPORT__</string>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__BREW_BIN__:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__SUPPORT__/omni-exp-agent.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__SUPPORT__/omni-exp-agent.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

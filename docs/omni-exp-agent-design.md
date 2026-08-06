@@ -1,4 +1,6 @@
-# Omni-agent design
+# Omni-exp agent design
+
+Experimental phone HTML camera+mic agent (`omni-exp`). **Not** voice-agent’s omni/webcam path — keep them separate.
 
 Decision log and architecture for a third realtime agent beside voice-agent and livekit-agent.
 
@@ -50,7 +52,7 @@ Question: is there an API or strong open-source model that **natively** decides 
 | --- | --- | --- |
 | Voice | `src/voice-agent.ts` | Browser WS + bodhi; Gemini-first |
 | LiveKit | `src/livekit-agent.py` | Phone/PC WebRTC room; Qwen audio today |
-| **Omni** | `src/omni-agent.py` (planned) | Continuous A/V + **VoiceTrigger** + **PromptTrigger** |
+| **Omni** | `src/omni-exp-agent.py` (planned) | Continuous A/V + **VoiceTrigger** + **PromptTrigger** |
 
 Share dependency-light helpers only. Own process so vision/silence experiments do not regress the other agents.
 
@@ -147,7 +149,7 @@ TurnRequest {
 3. `PromptTrigger` + sensors  
 4. `TurnGate`  
 5. `ProviderAdapter` (gemini \| qwen)  
-6. `omni-agent.py` — session, tools/`work`, config  
+6. `omni-exp-agent.py` — session, tools/`work`, config  
 
 ### v1 defaults
 
@@ -177,11 +179,11 @@ Museum silent walk: `scene_change` PromptTrigger on; timer/heartbeat off unless 
 ### Goal flow
 
 ```text
-Phone browser (omni-client.html)
+Phone browser (omni-exp-client.html)
   camera (full-bleed, first) + mic
        │  WSS: PCM chunks + JPEG ~1fps (+ control JSON)
        ▼
-PC / cloud: omni-agent.py
+PC / cloud: omni-exp-agent.py
   MediaPump → VoiceTrigger / PromptTrigger → TurnGate → Qwen|Gemini
        │  work tool (non-trivial)
        ▼
@@ -196,19 +198,19 @@ omni-agent result watcher → speak / text back on same session → phone plays 
 
 | Piece | Action | Notes |
 | --- | --- | --- |
-| [`src/omni-client.html`](../src/omni-client.html) (new) | **Add** | Camera-first phone UI; do **not** overload [`mobile-client.html`](../src/mobile-client.html) (that one is LiveKit screen-view / mic for remote control) |
-| [`src/omni-agent.py`](../src/omni-agent.py) (new) | **Add** | Parallel agent process: WSS server + provider session + triggers + `work` |
+| [`src/omni-exp-client.html`](../src/omni-exp-client.html) (new) | **Add** | Camera-first phone UI; do **not** overload [`mobile-client.html`](../src/mobile-client.html) (that one is LiveKit screen-view / mic for remote control) |
+| [`src/omni-exp-agent.py`](../src/omni-exp-agent.py) (new) | **Add** | Parallel agent process: WSS server + provider session + triggers + `work` |
 | `src/omni_*.py` helpers (new) | **Add** | `media_pump`, `voice_trigger`, `prompt_trigger`, `turn_gate`, `provider_adapter` — keep thin; Qwen bits reuse [`qwen_realtime_compat.py`](../src/qwen_realtime_compat.py) where possible |
-| Static/HTTPS serve | **Extend** | Serve `/omni` HTML + WSS upgrade from existing token/static host pattern (see mobile docs) or small `omni-gateway` alongside; **phone `getUserMedia` needs HTTPS** (or localhost) |
+| Static/HTTPS serve | **Extend** | Serve `/omni-exp` HTML + WSS upgrade from existing token/static host pattern (see mobile docs) or small `omni-gateway` alongside; **phone `getUserMedia` needs HTTPS** (or localhost) |
 | [`src/livekit-agent.py`](../src/livekit-agent.py) | **No change** (v1) | Stay parallel; optional later: LiveKit transport adapter if NAT requires it |
 | [`src/voice-agent.ts`](../src/voice-agent.ts) | **No change** (v1) | Pattern donor only |
 | Task/result dirs | **Reuse** | Same bridge as LiveKit `work()`: write `tasks/{user}/task-*.txt`, poll/watch `results/` |
-| `.env.example` / start script | **Extend** | `OMNI_*` knobs + `bash src/start-omni.sh` |
+| `.env.example` / start script | **Extend** | `OMNI_*` knobs + `bash src/start-omni-exp.sh` |
 | Design notes | **Done** | This file |
 
-### UI: `omni-client.html` (camera first)
+### UI: `omni-exp-client.html` (camera first)
 
-Phone Safari/Chrome open `https://<pc-host>/omni`.
+Phone Safari/Chrome open `https://<pc-host>/omni-exp`.
 
 **Viewport 1 (composition):**
 - Full-bleed `<video>` rear camera (`facingMode: environment` for museum; toggle front)
@@ -265,11 +267,15 @@ omni-agent work(task)
 
 Do **not** call CC via a new RPC in v1. File bridge only. Ensure core watcher is running (`start-cli` / startup) same as LiveKit voice path.
 
+**Monitor fallback:** Canonical pickup is Claude Code `Monitor` → `watch-tasks-stream.sh`. On OpenRouter / non-Anthropic cores (no Monitor), `SUTANDO_TMUX_TASK_FEEDER=auto|1` installs launchd job `com.sutando.omni-exp-tmux-task-feeder` which injects `TASK_FILE:` into the `sutando-core` tmux pane.
+
+**Omni process survival:** Do **not** start omni as a child of an agent/Cursor shell (`nohup` alone is not enough — shell process-group SIGTERM kills it with no traceback). Use `bash src/start-omni-exp.sh --daemon` / `install-omni-exp-launchd.sh` → launchd KeepAlive. Runners live under `~/Library/Application Support/Sutando/omni-exp/` because macOS TCC blocks LaunchAgents from executing files under `~/Documents` (symptoms: exit 78 `EX_CONFIG` / “Operation not permitted”). Phone URL is **HTTPS only** (`https://127.0.0.1:7090/omni-exp`).
+
 ### Phased delivery
 
 | Phase | Deliverable | Done when |
 | --- | --- | --- |
-| **P0** | `omni-client.html` + `omni-agent.py` WSS echo (mic+cam preview, loopback status) | Phone on LAN HTTPS sees camera; PCM/JPEG reach PC — **implemented** (`bash src/start-omni.sh`) |
+| **P0** | `omni-exp-client.html` + `omni-exp-agent.py` WSS echo (mic+cam preview, loopback status) | Phone on LAN HTTPS sees camera; PCM/JPEG reach PC — **implemented** (`bash src/start-omni-exp.sh`) |
 | **P1** | Provider VoiceTrigger only (Qwen) | Speak to phone → hear answer — **implemented** (VAD + audio.out) |
 | **P2** | Frame append + PromptTrigger `scene_change` | Silent pan → intro; `[[NO_SPEAK]]` suppress — **implemented** |
 | **P3** | `work` + result watcher | “Research X” → core/CC → spoken result on phone — **implemented** (Core… button / `control.work`) |
@@ -280,7 +286,7 @@ Do **not** call CC via a new RPC in v1. File bridge only. Ensure core watcher is
 - Phone browser: HTTPS + mic/camera permissions; iOS audio unlock on tap  
 - PC: API keys (`DASHSCOPE_API_KEY` / Gemini), core alive for `work`  
 - NAT: LAN or tunnel (Cloudflare/ngrok) for P0–P3; LiveKit optional if WebRTC needed later  
-- Keep LiveKit mobile + omni HTML as **separate URLs** (`/mobile` vs `/omni`)
+- Keep LiveKit mobile + omni HTML as **separate URLs** (`/mobile` vs `/omni-exp`)
 
 ### Out of scope v1
 
@@ -542,7 +548,7 @@ Third process for isolation and easy extension. Do not fold into `livekit-agent.
 
 ## Architecture (implementation target)
 
-1. `src/omni-agent.py` — session lifecycle, tools/`work`, result inject
+1. `src/omni-exp-agent.py` — session lifecycle, tools/`work`, result inject
 2. `OmniVisionPump` — capture → thumb-diff → optional JPEG append @ ≤1fps
 3. `OmniTurnPolicy` — VAD events + silence/scene proactive + mutex
 4. Shared Qwen compat/factory — no forked protocol stack

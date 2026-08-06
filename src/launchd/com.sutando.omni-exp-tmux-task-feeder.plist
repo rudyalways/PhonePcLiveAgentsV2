@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Omni Monitor-less tmux task feeder. Runner must live outside ~/Documents (TCC).
+  Placeholders: __SUPPORT__ __HOME__ __BREW_BIN__
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.omni-exp-tmux-task-feeder</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__SUPPORT__/run-feeder.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__SUPPORT__</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__BREW_BIN__:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__SUPPORT__/omni-exp-watch-tasks-to-tmux.log</string>
+    <key>StandardErrorPath</key>
+    <string>__SUPPORT__/omni-exp-watch-tasks-to-tmux.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

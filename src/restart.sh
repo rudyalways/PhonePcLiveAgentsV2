@@ -18,6 +18,8 @@ pkill -f "slack-bridge" 2>/dev/null
 pkill -f "remote-gateway-bridge" 2>/dev/null
 pkill -f "observability/boot" 2>/dev/null
 pkill -f "watch-tasks" 2>/dev/null
+pkill -f "omni-exp-agent.py" 2>/dev/null
+pkill -f "omni-exp-supervisor" 2>/dev/null
 pkill -f "conversation-server" 2>/dev/null
 pkill -f "ngrok" 2>/dev/null
 # Credential proxy: handle the launchd-supervised job explicitly. pkill alone
@@ -42,6 +44,29 @@ if launchctl print "$_PROXY_SERVICE" >/dev/null 2>&1; then
 else
     pkill -f "credential-proxy" 2>/dev/null
 fi
+# Omni + tmux feeder — same launchd KeepAlive contract (agent-shell children
+# used to die silently when the tool process group was reaped).
+_OMNI_SERVICE="gui/$(id -u)/com.sutando.omni-exp-agent"
+_FEEDER_SERVICE="gui/$(id -u)/com.sutando.omni-exp-tmux-task-feeder"
+if launchctl print "$_OMNI_SERVICE" >/dev/null 2>&1; then
+    if [ "$1" = "--stop-only" ]; then
+        echo "  Stopping launchd-supervised omni-exp..."
+        launchctl bootout "$_OMNI_SERVICE" 2>/dev/null || true
+    else
+        echo "  Restarting launchd-supervised omni-exp..."
+        launchctl kickstart -k "$_OMNI_SERVICE" 2>/dev/null
+        for _ in $(seq 1 20); do lsof -nP -iTCP:7090 -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.25; done
+    fi
+fi
+if launchctl print "$_FEEDER_SERVICE" >/dev/null 2>&1; then
+    if [ "$1" = "--stop-only" ]; then
+        echo "  Stopping launchd-supervised tmux task feeder..."
+        launchctl bootout "$_FEEDER_SERVICE" 2>/dev/null || true
+    else
+        echo "  Restarting launchd-supervised tmux task feeder..."
+        launchctl kickstart -k "$_FEEDER_SERVICE" 2>/dev/null
+    fi
+fi
 pkill -f "src/Sutando/Sutando" 2>/dev/null
 echo "  All services stopped"
 
@@ -60,7 +85,7 @@ STOP_PATTERNS=(
     "voice-agent" "web-client.ts" "dashboard.py" "agent-api.py"
     "screen-capture-server" "telegram-bridge" "discord-bridge" "slack-bridge"
     "remote-gateway-bridge" "observability/boot" "watch-tasks"
-    "conversation-server" "ngrok" "src/Sutando/Sutando"
+    "omni-exp-agent.py" "conversation-server" "ngrok" "src/Sutando/Sutando"
 )
 for _ in $(seq 1 30); do
     still=0

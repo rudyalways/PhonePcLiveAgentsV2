@@ -113,6 +113,83 @@
   #bar button { background: rgba(255,255,255,0.12); color: var(--ink); min-width: 72px; }
   #bar button.on { background: var(--accent); color: #1a140c; }
   #bar button.danger { background: var(--danger); color: #fff; }
+  #tasks {
+    position: fixed; left: 10px; right: 10px; bottom: calc(92px + 34vh + 8px); z-index: 2;
+    display: none;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    background: rgba(10,12,16,0.82);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+    max-height: 28vh;
+    overflow: hidden;
+    pointer-events: auto;
+  }
+  #tasks.short { bottom: calc(92px + 48px + 8px); }
+  #tasks-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 12px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  #tasks-header button {
+    background: transparent; border: 1px solid rgba(255,255,255,0.15);
+    color: var(--muted); border-radius: 6px; font-size: 11px; padding: 2px 8px;
+  }
+  #tasks-body { max-height: 22vh; overflow: auto; padding: 6px 8px 8px; }
+  #tasks-body:empty::after {
+    content: "No tasks yet";
+    display: block; padding: 8px 4px; color: #666; font-size: 12px;
+  }
+  .task-card {
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 8px 9px; margin-top: 6px;
+    background: rgba(255,255,255,0.03);
+    /* Stable footprint so heartbeats don't reflow the list */
+    min-height: 74px;
+  }
+  .task-card:first-child { margin-top: 0; }
+  .task-card.done { opacity: 0.65; }
+  .task-card.fail { border-color: rgba(196,92,74,0.45); }
+  .task-card .task-meta {
+    display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    font-size: 10px; color: #8b8680; font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    margin-bottom: 4px; min-height: 14px;
+  }
+  .task-card .task-meta .seq { color: var(--accent); font-weight: 600; }
+  .task-card .task-meta .turn { color: #93c5fd; }
+  .task-card .task-meta .wait { color: var(--info); margin-left: auto; }
+  .task-card .task-title {
+    font-size: 12px; color: #e8e6e1; line-height: 1.35;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    overflow: hidden; min-height: 2.7em;
+  }
+  .task-steps {
+    display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 7px;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .task-steps::-webkit-scrollbar { display: none; }
+  .task-step {
+    flex: 0 0 auto;
+    font-size: 9px; letter-spacing: 0.01em;
+    padding: 2px 6px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #666; background: rgba(0,0,0,0.25);
+  }
+  .task-step.done {
+    color: var(--ok); border-color: rgba(78,204,163,0.4); background: rgba(78,204,163,0.1);
+  }
+  .task-step.current {
+    color: var(--info); border-color: rgba(96,165,250,0.5); background: rgba(96,165,250,0.12);
+  }
+  .task-step.fail {
+    color: #ffb4a8; border-color: rgba(196,92,74,0.5); background: rgba(196,92,74,0.12);
+  }
+  .task-preview {
+    margin-top: 5px; font-size: 11px; color: #b8ffd2;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-height: 1.2em;
+  }
   #activity {
     position: fixed; left: 10px; right: 10px; bottom: 92px; z-index: 2;
     display: none;
@@ -189,6 +266,15 @@
   <input id="secret" type="password" placeholder="Password" autocomplete="current-password" />
   <button id="connect-btn" type="button">Start camera &amp; connect</button>
   <div id="login-error"></div>
+</div>
+<div id="tasks">
+  <div id="tasks-header">
+    <span id="tasks-title">Tasks · 0</span>
+    <span>
+      <button type="button" id="tasks-clear">Clear done</button>
+    </span>
+  </div>
+  <div id="tasks-body"></div>
 </div>
 <div id="activity">
   <div id="activity-header">
@@ -313,6 +399,249 @@ function clearStickyProcessing(taskId) {
     stickyWorkRows.delete(fullId);
   }
 }
+
+// Task lifecycle list (tool → file → CC → result → processed)
+const TASK_STEPS = [
+  { key: "tool", label: "Tool" },
+  { key: "written", label: "Task file" },
+  { key: "cc", label: "CC run" },
+  { key: "cc_done", label: "CC done" },
+  { key: "result", label: "Result file" },
+  { key: "processed", label: "Processed" },
+];
+const taskStore = new Map(); // key (task_id|call_id) -> task record
+const taskCards = new Map(); // key -> HTMLElement (stable DOM)
+let taskSeqCounter = 0;
+const tasksEl = document.getElementById("tasks");
+const tasksBody = document.getElementById("tasks-body");
+const tasksTitle = document.getElementById("tasks-title");
+
+function taskKeyFromMsg(msg) {
+  if (msg.task_id) return msg.task_id.startsWith("task-") ? msg.task_id : `task-${msg.task_id}`;
+  if (msg.call_id) return `call:${msg.call_id}`;
+  return "";
+}
+
+function fmtClock(ts) {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return "--:--:--";
+  }
+}
+
+function shortTaskId(id) {
+  const s = String(id || "");
+  if (s.startsWith("task-") && s.length > 10) return "…" + s.slice(-6);
+  if (s.startsWith("call:")) return "call…" + s.slice(-6);
+  return s.slice(-8) || "?";
+}
+
+function ensureTask(key, patch = {}) {
+  if (!key) return null;
+  let t = taskStore.get(key);
+  if (!t) {
+    // Merge provisional call:* entry into real task_id when both known.
+    if (patch.call_id) {
+      const prov = taskStore.get(`call:${patch.call_id}`);
+      if (prov && key.startsWith("task-")) {
+        taskStore.delete(`call:${patch.call_id}`);
+        const oldCard = taskCards.get(`call:${patch.call_id}`);
+        if (oldCard) {
+          taskCards.delete(`call:${patch.call_id}`);
+          taskCards.set(key, oldCard);
+          oldCard.dataset.taskKey = key;
+        }
+        t = prov;
+        t.id = key;
+      }
+    }
+  }
+  if (!t) {
+    taskSeqCounter += 1;
+    t = {
+      id: key,
+      seq: taskSeqCounter,
+      call_id: patch.call_id || "",
+      turn_id: patch.turn_id || "",
+      task: "",
+      step: -1, // index into TASK_STEPS
+      failed: false,
+      preview: "",
+      startedAt: Date.now(),
+      elapsedMs: 0,
+      updatedAt: Date.now(),
+    };
+  }
+  const prevStep = t.step;
+  const prevFailed = t.failed;
+  Object.assign(t, patch);
+  t.updatedAt = Date.now();
+  if (patch.elapsed_ms != null) t.elapsedMs = patch.elapsed_ms;
+  if (patch.turn_id) t.turn_id = patch.turn_id;
+  taskStore.set(t.id, t);
+  t._stepChanged = t.step !== prevStep || t.failed !== prevFailed;
+  return t;
+}
+
+function advanceTask(t, stepIndex) {
+  if (!t || t.failed) return;
+  if (stepIndex > t.step) t.step = stepIndex;
+}
+
+function applyWorkLifecycle(msg) {
+  const key = taskKeyFromMsg(msg);
+  const state = msg.state || "";
+  const patch = {
+    call_id: msg.call_id || "",
+    turn_id: msg.turn_id || undefined,
+    task: msg.task || undefined,
+    elapsed_ms: msg.elapsed_ms,
+    preview: msg.preview || undefined,
+  };
+  // Drop undefined so Object.assign doesn't wipe fields.
+  Object.keys(patch).forEach((k) => patch[k] === undefined && delete patch[k]);
+
+  let t = ensureTask(key || `anon:${Date.now()}`, patch);
+  if (!t) return;
+
+  const stepBefore = t.step;
+  if (state === "tool_called") {
+    advanceTask(t, 0);
+    if (msg.arguments || msg.parameters) {
+      const params = msg.arguments || JSON.stringify(msg.parameters);
+      try {
+        const p = typeof params === "string" ? JSON.parse(params) : params;
+        if (p && p.task) t.task = String(p.task);
+      } catch {
+        if (!t.task && typeof params === "string") t.task = params.slice(0, 80);
+      }
+    }
+    t.tool = msg.tool || "work";
+  } else if (state === "task_written" || state === "queued") {
+    advanceTask(t, 1);
+  } else if (state === "waiting" || state === "processing") {
+    // Heartbeat: keep timer; honor phase if server says CC claimed the file.
+    if (msg.phase === "cc_processing") advanceTask(t, 2);
+    else if (t.step < 1) advanceTask(t, 1);
+  } else if (state === "cc_processing") {
+    advanceTask(t, 2);
+  } else if (state === "cc_done") {
+    advanceTask(t, 3);
+  } else if (state === "result_file") {
+    advanceTask(t, 3);
+    advanceTask(t, 4);
+  } else if (state === "result") {
+    advanceTask(t, 4);
+  } else if (state === "result_processed" || state === "speak_queued" || state === "speak_started") {
+    if (state === "result_processed") advanceTask(t, 5);
+  } else if (state === "timeout") {
+    t.failed = true;
+    if (t.step < 1) advanceTask(t, 1);
+  }
+  // Heartbeat-only updates: patch wait label in place (no list reshuffle).
+  const heartbeatOnly = (state === "waiting" || state === "processing") && t.step === stepBefore;
+  if (heartbeatOnly) {
+    patchTaskWait(t);
+    return;
+  }
+  renderTasks();
+}
+
+function stepsHtmlFor(t) {
+  const done = !t.failed && t.step >= 5;
+  let stepsHtml = "";
+  for (let i = 0; i < TASK_STEPS.length; i++) {
+    let cls = "task-step";
+    if (t.failed && i === Math.max(t.step, 0)) cls += " fail";
+    else if (i < t.step) cls += " done";
+    else if (i === t.step && !done) cls += t.failed ? " fail" : " current";
+    else if (done) cls += " done";
+    stepsHtml += `<span class="${cls}">${TASK_STEPS[i].label}</span>`;
+  }
+  return stepsHtml;
+}
+
+function metaHtmlFor(t) {
+  const wait = t.elapsedMs ? fmtMs(t.elapsedMs) : fmtMs(Date.now() - t.startedAt);
+  const turn = t.turn_id ? String(t.turn_id).split("/")[0] : "—";
+  return (
+    `<span class="seq">#${t.seq || "?"}</span>` +
+    `<span class="turn">${escapeHtml(turn)}</span>` +
+    `<span class="clock">${escapeHtml(fmtClock(t.startedAt))}</span>` +
+    `<span class="tid">${escapeHtml(shortTaskId(t.id))}</span>` +
+    `<span class="wait">${escapeHtml(wait)}</span>`
+  );
+}
+
+function patchTaskWait(t) {
+  const card = taskCards.get(t.id);
+  if (!card) {
+    renderTasks();
+    return;
+  }
+  const waitEl = card.querySelector(".wait");
+  if (waitEl) {
+    waitEl.textContent = t.elapsedMs ? fmtMs(t.elapsedMs) : fmtMs(Date.now() - t.startedAt);
+  }
+}
+
+function renderTasks() {
+  // Stable order: open tasks by creation seq, then finished/failed by seq.
+  const items = Array.from(taskStore.values()).sort((a, b) => {
+    const aOpen = !a.failed && a.step < 5 ? 0 : 1;
+    const bOpen = !b.failed && b.step < 5 ? 0 : 1;
+    if (aOpen !== bOpen) return aOpen - bOpen;
+    return (a.seq || 0) - (b.seq || 0);
+  });
+  const open = items.filter((t) => !t.failed && t.step < 5).length;
+  tasksTitle.textContent = `Tasks · ${open} open / ${items.length}`;
+
+  const keep = new Set();
+  const frag = document.createDocumentFragment();
+  for (const t of items.slice(0, 16)) {
+    keep.add(t.id);
+    const done = !t.failed && t.step >= 5;
+    let card = taskCards.get(t.id);
+    if (!card) {
+      card = document.createElement("div");
+      card.dataset.taskKey = t.id;
+      taskCards.set(t.id, card);
+    }
+    card.className = "task-card" + (done ? " done" : "") + (t.failed ? " fail" : "");
+    const title = t.task || t.tool || shortTaskId(t.id) || "task";
+    const preview = t.failed ? "timeout / failed" : (t.preview || "");
+    card.innerHTML =
+      `<div class="task-meta">${metaHtmlFor(t)}</div>` +
+      `<div class="task-title">${escapeHtml(title)}</div>` +
+      `<div class="task-steps">${stepsHtmlFor(t)}</div>` +
+      `<div class="task-preview"${t.failed ? ' style="color:#ffb4a8"' : ""}>${escapeHtml(preview)}</div>`;
+    frag.appendChild(card);
+  }
+  // Drop cards no longer shown / cleared.
+  for (const [k, el] of Array.from(taskCards.entries())) {
+    if (!keep.has(k)) {
+      el.remove();
+      taskCards.delete(k);
+    }
+  }
+  tasksBody.replaceChildren(frag);
+}
+
+function clearDoneTasks() {
+  for (const [k, t] of Array.from(taskStore.entries())) {
+    if (t.failed || t.step >= 5) {
+      taskStore.delete(k);
+      const card = taskCards.get(k);
+      if (card) {
+        card.remove();
+        taskCards.delete(k);
+      }
+    }
+  }
+  renderTasks();
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -443,6 +772,11 @@ function resetLiveUi() {
   workStartedAt = 0;
   showPartial("", "");
   lastAsr = "";
+  taskStore.clear();
+  for (const el of taskCards.values()) el.remove();
+  taskCards.clear();
+  taskSeqCounter = 0;
+  renderTasks();
 }
 
 function setCoreStatus(msg) {
@@ -490,6 +824,7 @@ function stopAll() {
   ws = null;
   bar.style.display = "none";
   activity.style.display = "none";
+  tasksEl.style.display = "none";
   chips.style.display = "none";
   login.style.display = "flex";
   setStatus("idle");
@@ -502,6 +837,7 @@ function handleMsg(msg) {
     login.style.display = "none";
     bar.style.display = "flex";
     activity.style.display = "block";
+    tasksEl.style.display = "block";
     chips.style.display = "flex";
     sessionModel = msg.model || "qwen";
     setStatus("listening", "live");
@@ -540,26 +876,57 @@ function handleMsg(msg) {
     const taskId = msg.task_id || "";
     const id = taskId.replace(/^task-/, "…");
     const wait = fmtMs(msg.elapsed_ms);
+    applyWorkLifecycle(msg);
     if (msg.state === "tool_called") {
       const tool = msg.tool || "?";
       const params = msg.arguments
         || (msg.parameters ? JSON.stringify(msg.parameters) : "");
       setChip(chipWork, `Work: tool ${tool}`, "hot");
       logAct("work", `${turn}Tool call: ${tool}(${params})`);
+    } else if (msg.state === "task_written") {
+      workStartedAt = Date.now();
+      setChip(chipWork, "Work: task file", "busy");
+      logAct("work", `${turn}Task file written${id ? " " + id : ""} · ${msg.task || ""}`);
+      upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
     } else if (msg.state === "queued") {
+      // Legacy/compat — list already advanced via task_written when present.
       workStartedAt = Date.now();
       setChip(chipWork, "Work: queued", "busy");
-      logAct("work", `${turn}Task queued${id ? " " + id : ""} · ${msg.task || ""}`);
+      if (!taskId) logAct("work", `${turn}Task queued · ${msg.task || ""}`);
       upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
+    } else if (msg.state === "cc_processing") {
+      setChip(chipWork, `Work: CC ${wait}`, "busy");
+      upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
+      logAct("work", `${turn}CC processing${id ? " " + id : ""}`);
     } else if (msg.state === "processing" || msg.state === "waiting") {
-      setChip(chipWork, `Work: wait ${wait}`, "busy");
-      // Update one Activity line in place — do not spam new rows.
+      const label = msg.phase === "cc_processing" ? `Work: CC ${wait}` : `Work: wait ${wait}`;
+      setChip(chipWork, label, "busy");
       upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
+    } else if (msg.state === "cc_done") {
+      setChip(chipWork, `Work: CC done ${wait}`, "on");
+      logAct("work", `${turn}CC done${id ? " " + id : ""} — ${msg.preview || ""}`);
+    } else if (msg.state === "result_file") {
+      setChip(chipWork, `Work: result file ${wait}`, "on");
+      logAct("work", `${turn}Result file${id ? " " + id : ""} — ${msg.preview || ""}`);
     } else if (msg.state === "result") {
       clearStickyProcessing(taskId);
       setChip(chipWork, `Work: done ${wait}`, "on");
       logAct("work", `Result back after ${wait}${id ? " · " + id : ""} — ${msg.preview || ""}`);
       workStartedAt = 0;
+    } else if (msg.state === "result_processed") {
+      clearStickyProcessing(taskId);
+      setChip(chipWork, `Work: processed ${wait}`, "on");
+      const note = msg.skipped ? ` (skipped:${msg.skipped})`
+        : msg.queued ? " (speak queued)"
+        : msg.spoke === false ? " (not spoken)" : "";
+      logAct("work", `${turn}Result processed${id ? " " + id : ""}${note}`);
+      workStartedAt = 0;
+    } else if (msg.state === "speak_queued") {
+      setChip(chipWork, `Work: speak Q${msg.queue_len || "?"}`, "busy");
+      logAct("work", `${turn}Speak buffered${id ? " " + id : ""} · q=${msg.queue_len || "?"} (${msg.merge || "serial"})`);
+    } else if (msg.state === "speak_started") {
+      setChip(chipWork, "Work: speaking", "busy");
+      logAct("work", `${turn}Speak started${id ? " " + id : ""}${msg.queue_len ? ` · ${msg.queue_len} left` : ""}`);
     } else if (msg.state === "timeout") {
       clearStickyProcessing(taskId);
       setChip(chipWork, `Work: timeout ${wait}`, "bad");
@@ -686,9 +1053,14 @@ document.getElementById("act-clear").onclick = (e) => {
   actBody.innerHTML = "";
   stickyWorkRows.clear();
 };
+document.getElementById("tasks-clear").onclick = (e) => {
+  e.stopPropagation();
+  clearDoneTasks();
+};
 document.getElementById("activity-header").onclick = (e) => {
   if (e.target.tagName === "BUTTON") return;
   actBody.classList.toggle("collapsed");
+  tasksEl.classList.toggle("short", actBody.classList.contains("collapsed"));
 };
 </script>
 </body>

@@ -14,8 +14,8 @@ from PIL import Image
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from omni_scene import SceneChangeSensor  # noqa: E402
-from omni_turn_gate import TurnGate, TurnRequest  # noqa: E402
+from omni_exp_scene import SceneChangeSensor  # noqa: E402
+from omni_exp_turn_gate import TurnGate, TurnRequest  # noqa: E402
 
 
 def _jpeg(color: tuple[int, int, int]) -> bytes:
