@@ -36,7 +36,13 @@ class Handler(SimpleHTTPRequestHandler):
         elif path_only in ("/mobile", "/mobile.html", "/phone"):
             # Map short paths to mobile-client.html but keep ?query (e.g. ?micMeter=1).
             self.path = "/mobile-client.html" + query_suffix
-        elif path_only in ("/omni-exp", "/omni-exp.html", "/omni", "/omni.html"):
+        elif path_only in ("/omni", "/omni.html", "/omni-client.html"):
+            # Legacy name — send browsers to the live omni-exp agent (HTTPS :7090).
+            self.send_response(302)
+            self.send_header("Location", "https://127.0.0.1:7090/omni-exp" + query_suffix)
+            self.end_headers()
+            return
+        elif path_only in ("/omni-exp", "/omni-exp.html"):
             # Static copy only — live WSS is on omni-exp-agent (OMNI_EXP_PORT, default 7090).
             self.path = "/omni-exp-client.html" + query_suffix
         else:

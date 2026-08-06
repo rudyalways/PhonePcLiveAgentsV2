@@ -47,7 +47,7 @@ Note: this step runs BEFORE step 2 so that the watcher (started by step 2's down
 Invoke `/schedule-crons`. This handles:
 - Reading `skills/schedule-crons/crons.json`
 - Calling `CronCreate` for each entry that isn't already scheduled
-- Ensuring a fallback `/proactive-loop` cron exists at `*/10 * * * *` if `crons.json` doesn't include one (post-#954 belt-and-suspenders)
+- Ensuring a fallback `/proactive-loop` cron exists at `*/10 * * * *` if `crons.json` doesn't include one (post-#954 belt-and-suspenders) — **skipped entirely** when `python3 skills/proactive-loop/scripts/proactive-loop-enabled.py` prints `disabled` (`SUTANDO_PROACTIVE_LOOP_ENABLED=0`)
 - Starting the streaming task watcher via the `Monitor` tool (`bash src/watch-tasks-stream.sh`, persistent, description `"Streaming task watcher"`)
 
 ### Step 3 — Confirm
@@ -71,7 +71,7 @@ session start
     ├─► step 1:  /task-orphan-check (optional) ──► classifies + archives orphan tasks
     │
     ├─► step 2:  /schedule-crons ──┬─► step 1-3 (register crons.json entries)
-    │                               ├─► step 4 (proactive-loop fallback if missing)
+    │                               ├─► step 4 (proactive-loop fallback if missing; gated by SUTANDO_PROACTIVE_LOOP_ENABLED)
     │                               ├─► step 5 (start watch-tasks-stream.sh via Monitor)
     │                               └─► step 6 (confirm what was scheduled)
     │

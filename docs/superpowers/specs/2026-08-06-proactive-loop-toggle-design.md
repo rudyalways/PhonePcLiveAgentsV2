@@ -1,7 +1,8 @@
 # proactive-loop 整体开关
 
-**日期**：2026-08-06
-**状态**：已批准，待实现
+**日期**：2026-08-06  
+**状态**：已实现（含 skill unlink 修订）  
+**修订**：2026-08-06 — 关闭时 unlink Claude skill symlink（owner：off means off）
 
 ## 问题
 
@@ -15,19 +16,32 @@ token 消耗的主要来源。
 才生效，只跳过步骤 4–8、10、11。步骤 0–3.5（含最贵的 0.7）照跑不误。所以它
 无法回答「我这台机器不需要自主循环」这个诉求。
 
+仅拦 cron 注册仍不够：`$CLAUDE_CONFIG_DIR/skills/proactive-loop` 的 symlink
+还在时，技能仍会出现在 Claude 发现面，`/startup` / 手动 `/proactive-loop`
+仍可烧 token；且 symlink 可能指向**兄弟 checkout**（陈旧路径）。
+
 ## 目标
 
-提供一个开关，关闭后循环彻底不被唤醒，零 token 消耗；同时不影响任务响应与
-故障告警。
+提供一个开关，关闭后：
+
+1. 循环不被 cron 唤醒（零定时 token 消耗）
+2. skill symlink **不存在**（不可被发现 / 随意调用）
+3. 不影响任务响应与故障告警（omni-exp / Discord / Telegram / voice、health-check launchd、其他 cron）
 
 ## 非目标
 
-- 不做运行时切换。cron 注册只发生在 core 启动时，运行中改值也要等下次启动
-  才生效，引入状态文件换不来实际收益。
-- 不做中间档位（如 `minimal`）。多一档就多一份状态要维护。
-- 不改动 `SUTANDO_SELF_DEVELOPMENT_ENABLED`。两个开关正交：新开关管「循环
-  醒不醒」，旧开关管「醒了之后干不干活」。
-- 不在 `proactive-loop/SKILL.md` 入口加第二道门。只拦 cron 注册这一层。
+- 不做中间档位（如 `minimal`）。
+- 不改动 `SUTANDO_SELF_DEVELOPMENT_ENABLED`（正交：管「醒了之后干不干活」）。
+
+## 热关闭（已实现修订）
+
+把 `.env` 写成 `SUTANDO_PROACTIVE_LOOP_ENABLED=0` 后，**不必等「从未开启」**：
+
+1. **Skill 入口门** — `/proactive-loop` 与每轮 pass 在步骤 0 之前先 `source .env` + gate；`disabled` 则立刻结束，不跑 0.7。
+2. **Cron 拆除** — `/schedule-crons` 在关闭态 `CronDelete` 已注册的 `main-loop` / `/proactive-loop`（含 `*/10` 兜底）。
+3. **Skill unlink** — 下次 `start-cli` / `install.sh` 仍会 unlink 发现面。
+
+symlink 同步仍建议重启 core；但已武装的 cron / 手动调用也会被入口门拦住。
 
 ## 行为
 
@@ -37,126 +51,146 @@ token 消耗的主要来源。
 | 上下文重建（步骤 0.7） | 每次 | 不发生 |
 | 自主挑活（步骤 4–8） | 按配额 | 不发生 |
 | Discord 频道巡视（步骤 10） | 每次 | 不发生 |
-| 语音 / Discord / Telegram 任务 | 正常处理 | **正常处理** |
+| Skill symlink | 指向**本 repo** `skills/proactive-loop` | **已 unlink** |
+| 手动 `/proactive-loop` | 可用 | **不可发现** |
+| 语音 / Discord / Telegram / omni-exp 任务 | 正常处理 | **正常处理** |
+| 其他 host cron（morning-briefing 等） | 正常 | 正常 |
 | 健康检查 | 循环内跑 | **由独立 launchd job 跑** |
-| 手动 `/proactive-loop` | 可用 | 仍可用 |
 
-关闭态下仍能响应任务和收到告警，因为这两条路本就不经过 proactive-loop：
+**相对初版修订**：关闭态下**不再**保留手动 `/proactive-loop`。需要时把
+`SUTANDO_PROACTIVE_LOOP_ENABLED=1` 写回 `.env` 并重启 core。
 
-- 任务处理走 Stop hook（`workspace/scripts/check-pending-tasks-fixed.sh`），
-  core 每轮结束时自查队列。
-- 健康检查有独立的 `src/install-health-check-launchd.sh`。
+关闭态下仍能响应任务和告警，因为这两条路本就不经过 proactive-loop：
+
+- 任务处理走 task 文件 + watcher/feeder / Stop hook
+- 健康检查有独立的 `src/install-health-check-launchd.sh`
 
 ## 设计
 
 ### 开关读取
 
-新增 `skills/proactive-loop/scripts/proactive-loop-enabled.py`，与既有的
-`self-development-enabled.py` 同形：
+`skills/proactive-loop/scripts/proactive-loop-enabled.py`：
 
-- 优先级 `env > manifest.json config`，遵循 CLAUDE.md 的 skill-config 约定
-  （*"Skill config goes in the skill's `manifest.json` `config` block — not
-  ad-hoc env vars"*）。
+- 优先级 `env > manifest.json config`，遵循 skill-config 约定。
 - 打印 `enabled` 或 `disabled` 到 stdout。
 - 环境变量名 `SUTANDO_PROACTIVE_LOOP_ENABLED`。
-- 真值集合 `{1, true, yes, on, enabled}`，假值集合
-  `{0, false, no, off, disabled}`，两者之外一律 fail-closed。
+- 真值 `{1, true, yes, on, enabled}`，假值 `{0, false, no, off, disabled}`，
+  之外 fail-closed → disabled。
 
-`skills/proactive-loop/manifest.json` 的 `config` 块新增默认值：
+`manifest.json` `config` 默认 `"SUTANDO_PROACTIVE_LOOP_ENABLED": "1"`。
 
-```json
-"config": {
-  "SUTANDO_SELF_DEVELOPMENT_ENABLED": "1",
-  "SUTANDO_PROACTIVE_LOOP_ENABLED": "1"
-}
+使用者在 repo `.env`（gitignore）写：
+
+```bash
+SUTANDO_PROACTIVE_LOOP_ENABLED=0
 ```
 
-默认开启，与上游行为一致。使用者在 `.env` 里写
-`SUTANDO_PROACTIVE_LOOP_ENABLED=0` 即可关闭。
+见 `.env.example`。
 
-### 拦截点
+### 三层强制（缺一不可）
 
-`skills/schedule-crons/SKILL.md` 加两道门，共用同一个脚本：
+1. **Skill discovery** — `sync-skill-link.sh` 在启动路径 unlink/link  
+2. **Cron registration + disarm** — `/schedule-crons` 跳过 `main-loop` 与 `*/10` 兜底，并 `CronDelete` 已存在的 loop job  
+3. **Skill 入口门** — 即使 skill 仍在 / cron 仍偶发触发，`SKILL.md` 在步骤 0 前 abort
 
-1. **步骤 3（注册 cron）之前** —— 关闭时跳过 `main-loop` 条目，`crons.json`
-   里其他条目（morning-briefing 等）照常注册。
-2. **步骤 4（兜底补建）之前** —— 关闭时不补 `*/10 * * * *` 那条，并 log 一行
-   说明跳过原因。
+### Skill sync
 
-第二道门是本设计成立的关键。步骤 4 的原文是：
+`skills/proactive-loop/scripts/sync-skill-link.sh`：
 
-> check whether any job in `crons.json` references `/proactive-loop` ...
-> If none does, call `CronCreate` directly with `cron: "*/10 * * * *"`
+- 经 gate 脚本判定 enabled/disabled
+- 若进程未 export 该变量，从 repo `.env` 读一行作为安全网
+- 同步这些根目录（去重）：
+  - `<workspace>/.claude-sutando/skills`（sutando-core CCD，主路径）
+  - `$CLAUDE_CONFIG_DIR/skills`（若已设且不同）
+  - `~/.claude/skills`（交互 CLI）
+- disabled：只删 **symlink**（绝不 `rm -rf` 真目录）
+- enabled：`ln -s` 到 **本 repo** `$REPO/skills/proactive-loop`（替换陈旧兄弟路径）
 
-它只看条目是否存在。若只做第一道门，`/startup` 会认为「用户忘了配」而自己补
-一条回来 —— 2026-08-06 试跑时实测复现两次，每次都得手动删。
+测试可用 `SUTANDO_PROACTIVE_LOOP_SYNC_ROOTS`（冒号分隔）覆盖同步根，避免碰
+真实 CCD。
 
-### 为何不用「保留条目但禁用」
+### 调用点
 
-`crons.json` 无禁用语义。schema（`skills/schedule-crons/SKILL.md`）只有
-`name` / `cron` / `prompt` / `prompt_skill` / `loop` / `execution` /
-`launchd`，权威读写实现 `src/dashboard_schedules.py` 也只处理增删，没有
-`enabled` 字段。
+| 调用方 | 何时 | `.env` |
+|---|---|---|
+| `skills/install.sh` | 每次 `startup.sh`；通用循环跳过 proactive-loop | 若未设变量则 source `.env` |
+| `src/agent/start-cli.sh` | 每次 core start / `--restart` | 已 source `.env` |
+| `src/session-guardian.sh` | 若启用：死后/卡住重启 | source `.env` 后走 `start-cli.sh --restart`（不再硬编码 `/proactive-loop`） |
+| `skills/schedule-crons/SKILL.md` | core 会话内 | 进程环境已带变量 |
 
-技术上可以保留条目并把表达式设成永不触发的值（如 `0 0 31 2 *`）来骗过兜底
-检查，但这是 hack：语义与实际行为矛盾、dashboard 显示会误导、上游若给兜底
-检查加表达式合理性校验就会失效。故不采用。
+### Cron 拦截点
+
+`skills/schedule-crons/SKILL.md` 两道门（共用 gate 脚本）：
+
+1. **步骤 3** — 关闭时跳过 `prompt_skill: proactive-loop` / 正文含 `/proactive-loop` 的条目，并 `CronDelete` 已注册的 loop job  
+2. **步骤 4** — 关闭时不补 `*/10` 兜底，并 log
+   `proactive-loop fallback skipped (SUTANDO_PROACTIVE_LOOP_ENABLED=0)`
+
+第二道门关键：只做第一道时，步骤 4 会以为「用户忘了配」而自己补一条回来。
+拆除（CronDelete）关键：只跳过注册时，先前已武装的 `main-loop` 会继续烧钱。
+
+### 为何不用「保留 crons.json 条目但禁用」
+
+`crons.json` 无 `enabled` 字段。门拦的是「注册」动作，不是模板内容。
+`crons.json` 里仍可有 `main-loop` 声明 —— 那不代表已注册。验收只看会话
+`CronList`，不要用 `crons.json` 内容做证明。
 
 ### 数据流
 
 ```
-core 启动
-  → SessionStart hook 注入 /startup
-      → /schedule-crons
-          → 读 proactive-loop-enabled.py
-              ├─ enabled  → 注册 main-loop（*/5）+ 其他 cron
-              └─ disabled → 跳过 main-loop，只注册其他 cron
-                            兜底检查也跳过，不补 */10
+bash src/startup.sh
+  → configure_startup_runtime（source .env）
+  → skills/install.sh
+        → sync-skill-link.sh → gate
+              ├─ disabled → unlink skill
+              └─ enabled  → link → 本 repo
+  → exec src/agent/start-cli.sh
+        → source .env
+        → sync-skill-link.sh（再跑一遍）
+        → sutando-core
+              → /startup → /schedule-crons → gate
+                    ├─ disabled → 跳过 main-loop + */10
+                    └─ enabled  → 注册 main-loop
 ```
 
-关闭态下 `CronList` 里不存在 proactive-loop job，循环不会被唤醒。
-
-注意：`crons.json` 里**仍可能保留** `main-loop` 条目 —— core 首次启动时会把
-`crons.example.json` 整体拷贝成该文件，那是配置模板而非注册状态。两者的区别
-是本设计的核心：门拦的是「注册」这个动作，不是模板内容。
+仅重启 core（菜单栏 / health recovery）：`start-cli.sh` 一条路径即可。
 
 ## 错误处理
 
 | 情况 | 行为 | 理由 |
 |---|---|---|
-| 脚本文件不存在 | 视为 enabled | 不因一个可选脚本缺失就静默关掉使用者的循环 |
-| 值无效（如 `maybe`） | fail-closed → disabled | 与 `self-development-enabled.py` 一致：宁可少跑，不可误跑 |
-| manifest 读取失败 | 回退默认 `1` | 配置损坏不应改变默认行为 |
+| gate 脚本不存在 | sync/schedule-crons 视为 enabled | 不因可选脚本缺失静默关掉循环 |
+| 值无效（如 `maybe`） | fail-closed → disabled | 与 self-development 一致 |
+| skill 是真目录非 symlink | 保留并警告 | 不破坏本地 copy install |
+| symlink 指向兄弟 checkout | enabled 时换成开仓；disabled 时 unlink | 避免陈旧技能 |
 
 ## 测试
 
-新增 `tests/proactive-loop-toggle.test.py`，与既有的
-`tests/proactive-loop-self-development.test.py` 同形（沿用该文件的命名前缀
-与断言风格）：
+- `tests/proactive-loop-toggle.test.py` — gate 脚本  
+- `tests/proactive-loop-sync-skill-link.test.py` — sync：disabled 缺链 / enabled 指本 repo / 真目录不删
 
-| 场景 | 期望 |
-|---|---|
-| env 未设、manifest 为 `1` | enabled |
-| env=`0` | disabled |
-| env=`1`、manifest=`0` | enabled（env 优先） |
-| env=`maybe` | disabled（fail-closed） |
-| manifest 文件缺失 | enabled（默认） |
+手动验收：
 
-SKILL.md 那两道门是 markdown 指令，无法单测。验收靠实跑：设
-`SUTANDO_PROACTIVE_LOOP_ENABLED=0` 后重启 core，确认 `CronList` 中不含
-proactive-loop job。
-
-**不要用 `crons.json` 的内容做验收。** 该文件是 core 从
-`crons.example.json` 整体拷贝来的配置模板，`main-loop` 条目存在其中只表示
-「被声明过」，不表示「被注册了」。运行时状态只看 `CronList`。
+```bash
+grep PROACTIVE .env   # =0
+bash src/agent/start-cli.sh --restart
+test ! -e "$(bash scripts/sutando-config.sh workspace)/.claude-sutando/skills/proactive-loop"
+python3 skills/proactive-loop/scripts/proactive-loop-enabled.py   # disabled
+```
 
 ## 影响面
 
 | 文件 | 改动 |
 |---|---|
-| `skills/proactive-loop/scripts/proactive-loop-enabled.py` | 新增，约 40 行 |
-| `skills/proactive-loop/manifest.json` | `config` 块加一个键 |
-| `skills/schedule-crons/SKILL.md` | 步骤 3、4 各加一道门 |
-| `tests/proactive-loop-toggle.test.py` | 新增 |
-
-不触碰 `src/`，不改动任何运行时代码路径。
+| `skills/proactive-loop/scripts/proactive-loop-enabled.py` | gate |
+| `skills/proactive-loop/scripts/sync-skill-link.sh` | skill unlink/link |
+| `skills/proactive-loop/manifest.json` | config 默认 |
+| `skills/install.sh` | 跳过通用安装 proactive-loop；调用 sync |
+| `src/agent/start-cli.sh` | source `.env` 后调用 sync |
+| `src/session-guardian.sh` | 经 start-cli 重启；禁硬编码 `/proactive-loop` |
+| `skills/schedule-crons/SKILL.md` | 步骤 3、4 门 + CronDelete |
+| `skills/proactive-loop/SKILL.md` | 入口 / 每 pass 0.0 kill switch |
+| `skills/startup/SKILL.md` | 注明 fallback 受 gate 约束 |
+| `.env.example` | 文档 |
+| `tests/proactive-loop-toggle.test.py` | gate |
+| `tests/proactive-loop-sync-skill-link.test.py` | sync |

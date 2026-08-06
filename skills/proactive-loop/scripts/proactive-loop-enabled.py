@@ -6,8 +6,9 @@ Precedence follows the skill-config convention:
     environment override > manifest.json config default
 
 This is the WHOLE-LOOP gate: when disabled, `/schedule-crons` neither
-registers the `main-loop` entry nor arms the `*/10` bootstrap fallback, so the
-loop is never woken and costs nothing. It is deliberately separate from
+registers the `main-loop` entry nor arms the `*/10` bootstrap fallback, deletes
+any already-armed loop cron, and `proactive-loop/SKILL.md` aborts before step 0
+so an already-on loop stops costing tokens. It is deliberately separate from
 `SUTANDO_SELF_DEVELOPMENT_ENABLED`, which only gates SKILL.md steps 4-8/10/11
 *after* a pass has already started (and after step 0.7's context
 reconstruction, the dominant token cost).

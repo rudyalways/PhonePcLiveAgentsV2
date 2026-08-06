@@ -181,6 +181,45 @@ def _launchd_feeder_running() -> bool:
         return False
 
 
+def _stop_documents_task_feeder() -> None:
+    """Kill the repo-path Documents scanner if launchd inbox feeder owns the job."""
+    patterns = (
+        "omni-exp-watch-tasks-to-tmux-supervisor.sh",
+        f"{REPO}/src/omni-exp-watch-tasks-to-tmux.sh",
+    )
+    try:
+        out = subprocess.check_output(["pgrep", "-fl", "omni-exp-watch-tasks"], text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return
+    for line in out.splitlines():
+        # Never kill the Application Support / launchd copy.
+        if "Application Support" in line or "omni-exp-feeder" in line:
+            continue
+        if not any(p in line for p in patterns):
+            continue
+        try:
+            pid = int(line.split(None, 1)[0])
+            os.kill(pid, 9)
+            logger.info("Stopped duplicate Documents tmux feeder pid=%s", pid)
+        except (ValueError, OSError):
+            pass
+    # Drop stale supervisor pid stamp so a later fallback can start cleanly.
+    for name in (
+        "omni-exp-watch-tasks-to-tmux-supervisor.pid",
+        "omni-exp-watch-tasks-to-tmux.pid",
+    ):
+        try:
+            (WORKSPACE / "state" / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        import shutil
+
+        shutil.rmtree(WORKSPACE / "state" / "omni-exp-watch-tasks-to-tmux.lock", ignore_errors=True)
+    except Exception:
+        pass
+
+
 def ensure_tmux_task_feeder() -> None:
     """Ensure a Monitor fallback feeder is alive.
 
@@ -192,6 +231,7 @@ def ensure_tmux_task_feeder() -> None:
     if not ENSURE_TMUX_FEEDER:
         return
     if _launchd_feeder_running():
+        _stop_documents_task_feeder()
         return
     if not TMUX_FEEDER.is_file():
         return
@@ -300,6 +340,29 @@ def probe_feeder_hint(task_id: str) -> str:
         / "omni-exp-watch-tasks-to-tmux.log"
     )
     try:
+        # If already visible in the core pane, prefer that over "inbox_pending"
+        # (HOL orphans can leave newer tasks sitting in inbox after a parallel inject).
+        try:
+            pane = subprocess.check_output(
+                [
+                    "tmux",
+                    "-S",
+                    TMUX_SOCKET,
+                    "capture-pane",
+                    "-t",
+                    TMUX_SESSION,
+                    "-p",
+                    "-S",
+                    "-40",
+                ],
+                text=True,
+                timeout=2,
+                stderr=subprocess.DEVNULL,
+            )
+            if base in pane or base.replace(".txt", "") in pane:
+                return f"in_tmux_pane ({base})"
+        except (OSError, subprocess.SubprocessError):
+            pass
         if not log.is_file():
             return "feeder_log_missing"
         # Read last ~8KB only.
@@ -319,6 +382,163 @@ def probe_feeder_hint(task_id: str) -> str:
         return hits[-1][:160]
     except Exception as e:
         return f"feeder_read_err:{e}"
+
+
+def sweep_orphan_feeder_inbox() -> int:
+    """Drop inbox notifies whose task files are gone (user shell can read Documents)."""
+    inbox = (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Sutando"
+        / "omni-exp-feeder"
+        / "inbox"
+    )
+    if not inbox.is_dir():
+        return 0
+    n = 0
+    try:
+        for p in inbox.glob("task-*.txt"):
+            if not (TASKS_DIR / p.name).is_file():
+                mark_feeder_done(p.stem)
+                n += 1
+    except OSError:
+        pass
+    return n
+
+
+# How long to treat an identical work() request as already done (anti re-open loop).
+WORK_DEDUPE_S = float(_env_omni_exp("WORK_DEDUPE_S", "180"))
+# Reclaim result files younger than this after omni-exp restart.
+WORK_RECLAIM_MAX_AGE_S = float(_env_omni_exp("WORK_RECLAIM_MAX_AGE_S", "1800"))
+OMNI_EXP_SUPPORT = (
+    Path.home() / "Library" / "Application Support" / "Sutando" / "omni-exp"
+)
+RECENT_DONE_PATH = OMNI_EXP_SUPPORT / "recent-done.json"
+
+
+def load_recent_done() -> dict[str, tuple[float, str]]:
+    """Persist dedupe across omni-exp restarts (stops Baidu re-open loops)."""
+    try:
+        if not RECENT_DONE_PATH.is_file():
+            return {}
+        raw = json.loads(RECENT_DONE_PATH.read_text(encoding="utf-8"))
+        out: dict[str, tuple[float, str]] = {}
+        if not isinstance(raw, dict):
+            return {}
+        now = time.time()
+        for k, v in raw.items():
+            if not isinstance(v, (list, tuple)) or len(v) < 2:
+                continue
+            ts = float(v[0])
+            tid = str(v[1])
+            if now - ts <= WORK_DEDUPE_S * 2:
+                out[str(k)] = (ts, tid)
+        return out
+    except Exception:
+        return {}
+
+
+def save_recent_done(done: dict[str, tuple[float, str]]) -> None:
+    try:
+        OMNI_EXP_SUPPORT.mkdir(parents=True, exist_ok=True)
+        payload = {k: [v[0], v[1]] for k, v in done.items()}
+        RECENT_DONE_PATH.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception as e:
+        logger.warning("recent-done save failed: %s", e)
+
+
+def cleanup_completed_task_pairs() -> int:
+    """Remove task+result pairs that finished while no phone session was attached."""
+    n = 0
+    try:
+        results = list(RESULTS_DIR.glob("task-*.txt"))
+    except OSError:
+        return 0
+    archive = TASKS_DIR / "archive"
+    try:
+        archive.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    for result in results:
+        task_id = result.stem
+        task_path = TASKS_DIR / f"{task_id}.txt"
+        if not task_path.is_file():
+            # Result alone — still mark feeder done and drop stale result after reclaim window.
+            try:
+                age = time.time() - result.stat().st_mtime
+            except OSError:
+                continue
+            if age < 30:
+                continue  # let an attached session reclaim first
+            mark_feeder_done(task_id)
+            try:
+                result.unlink(missing_ok=True)
+                n += 1
+            except OSError:
+                pass
+            continue
+        # Both exist → completed; archive task, drop result, mark feeder.
+        body = task_body_from_file(task_path)
+        key = normalize_work_task(body)
+        try:
+            # Refresh persistent dedupe so reconnect won't re-open.
+            done = load_recent_done()
+            if key:
+                done[key] = (time.time(), task_id)
+                save_recent_done(done)
+            dest = archive / f"{task_id}.txt"
+            task_path.replace(dest)
+            result.unlink(missing_ok=True)
+            mark_feeder_done(task_id)
+            n += 1
+            logger.info("CLEANUP completed pair %s", task_id)
+        except OSError as e:
+            logger.warning("cleanup %s failed: %s", task_id, e)
+    return n
+
+
+def normalize_work_task(task: str) -> str:
+    """Collapse wording so '打开百度.com' / 'Open baidu.com' dedupe together."""
+    t = " ".join((task or "").strip().lower().split())
+    t = t.replace("百度.com", "baidu.com").replace("百度", "baidu.com")
+    t = t.replace("https://", "").replace("http://", "").replace("www.", "")
+    openish = any(
+        w in t
+        for w in (
+            "open",
+            "打开",
+            "chrome",
+            "safari",
+            "browser",
+            "浏览器",
+            "firefox",
+        )
+    )
+    # No leading \b — CJK+ascii ("打开baidu.com") has no word boundary.
+    domain = re.search(r"([a-z0-9.-]+\.(?:com|cn|net|org|ai|io))", t)
+    if domain and openish:
+        return f"open:{domain.group(1)}"
+    for a, b in (
+        ("谷歌浏览器", "chrome"),
+        ("chrome浏览器", "chrome"),
+        ("google chrome", "chrome"),
+        ("打开", "open "),
+        ("浏览器中", " "),
+        ("浏览器", " "),
+    ):
+        t = t.replace(a, b)
+    return " ".join(t.split())
+
+
+def task_body_from_file(path: Path) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("task:"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
 
 
 def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
@@ -703,6 +923,8 @@ class PhoneSession:
         self.qwen: QwenOmniSession | None = None
         # task_id -> {started, task, last_hb, source, call_id?}
         self._pending_work: dict[str, dict[str, Any]] = {}
+        # normalize_work_task(task) -> (done_at_epoch, task_id) — blocks re-open loops
+        self._recent_done: dict[str, tuple[float, str]] = load_recent_done()
         self._closed = False
         self._assistant_text = ""
         self._audio_buf: list[str] = []
@@ -879,6 +1101,11 @@ class PhoneSession:
                 "Sutando-core DOWN — work() will queue but not finish. "
                 f"Start: {core.get('how')} (or tap Start core)",
             )
+        # After restart, results may already exist while _pending_work is empty —
+        # reclaim so HUD/speak catch up instead of Qwen re-calling work().
+        n = self.adopt_stranded_results()
+        if n:
+            await self.activity("work", f"Reclaimed {n} stranded result(s) from disk")
 
     async def _on_qwen_event(self, data: dict[str, Any]) -> None:
         et = data.get("type", "")
@@ -1178,30 +1405,28 @@ class PhoneSession:
             await self.activity("work", f"work tool empty task: {name}({params_exact})")
             return
 
-        task_id = await self.enqueue_work(task, source="tool", call_id=call_id)
+        task_id, status, note = await self.enqueue_work(task, source="tool", call_id=call_id)
         if self.qwen:
             await self.qwen.send_function_output(
                 call_id,
                 {
                     "ok": True,
                     "task_id": task_id,
-                    "status": "queued",
-                    "message": (
-                        "Task queued for Sutando core — NOT finished yet. "
-                        "Tell the user you started it; do not claim success until a later result arrives."
-                    ),
+                    "status": status,
+                    "message": note,
                 },
             )
         logger.info(
-            "TOOL_CALL turn=%s tool=%s → queued %s parameters=%s",
+            "TOOL_CALL turn=%s tool=%s → %s %s parameters=%s",
             self._turn_id,
             name,
+            status,
             task_id,
             params_exact,
         )
         await self.activity(
             "work",
-            f"{self._turn_tag()} Tool {name}({params_exact}) → queued {task_id}",
+            f"{self._turn_tag()} Tool {name}({params_exact}) → {status} {task_id}",
         )
 
     async def handle_audio(self, b64: str) -> None:
@@ -1260,9 +1485,71 @@ class PhoneSession:
             await self.send({"type": "error", "message": f"prompt blocked: {why}"})
             await self.activity("trigger", f"Manual prompt start failed: {why}")
 
+    def adopt_stranded_results(self) -> int:
+        """Adopt result files left on disk after omni-exp restart into _pending_work."""
+        n = 0
+        now = time.time()
+        try:
+            results = list(RESULTS_DIR.glob("task-*.txt"))
+        except OSError:
+            return 0
+        for result in results:
+            task_id = result.stem
+            if task_id in self._pending_work:
+                continue
+            try:
+                age = max(0.0, now - result.stat().st_mtime)
+            except OSError:
+                continue
+            if age > WORK_RECLAIM_MAX_AGE_S:
+                continue
+            task_path = TASKS_DIR / f"{task_id}.txt"
+            body = task_body_from_file(task_path) if task_path.is_file() else ""
+            self._pending_work[task_id] = {
+                "started": now - age,
+                "task": (body or task_id)[:240],
+                "last_hb": 0.0,
+                "last_debug_act": 0.0,
+                "last_debug_sig": "",
+                "source": "reclaim",
+                "call_id": None,
+                "phase": "result_file",
+                "reclaimed": True,
+            }
+            n += 1
+            logger.info("RECLAIM result task_id=%s age=%.1fs", task_id, age)
+        return n
+
     async def enqueue_work(
         self, task: str, *, source: str = "manual", call_id: str | None = None
-    ) -> str:
+    ) -> tuple[str, str, str]:
+        """Queue work for sutando-core.
+
+        Returns (task_id, status, message_for_model).
+        status: queued | already_queued | already_done
+        """
+        key = normalize_work_task(task)
+        now = time.time()
+        # Same work already in flight — do not open Baidu again.
+        for tid, meta in self._pending_work.items():
+            if normalize_work_task(str(meta.get("task") or "")) == key:
+                note = (
+                    f"Same task already in flight as {tid} — NOT queued again. "
+                    "Tell the user you're still waiting; do NOT claim a new open."
+                )
+                await self.activity("work", f"DEDUPÉ already_queued → {tid}: {task[:60]}")
+                return tid, "already_queued", note
+        # Same work finished recently — stop the re-open loop.
+        prev = self._recent_done.get(key)
+        if prev and now - prev[0] < WORK_DEDUPE_S:
+            tid = prev[1]
+            note = (
+                f"Same task already completed recently ({tid}) — NOT queued again. "
+                "Tell the user it's already done; do NOT open the site again."
+            )
+            await self.activity("work", f"DEDUPÉ already_done → {tid}: {task[:60]}")
+            return tid, "already_done", note
+
         task_id = f"task-{int(time.time() * 1000)}"
         content = (
             f"id: {task_id}\n"
@@ -1293,8 +1580,14 @@ class PhoneSession:
             (inbox / f"{task_id}.txt").write_text(task_id + "\n")
         except Exception as e:
             logger.warning("feeder inbox notify failed: %s", e)
+        # Drop stale inbox orphans (no task file) so HOL can't block this notify.
+        try:
+            swept = sweep_orphan_feeder_inbox()
+            if swept:
+                logger.info("swept %s orphan feeder inbox entries", swept)
+        except Exception as e:
+            logger.warning("feeder inbox sweep failed: %s", e)
         ensure_tmux_task_feeder()
-        now = time.time()
         self._pending_work[task_id] = {
             "started": now,
             "task": task[:240],
@@ -1366,10 +1659,16 @@ class PhoneSession:
             )
         dbg = pipeline_debug(task_id, "task_written")
         await self.activity("work", f"Pipeline: {dbg['line']}", task_id=task_id)
-        return task_id
+        note = (
+            "Task queued for Sutando core — NOT finished yet. "
+            "Tell the user you started it; do not claim success until a later result arrives."
+        )
+        return task_id, "queued", note
 
     async def poll_results_once(self) -> None:
         now = time.time()
+        # Pick up results written while we were down / not tracking.
+        self.adopt_stranded_results()
         for task_id in list(self._pending_work):
             meta = self._pending_work[task_id]
             started = float(meta.get("started") or now)
@@ -1474,6 +1773,16 @@ class PhoneSession:
             )
             del self._pending_work[task_id]
             mark_feeder_done(task_id)
+            # Remember completion so identical work() calls don't re-open Baidu.
+            done_key = normalize_work_task(task_snippet or task_id)
+            if done_key:
+                self._recent_done[done_key] = (now, task_id)
+                # Cap map size.
+                if len(self._recent_done) > 64:
+                    oldest = sorted(self._recent_done.items(), key=lambda kv: kv[1][0])[:16]
+                    for k, _ in oldest:
+                        self._recent_done.pop(k, None)
+                save_recent_done(self._recent_done)
             try:
                 result.unlink(missing_ok=True)
                 task_path.unlink(missing_ok=True)
@@ -1558,6 +1867,15 @@ async def result_poller(app: web.Application) -> None:
                 await s.poll_results_once()
             except Exception as e:
                 logger.warning("result poll: %s", e)
+        # No attached phone session → still retire finished task+result pairs so
+        # feeder/core don't keep re-driving them (Baidu re-open loop).
+        if not sessions and ticks % 4 == 0:
+            try:
+                cleaned = await asyncio.to_thread(cleanup_completed_task_pairs)
+                if cleaned:
+                    logger.info("cleaned %s completed task/result pairs (no session)", cleaned)
+            except Exception as e:
+                logger.warning("completed-pair cleanup: %s", e)
         ticks += 1
         # Push core liveness every ~4s (or on change) so the HUD stays honest.
         if ticks % 8 == 0 and sessions:
@@ -1656,6 +1974,11 @@ async def index(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(CLIENT_HTML)
 
 
+async def legacy_omni_redirect(_request: web.Request) -> web.StreamResponse:
+    """Old /omni bookmarks → canonical /omni-exp (no separate app)."""
+    raise web.HTTPFound("/omni-exp")
+
+
 async def on_startup(app: web.Application) -> None:
     app["sessions"] = set()
     app["poller"] = asyncio.create_task(result_poller(app))
@@ -1677,9 +2000,9 @@ def make_app() -> web.Application:
     app.router.add_get("/", index)
     app.router.add_get("/omni-exp", index)
     app.router.add_get("/omni-exp-client.html", index)
-    # Legacy aliases (pre omni-exp rename) — same client
-    app.router.add_get("/omni", index)
-    app.router.add_get("/omni-client.html", index)
+    # Pre-rename paths: redirect only (do not serve a second identity).
+    app.router.add_get("/omni", legacy_omni_redirect)
+    app.router.add_get("/omni-client.html", legacy_omni_redirect)
     app.router.add_get("/ws", ws_handler)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)

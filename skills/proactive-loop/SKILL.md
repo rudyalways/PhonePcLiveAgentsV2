@@ -12,12 +12,37 @@ Start Sutando's autonomous loop. Each pass: check for tasks, run health checks, 
 
 ARGUMENTS: $ARGUMENTS
 
+## Whole-loop kill switch (FIRST — before anything else)
+
+Run this **before** Parse arguments, On activation, `/loop`, and at the start of
+**every** per-pass body (before step 0 — including before 0.7 context reconstruct).
+An already-armed cron or a manual `/proactive-loop` does **not** override it.
+
+```bash
+# Re-source repo .env so SUTANDO_PROACTIVE_LOOP_ENABLED=0 takes effect on the
+# next pass even if this skill/cron was armed while the flag was still on.
+if [ -f .env ]; then set -a; # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+python3 skills/proactive-loop/scripts/proactive-loop-enabled.py
+```
+
+If it prints `disabled`: emit exactly one line
+`proactive-loop skipped (SUTANDO_PROACTIVE_LOOP_ENABLED=0)`, write
+`{"status":"idle","ts":DATE_NOW}` to `$WORKSPACE/state/core-status.json` if a
+workspace is resolvable, do **not** run On activation, do **not** schedule
+`/loop`, do **not** run steps 0–11, and end immediately. A missing gate script
+is treated as `enabled` (same as `/schedule-crons`) so an incomplete checkout
+cannot silently kill the loop.
+
 ## Parse arguments
 
 If an interval is provided in ARGUMENTS (e.g. "5m", "10m", "30m"), use it. Otherwise default to 10m.
 
 ## On activation
 
+0. Re-check the whole-loop kill switch above. If disabled, stop — do not register schedules for the loop and do not start `/loop`.
 1. Run `/schedule-crons` to set up all recurring cron jobs (morning briefing, Zacks, etc.)
 2. Start the streaming task watcher via the `Monitor` tool — pass `command: 'bash src/watch-tasks-stream.sh'`, `persistent: true`, `description: 'Streaming task watcher'`. The script emits one `TASK_FILE: <basename>` line per new task file (initial sweep + each subsequent event). Read the named file via the Read tool when notifications arrive.
 
@@ -63,6 +88,8 @@ This resolves through `bash scripts/sutando-config.sh workspace`, which reads `s
 **Build log:** `$WORKSPACE/build_log.md`
 
 Each pass, in order:
+
+0.0. **Whole-loop kill switch (again — every pass).** Re-run the kill-switch block at the top of this skill (source `.env`, then `proactive-loop-enabled.py`). If `disabled`, emit `proactive-loop skipped (SUTANDO_PROACTIVE_LOOP_ENABLED=0)`, write idle `core-status.json`, and end the pass immediately — do not run steps 0–11. This is what makes flipping `.env` to `0` stop a loop that was already on.
 
 0. **Signal loop start.** Write `{"status":"running","step":"<short description of what you are actually doing>","ts":DATE_NOW}` to `$WORKSPACE/state/core-status.json` (with `WORKSPACE` resolved as above). The session cwd is the repo, so a bare `core-status.json` lands in `<repo>/` where no reader looks (`health-check.py` and the web UI resolve `<workspace>/state/core-status.json` via `status_read_path`). Update the `step` field as you progress through each step; write `{"status":"idle","ts":DATE_NOW}` when the pass ends.
 

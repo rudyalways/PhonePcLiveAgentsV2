@@ -136,6 +136,29 @@ check(
     "a missing script is treated as enabled",
     "missing optional script must not silently stop" in crons_text,
 )
+check(
+    "disabled disarm deletes already-armed loop cron",
+    "CronDelete" in crons_text
+    and "proactive-loop cron deleted" in crons_text,
+)
+
+skill_text = (REPO / "skills/proactive-loop/SKILL.md").read_text(encoding="utf-8")
+check(
+    "skill entry kill switch invokes the toggle script",
+    "proactive-loop-enabled.py" in skill_text,
+)
+check(
+    "skill aborts with skipped line when disabled",
+    "proactive-loop skipped (SUTANDO_PROACTIVE_LOOP_ENABLED=0)" in skill_text,
+)
+check(
+    "per-pass body re-checks the kill switch",
+    "0.0. **Whole-loop kill switch" in skill_text,
+)
+check(
+    "skill re-sources .env so a flip to 0 stops an already-on loop",
+    "source .env" in skill_text,
+)
 
 if failures:
     raise SystemExit(f"{len(failures)} failure(s): {', '.join(failures)}")

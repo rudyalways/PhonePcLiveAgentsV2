@@ -36,6 +36,22 @@ if [ -f "$REPO/.env" ]; then
   unset _self_dev_was_set _self_dev_ambient _proactive_was_set _proactive_ambient
 fi
 
+# Keep Claude skill discovery in sync with the whole-loop toggle: when
+# SUTANDO_PROACTIVE_LOOP_ENABLED=0, unlink skills/proactive-loop so /proactive-loop
+# cannot be scheduled or casually invoked from the core skill table.
+# Prefer workspace CCD (sutando-core) even before the runtime launcher exports it.
+if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+  _ws_for_ccd="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null || true)"
+  if [ -n "$_ws_for_ccd" ] && [ -d "$_ws_for_ccd/.claude-sutando" ]; then
+    export CLAUDE_CONFIG_DIR="$_ws_for_ccd/.claude-sutando"
+  fi
+  unset _ws_for_ccd
+fi
+if [ -x "$REPO/skills/proactive-loop/scripts/sync-skill-link.sh" ]; then
+  SUTANDO_SUPPRESS_CCD_FALLBACK_BANNER=1 \
+    bash "$REPO/skills/proactive-loop/scripts/sync-skill-link.sh" || true
+fi
+
 runtime="$(bash "$REPO/scripts/sutando-config.sh" core-runtime)" || {
   echo "start-cli: failed to resolve core runtime" >&2
   exit 1

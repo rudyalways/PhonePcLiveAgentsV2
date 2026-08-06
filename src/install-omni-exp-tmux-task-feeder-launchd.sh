@@ -55,10 +55,10 @@ DONE_DIR="\$STATE/omni-exp-watch-tasks-to-tmux.done"
 PID_FILE="\$STATE/omni-exp-watch-tasks-to-tmux.pid"
 LOCK_DIR="\$STATE/omni-exp-watch-tasks-to-tmux.lock"
 POLL_S="\${SUTANDO_TMUX_TASK_FEEDER_POLL_S:-1}"
-STUCK_S="\${SUTANDO_TMUX_TASK_FEEDER_STUCK_S:-60}"
+STUCK_S="\${SUTANDO_TMUX_TASK_FEEDER_STUCK_S:-45}"
 # After this many re-nudges without a done-marker, abandon and drain the next inbox
 # item (prevents one orphan from head-of-line blocking Safari/etc.).
-MAX_NUDGES="\${SUTANDO_TMUX_TASK_FEEDER_MAX_NUDGES:-3}"
+MAX_NUDGES="\${SUTANDO_TMUX_TASK_FEEDER_MAX_NUDGES:-2}"
 mkdir -p "\$INBOX" "\$STATE" "\$DONE_DIR"
 if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
   old="\$(cat "\$PID_FILE" 2>/dev/null || true)"

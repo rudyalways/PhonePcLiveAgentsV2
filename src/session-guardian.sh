@@ -5,23 +5,40 @@
 # Restart triggers:
 #   1. Process dead  — no `claude --name sutando-core` process
 #   2. Session stuck — core-status.json > 10 min old AND tasks/*.txt > 5 min old
+#
+# Always restarts via src/agent/start-cli.sh so .env policy (including
+# SUTANDO_PROACTIVE_LOOP_ENABLED) and skill symlink sync are applied.
+# Never hardcode -- "/proactive-loop" here — that bypasses the whole-loop
+# toggle and can burn budget when the skill is intentionally disabled.
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$REPO/logs/session-guardian.log"
-SOCKET="/tmp/sutando-tmux.sock"
+SOCKET="${SUTANDO_TMUX_SOCKET:-/tmp/sutando-tmux.sock}"
+
+# Load repo .env so the gate + sync see the same value as start-cli / install.
+# Preserve an explicit ambient override (skill-config: env > .env).
+if [ -f "$REPO/.env" ]; then
+  _proactive_was_set=0
+  if [ "${SUTANDO_PROACTIVE_LOOP_ENABLED+x}" = x ]; then
+    _proactive_was_set=1
+    _proactive_ambient="$SUTANDO_PROACTIVE_LOOP_ENABLED"
+  fi
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO/.env"
+  set +a
+  if [ "$_proactive_was_set" = 1 ]; then
+    export SUTANDO_PROACTIVE_LOOP_ENABLED="$_proactive_ambient"
+  fi
+  unset _proactive_was_set _proactive_ambient
+fi
 
 start_session() {
-    echo "$(date -Iseconds) [guardian] Starting sutando-core..." >> "$LOG"
-    if command -v tmux > /dev/null 2>&1; then
-        tmux -S "$SOCKET" new-session -d -s sutando-core \
-            claude --name sutando-core --remote-control "Sutando" \
-            --dangerously-skip-permissions --add-dir "$HOME" \
-            -- "/proactive-loop" >> "$LOG" 2>&1 || true
-    else
-        nohup claude --name sutando-core --remote-control "Sutando" \
-            --dangerously-skip-permissions --add-dir "$HOME" \
-            -- "/proactive-loop" >> "$REPO/logs/sutando-core.log" 2>&1 &
-        disown
+    echo "$(date -Iseconds) [guardian] Starting sutando-core via start-cli.sh (proactive=$(python3 "$REPO/skills/proactive-loop/scripts/proactive-loop-enabled.py" 2>/dev/null || echo unknown))..." >> "$LOG"
+    # --restart is idempotent when the session is already gone; it also runs
+    # sync-skill-link.sh so a disabled toggle keeps the skill unlinked.
+    if ! bash "$REPO/src/agent/start-cli.sh" --restart >> "$LOG" 2>&1; then
+        echo "$(date -Iseconds) [guardian] start-cli.sh --restart failed" >> "$LOG"
     fi
 }
 
