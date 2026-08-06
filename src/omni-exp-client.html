@@ -450,20 +450,26 @@ function shortTaskId(id) {
 function ensureTask(key, patch = {}) {
   if (!key) return null;
   let t = taskStore.get(key);
-  if (!t) {
-    // Merge provisional call:* entry into real task_id when both known.
-    if (patch.call_id) {
-      const prov = taskStore.get(`call:${patch.call_id}`);
-      if (prov && key.startsWith("task-")) {
-        taskStore.delete(`call:${patch.call_id}`);
-        const oldCard = taskCards.get(`call:${patch.call_id}`);
+  // Always collapse provisional call:* rows once we know the real task_id
+  // (including already_done / already_queued on a second work() call).
+  if (patch.call_id && key.startsWith("task-")) {
+    const provKey = `call:${patch.call_id}`;
+    const prov = taskStore.get(provKey);
+    if (prov) {
+      taskStore.delete(provKey);
+      const oldCard = taskCards.get(provKey);
+      if (!t) {
         if (oldCard) {
-          taskCards.delete(`call:${patch.call_id}`);
+          taskCards.delete(provKey);
           taskCards.set(key, oldCard);
           oldCard.dataset.taskKey = key;
         }
         t = prov;
         t.id = key;
+      } else if (oldCard) {
+        // Real task card already exists — drop the duplicate Tool-only row.
+        oldCard.remove();
+        taskCards.delete(provKey);
       }
     }
   }
@@ -544,6 +550,15 @@ function applyWorkLifecycle(msg) {
       }
     }
     t.tool = msg.tool || "work";
+  } else if (state === "already_done") {
+    // Second work() for a recently completed task — merge + mark finished.
+    if (msg.task) t.task = String(msg.task);
+    if (msg.preview) t.preview = String(msg.preview);
+    advanceTask(t, 5);
+  } else if (state === "already_queued") {
+    // Same work still in flight — attach to existing card, stay waiting.
+    if (msg.task) t.task = String(msg.task);
+    if (t.step < 1) advanceTask(t, 1);
   } else if (state === "task_written" || state === "queued") {
     advanceTask(t, 1);
   } else if (state === "waiting" || state === "processing") {
@@ -942,6 +957,15 @@ function handleMsg(msg) {
         || (msg.parameters ? JSON.stringify(msg.parameters) : "");
       setChip(chipWork, `Work: tool ${tool}`, "hot");
       logAct("work", `${turn}Tool call: ${tool}(${params})`);
+    } else if (msg.state === "already_done") {
+      clearStickyProcessing(taskId);
+      setChip(chipWork, "Work: already done", "on");
+      logAct("work", `${turn}DEDUPÉ already_done${id ? " " + id : ""} — ${msg.preview || msg.task || ""}`);
+      workStartedAt = 0;
+    } else if (msg.state === "already_queued") {
+      setChip(chipWork, "Work: already queued", "busy");
+      logAct("work", `${turn}DEDUPÉ already_queued${id ? " " + id : ""} — ${msg.preview || msg.task || ""}`);
+      upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
     } else if (msg.state === "task_written") {
       workStartedAt = Date.now();
       setChip(chipWork, "Work: task file", "busy");
@@ -1020,6 +1044,25 @@ function handleMsg(msg) {
   } else if (msg.type === "audio.out") {
     playPcm24kBase64(msg.data);
     setChip(chipStream, "Stream: playing", "busy");
+  } else if (msg.type === "result.announce") {
+    // Server fallback when Qwen couldn't speak the core result — show + browser TTS.
+    const text = String(msg.text || "").trim();
+    const tid = msg.task_id ? String(msg.task_id).replace(/^task-/, "…") : "";
+    setChip(chipWork, "Work: announced", "on");
+    logAct("work", `Result announce${tid ? " " + tid : ""} — ${text}`);
+    if (text) {
+      logAct("assistant", `assistant: ${text}`);
+      if (msg.tts !== false && window.speechSynthesis) {
+        try {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.rate = 1.05;
+          window.speechSynthesis.speak(u);
+        } catch (e) {
+          logAct("error", `browser TTS failed: ${e}`);
+        }
+      }
+    }
   } else if (msg.type === "transcript") {
     const role = msg.role || "assistant";
     const text = msg.text || "";

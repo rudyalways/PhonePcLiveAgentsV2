@@ -37,6 +37,13 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from omni_exp_provider_qwen import QwenOmniSession  # noqa: E402
+from omni_exp_result_speak import (  # noqa: E402
+    DELIVER_RETRY_DELAYS_S,
+    TRUST_DONE_CLAIM_S,
+    extract_task_result_body,
+    frame_task_result_prompt,
+    is_fake_done_claim,
+)
 from omni_exp_scene import SceneChangeSensor  # noqa: E402
 from omni_exp_speak_queue import SpeakItem, SpeakQueue  # noqa: E402
 from omni_exp_turn_gate import TurnGate, TurnRequest  # noqa: E402
@@ -834,14 +841,6 @@ INSTRUCTIONS = _env_omni_exp(
     ),
 )
 
-# Spoken claims of PC action completion without a tool call this turn.
-_FAKE_DONE_RE = re.compile(
-    r"(已经帮你|已经打开|打开了|已打开|已经完成|弄好了|"
-    r"already (opened|done|finished)|i (have |just )?(opened|closed|done)|"
-    r"browser is open|opened the browser)",
-    re.I,
-)
-
 SCENE_PROMPT = (
     "[Proactive: scene_change] Briefly introduce what is now clearly visible "
     "in the camera. If nothing notable or the same as before, reply exactly [[NO_SPEAK]]."
@@ -938,6 +937,11 @@ class PhoneSession:
         self._pending_prompt_reason: str | None = None
         self._scene_nospeak_streak = 0
         self._last_fake_done_nudge_at = 0.0
+        # When set (epoch), success-language with tools=0 is trusted (already_done).
+        self._trust_done_claim_until = 0.0
+        # task_ids whose work_result speak actually started (or HTML fallback fired).
+        self._spoken_task_ids: set[str] = set()
+        self._deliver_retry_tasks: set[asyncio.Task[Any]] = set()
         # Buffer PromptTriggers (work results / nudges) until response.done.
         self.speak_queue = SpeakQueue(merge=WORK_RESULT_MERGE, max_items=SPEAK_QUEUE_MAX)
         self._drain_lock = asyncio.Lock()
@@ -971,7 +975,7 @@ class PhoneSession:
             raise
         return True, "ok"
 
-    async def enqueue_speak(self, item: SpeakItem) -> None:
+    async def enqueue_speak(self, item: SpeakItem, *, with_retry: bool = False) -> None:
         self.speak_queue.push(item)
         kind = ""
         if isinstance(item.meta, dict):
@@ -996,6 +1000,14 @@ class PhoneSession:
             ),
         )
         await self.drain_speak_queue()
+        # Mirror inject-delivery.ts: re-check after 1.5s / 3s, then HTML fallback.
+        if with_retry and item.reason == "work_result" and item.task_id:
+            task = asyncio.create_task(
+                self._deliver_work_result_with_retry(item),
+                name=f"omni-deliver-{item.task_id}",
+            )
+            self._deliver_retry_tasks.add(task)
+            task.add_done_callback(self._deliver_retry_tasks.discard)
 
     async def drain_speak_queue(self) -> None:
         """Start at most one buffered prompt when the session is idle."""
@@ -1024,6 +1036,8 @@ class PhoneSession:
                 self.speak_queue.push_front(item)
                 await self.activity("work", f"Speak drain deferred: {why}")
                 return
+            if item.task_id:
+                self._spoken_task_ids.add(item.task_id)
             await self.work_event(
                 "speak_started",
                 task_id=item.task_id,
@@ -1031,6 +1045,61 @@ class PhoneSession:
                 merge=self.speak_queue.merge,
                 preview=(item.preview or "")[:80],
             )
+
+    async def _deliver_work_result_with_retry(self, item: SpeakItem) -> None:
+        """Retry speak drain like voice inject-delivery; HTML TTS if still silent."""
+        tid = item.task_id or ""
+        for delay in DELIVER_RETRY_DELAYS_S:
+            await asyncio.sleep(delay)
+            if self._closed:
+                return
+            if tid and tid in self._spoken_task_ids:
+                return
+            if tid and not self.speak_queue.contains_task(tid):
+                # Dropped / never re-queued — put it back and try again.
+                self.speak_queue.push_front(item)
+            await self.drain_speak_queue()
+            if tid and tid in self._spoken_task_ids:
+                return
+        if self._closed:
+            return
+        if tid and tid in self._spoken_task_ids:
+            return
+        await self._html_result_fallback(item)
+
+    async def _html_result_fallback(self, item: SpeakItem) -> None:
+        """When Qwen can't speak the result, announce on the HTML client (browser TTS).
+
+        Better than silence for the phone page — Discord is intentionally unused here.
+        """
+        tid = item.task_id or ""
+        body = extract_task_result_body(item.prompt_text) or (item.preview or "Task completed.")
+        body = body[:500].strip()
+        if tid:
+            self._spoken_task_ids.add(tid)
+            self.speak_queue.remove_task(tid)
+        await self.send(
+            {
+                "type": "result.announce",
+                "task_id": tid or None,
+                "text": body,
+                "tts": True,
+                "reason": "speak_retry_exhausted",
+            }
+        )
+        await self.activity(
+            "work",
+            f"HTML result fallback (browser TTS)"
+            + (f" · {tid}" if tid else "")
+            + f" — {body[:80]}",
+            task_id=tid or None,
+        )
+        await self.work_event(
+            "result_announce",
+            task_id=tid or None,
+            preview=body[:120],
+            tts=True,
+        )
 
     def _turn_tag(self) -> str:
         return f"[{self._turn_id}]"
@@ -1138,14 +1207,19 @@ class PhoneSession:
             prompt_reason = self._pending_prompt_reason
             self._pending_prompt_reason = None
             suppress = "[[NO_SPEAK]]" in text
-            fake_done = bool(
-                text
-                and self._tools_this_response == 0
-                and _FAKE_DONE_RE.search(text)
+            trust_done = time.time() < float(self._trust_done_claim_until or 0)
+            fake_done = is_fake_done_claim(
+                text,
+                tools_this_response=self._tools_this_response,
+                prompt_reason=prompt_reason,
+                trust_done_claim=trust_done,
             )
             if fake_done:
                 # Don't play audio that claims a PC action that never ran.
                 suppress = True
+            elif trust_done and prompt_reason != "work_result":
+                # Consumed the already_done trust window on this speak.
+                self._trust_done_claim_until = 0.0
             scene_quiet = prompt_reason == "scene_change" and suppress and not fake_done
             await self.send(
                 {
@@ -1416,6 +1490,19 @@ class PhoneSession:
                     "message": note,
                 },
             )
+        # Dedupe paths never emit task_written — close the provisional Tool card
+        # and (for already_done) allow the model to confirm without fake-done mute.
+        if status in ("already_done", "already_queued"):
+            await self.work_event(
+                status,
+                task_id=task_id,
+                call_id=call_id,
+                source="tool",
+                task=task[:160],
+                preview=note[:120],
+            )
+            if status == "already_done":
+                self._trust_done_claim_until = time.time() + TRUST_DONE_CLAIM_S
         logger.info(
             "TOOL_CALL turn=%s tool=%s → %s %s parameters=%s",
             self._turn_id,
@@ -1816,17 +1903,16 @@ class PhoneSession:
                     skipped="cleared",
                 )
             elif self.qwen:
+                # Exact frameTaskResult + inject-delivery retry (HTML TTS if still silent).
                 await self.enqueue_speak(
                     SpeakItem(
                         reason="work_result",
-                        prompt_text=(
-                            f"[System: Core finished in {_fmt_elapsed(elapsed)}. "
-                            f"Speak this result to the user briefly.]\n\n{text[:1500]}"
-                        ),
+                        prompt_text=frame_task_result_prompt(text[:1500]),
                         task_id=task_id,
                         preview=text[:120],
                         meta={"elapsed_ms": elapsed_ms, "call_id": call_id},
-                    )
+                    ),
+                    with_retry=True,
                 )
                 await self.work_event(
                     "result_processed",

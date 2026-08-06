@@ -51,6 +51,19 @@ class SpeakQueue:
     def clear(self) -> None:
         self._items.clear()
 
+    def contains_task(self, task_id: str | None) -> bool:
+        if not task_id:
+            return False
+        return any(it.task_id == task_id for it in self._items)
+
+    def remove_task(self, task_id: str | None) -> int:
+        """Drop queued items for task_id. Returns how many removed."""
+        if not task_id:
+            return 0
+        before = len(self._items)
+        self._items = [it for it in self._items if it.task_id != task_id]
+        return before - len(self._items)
+
     def take(self) -> SpeakItem | None:
         if not self._items:
             return None
