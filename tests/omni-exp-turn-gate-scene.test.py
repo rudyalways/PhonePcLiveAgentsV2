@@ -58,6 +58,32 @@ class TestSceneChange(unittest.TestCase):
         self.assertTrue(s.observe(_jpeg((255, 255, 255))))
         self.assertFalse(s.observe(_jpeg((255, 255, 255))))
 
+    def test_upload_dedupe_independent_of_high_scene_threshold(self):
+        # High scene threshold (quiet fires) must not starve uploads the way
+        # enter_threshold*0.35 did on omni-exp (threshold=28 → skip MAD<9.8).
+        s = SceneChangeSensor(
+            enter_threshold=28.0,
+            upload_dedupe_threshold=6.3,
+            upload_keepalive_s=999,
+        )
+        self.assertTrue(s.should_upload(_jpeg((0, 0, 0)), min_interval_s=0))
+        # Tiny change — still under 6.3 → skip
+        self.assertFalse(s.should_upload(_jpeg((2, 2, 2)), min_interval_s=0))
+        # Large change — upload
+        self.assertTrue(s.should_upload(_jpeg((255, 0, 0)), min_interval_s=0))
+
+    def test_upload_keepalive_forces_static_refresh(self):
+        s = SceneChangeSensor(
+            enter_threshold=28.0,
+            upload_dedupe_threshold=6.3,
+            upload_keepalive_s=0.05,
+        )
+        frame = _jpeg((40, 40, 40))
+        self.assertTrue(s.should_upload(frame, min_interval_s=0))
+        self.assertFalse(s.should_upload(frame, min_interval_s=0))
+        time.sleep(0.06)
+        self.assertTrue(s.should_upload(frame, min_interval_s=0))
+
 
 if __name__ == "__main__":
     unittest.main()

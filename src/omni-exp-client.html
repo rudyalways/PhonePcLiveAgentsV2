@@ -1153,7 +1153,16 @@ document.getElementById("flip-btn").onclick = async () => {
 };
 document.getElementById("ask-btn").onclick = () => {
   if (ws?.readyState === 1) {
-    ws.send(JSON.stringify({ type: "control", action: "prompt_manual", text: "Describe what you see in the camera right now." }));
+    // Push a fresh JPEG before Ask view so Qwen's buffer isn't empty/stale.
+    sendFrame();
+    setTimeout(() => {
+      if (!ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({
+        type: "control",
+        action: "prompt_manual",
+        text: "Describe what you see in the camera right now.",
+      }));
+    }, 120);
     setChip(chipTrigger, "Trigger: manual", "hot");
   }
 };

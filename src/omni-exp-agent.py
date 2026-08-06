@@ -89,6 +89,11 @@ SCENE_CHANGE_ENABLED = _env_omni_exp("SCENE_CHANGE", "1").lower() in ("1", "true
 SCENE_COOLDOWN_MS = int(_env_omni_exp("SCENE_COOLDOWN_MS", "30000"))
 # Mean abs-diff on 64×36 gray thumb (0–255). Higher = fewer false scene fires.
 SCENE_ENTER_THRESHOLD = float(_env_omni_exp("SCENE_THRESHOLD", "28"))
+# Upload near-dupe skip (MAD). Independent of SCENE_THRESHOLD so quiet scene
+# fires do not starve the rolling vision window (main omni uses ~18*0.35).
+UPLOAD_DEDUPE_THRESHOLD = float(_env_omni_exp("UPLOAD_DEDUPE", str(18.0 * 0.35)))
+# Force a frame to Qwen at least this often even if the scene looks static.
+UPLOAD_KEEPALIVE_S = float(_env_omni_exp("UPLOAD_KEEPALIVE_S", "8"))
 # After this many consecutive [[NO_SPEAK]] scene replies, multiply cooldown.
 SCENE_NOSPEAK_BACKOFF_AFTER = int(_env_omni_exp("SCENE_NOSPEAK_BACKOFF_AFTER", "2"))
 SCENE_NOSPEAK_BACKOFF_MULT = float(_env_omni_exp("SCENE_NOSPEAK_BACKOFF_MULT", "3"))
@@ -805,6 +810,11 @@ INSTRUCTIONS = _env_omni_exp(
         "You are the voice/vision interface. The Sutando core (Claude Code) is the brain.\n"
         "Your job is to relay the user's requests to work and speak the results.\n"
         "\n"
+        "CAMERA / VISION (answer directly — do NOT call work):\n"
+        "- When the user asks what you see, what's in the camera/lens, or to look again, "
+        "describe the live camera view in 1–2 sentences.\n"
+        "- Never claim you cannot see the video if frames are streaming; use the latest view.\n"
+        "\n"
         "ONLY answer directly (without calling work) for:\n"
         "- Simple greetings and yes/no acknowledgments\n"
         "- Self-introduction (who you are / what you can do)\n"
@@ -918,7 +928,13 @@ class PhoneSession:
         self.username = username
         self.gate = TurnGate()
         self.gate.cooldowns_ms["scene_change"] = SCENE_COOLDOWN_MS
-        self.scene = SceneChangeSensor(enter_threshold=SCENE_ENTER_THRESHOLD)
+        self.scene = SceneChangeSensor(
+            enter_threshold=SCENE_ENTER_THRESHOLD,
+            upload_dedupe_threshold=UPLOAD_DEDUPE_THRESHOLD,
+            upload_keepalive_s=UPLOAD_KEEPALIVE_S,
+        )
+        # Latest JPEG from the client (even if upload was skipped) for speech keyframes.
+        self._last_jpeg: bytes | None = None
         self.qwen: QwenOmniSession | None = None
         # task_id -> {started, task, last_hb, source, call_id?}
         self._pending_work: dict[str, dict[str, Any]] = {}
@@ -1183,6 +1199,9 @@ class PhoneSession:
             await self.status("user_speaking")
             await self.send({"type": "vad", "state": "speech_started"})
             await self.activity("vad", "VAD: speech started")
+            # Ensure Qwen has a fresh frame in the buffer for this voice turn
+            # (main /omni works because lower dedupe kept frames flowing; we force).
+            await self._force_vision_keyframe("speech_started")
         elif et == "input_audio_buffer.speech_stopped":
             self.gate.voice_active = False
             await self.status("listening")
@@ -1532,10 +1551,30 @@ class PhoneSession:
             jpeg = base64.b64decode(b64)
         except Exception:
             return
+        self._last_jpeg = jpeg
         if self.scene.should_upload(jpeg):
             await self.qwen.append_image(jpeg)
+            logger.debug("vision upload ok bytes=%s", len(jpeg))
         if SCENE_CHANGE_ENABLED and self.scene.observe(jpeg):
             await self._prompt_scene()
+
+    async def _force_vision_keyframe(self, reason: str) -> None:
+        """Push the latest camera JPEG into Qwen before a user/voice turn."""
+        if not self.qwen:
+            return
+        jpeg = self._last_jpeg or self.scene.last_accepted_jpeg
+        if not jpeg:
+            await self.activity("trigger", f"Vision keyframe skipped ({reason}): no frame yet")
+            return
+        try:
+            await self.qwen.append_image(jpeg)
+            self.scene.note_upload(jpeg)
+            await self.activity(
+                "trigger",
+                f"Vision keyframe → Qwen ({reason}) · {len(jpeg)}B",
+            )
+        except Exception as e:
+            await self.activity("error", f"Vision keyframe failed ({reason}): {e}")
 
     async def _prompt_scene(self) -> None:
         req = TurnRequest(kind="prompt", reason="scene_change", prompt_text=SCENE_PROMPT)
@@ -1565,6 +1604,7 @@ class PhoneSession:
             await self.activity("trigger", f"Manual prompt blocked: {why}")
             return
         assert self.qwen
+        await self._force_vision_keyframe("ask_view")
         await self.send({"type": "trigger", "reason": "manual", "state": "fired"})
         await self.activity("trigger", "Manual: Ask view")
         ok, why = await self._try_start_prompt("manual", text)
