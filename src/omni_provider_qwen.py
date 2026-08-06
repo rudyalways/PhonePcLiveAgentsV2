@@ -54,6 +54,7 @@ class QwenOmniSession:
         model: str | None = None,
         base_url: str | None = None,
         voice: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> None:
         self.api_key = api_key
         self.on_event = on_event
@@ -62,6 +63,7 @@ class QwenOmniSession:
         raw_base = base_url or os.environ.get("REALTIME_BASE_URL") or DEFAULT_BASE_URL
         self.base_url = raw_base
         self.voice = voice or qwen_default_output_voice()
+        self.tools = tools or []
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._reader: asyncio.Task | None = None
@@ -86,7 +88,16 @@ class QwenOmniSession:
         await self._wait_type("session.created", timeout_s=15)
         self._reader = asyncio.create_task(self._read_loop())
         await self._session_update()
-        logger.info("Qwen Omni session ready model=%s", self.model)
+        tool_names = [
+            str(t.get("name") or (t.get("function") or {}).get("name") or "?")
+            for t in self.tools
+            if isinstance(t, dict)
+        ]
+        logger.info(
+            "Qwen Omni session ready model=%s tools=%s",
+            self.model,
+            tool_names or "[]",
+        )
 
     async def close(self) -> None:
         if self._reader:
@@ -135,11 +146,36 @@ class QwenOmniSession:
         tx = qwen_input_transcription_config()
         if tx:
             session["input_audio_transcription"] = dict(tx)
+        if self.tools:
+            session["tools"] = self.tools
+            session["tool_choice"] = "auto"
         await self._send(
             {
                 "type": "session.update",
                 "event_id": _eid("session_update"),
                 "session": session,
+            }
+        )
+
+    async def send_function_output(self, call_id: str, output: dict[str, Any] | str) -> None:
+        body = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+        logger.info("TOOL_OUTPUT call_id=%s output=%s", call_id, body)
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "event_id": _eid("tool_out"),
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": body,
+                },
+            }
+        )
+        await self._send(
+            {
+                "type": "response.create",
+                "event_id": _eid("response_after_tool"),
+                "response": {},
             }
         )
 

@@ -11,6 +11,9 @@
     --chip: rgba(12, 14, 18, 0.72);
     --accent: #c4a574;
     --danger: #c45c4a;
+    --ok: #4ecca3;
+    --info: #60a5fa;
+    --warn: #fbbf24;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -20,22 +23,20 @@
     font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   }
   body { overflow: hidden; }
-  #stage {
-    position: fixed; inset: 0;
-    background: #111;
-  }
+  #stage { position: fixed; inset: 0; background: #111; }
   #cam {
     width: 100%; height: 100%;
     object-fit: cover;
     background: #1a1a1a;
-    transform: scaleX(1);
   }
   #cam.mirror { transform: scaleX(-1); }
   #hud {
-    position: fixed; left: 0; right: 0; top: 0;
-    padding: calc(10px + env(safe-area-inset-top)) 14px 0;
-    display: flex; justify-content: space-between; align-items: flex-start;
-    pointer-events: none; z-index: 2;
+    position: fixed; left: 0; right: 0; top: 0; z-index: 2;
+    padding: calc(10px + env(safe-area-inset-top)) 12px 0;
+    pointer-events: none;
+  }
+  #hud-top {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
   }
   #brand {
     font-size: 15px; letter-spacing: 0.04em;
@@ -48,8 +49,36 @@
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 999px; padding: 6px 12px;
     backdrop-filter: blur(8px);
+    white-space: nowrap;
   }
   #status.err { color: #ffb4a8; border-color: rgba(196,92,74,0.5); }
+  #status.live { color: var(--ok); border-color: rgba(78,204,163,0.45); }
+  #status.speak { color: var(--warn); border-color: rgba(251,191,36,0.45); }
+  #status.stream { color: var(--info); border-color: rgba(96,165,250,0.45); }
+  #chips {
+    margin-top: 8px;
+    display: none; flex-wrap: wrap; gap: 6px;
+    pointer-events: none;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  .chip {
+    font-size: 11px; padding: 4px 9px; border-radius: 999px;
+    background: var(--chip); border: 1px solid rgba(255,255,255,0.12);
+    color: var(--muted); backdrop-filter: blur(8px);
+  }
+  .chip.on { color: var(--ok); border-color: rgba(78,204,163,0.4); }
+  .chip.hot { color: var(--warn); border-color: rgba(251,191,36,0.45); }
+  .chip.busy { color: var(--info); border-color: rgba(96,165,250,0.45); }
+  .chip.bad { color: #ffb4a8; border-color: rgba(196,92,74,0.45); }
+  #partial {
+    margin-top: 8px; display: none;
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px;
+    background: rgba(12,14,18,0.7); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px; padding: 8px 10px; max-width: 92vw;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+  }
+  #partial .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+  #partial .text { margin-top: 2px; color: #cde7ff; }
   #login {
     position: fixed; inset: 0; z-index: 5;
     display: flex; flex-direction: column; justify-content: flex-end;
@@ -84,16 +113,44 @@
   #bar button { background: rgba(255,255,255,0.12); color: var(--ink); min-width: 72px; }
   #bar button.on { background: var(--accent); color: #1a140c; }
   #bar button.danger { background: var(--danger); color: #fff; }
-  #log {
-    position: fixed; left: 12px; right: 12px; bottom: 88px; z-index: 2;
-    max-height: 28vh; overflow: auto; pointer-events: none;
-    font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px;
-    text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+  #activity {
+    position: fixed; left: 10px; right: 10px; bottom: 92px; z-index: 2;
+    display: none;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    background: rgba(10,12,16,0.78);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+    max-height: 34vh;
+    overflow: hidden;
   }
-  #log div { margin-top: 4px; opacity: 0.92; }
-  #log .user { color: #cde7ff; }
-  #log .assistant { color: #ffe6b8; }
-  #log .system { color: #b8ffd2; }
+  #activity-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 12px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    cursor: pointer; pointer-events: auto;
+  }
+  #activity-header button {
+    pointer-events: auto;
+    background: transparent; border: 1px solid rgba(255,255,255,0.15);
+    color: var(--muted); border-radius: 6px; font-size: 11px; padding: 2px 8px;
+  }
+  #activity-body { max-height: 28vh; overflow: auto; padding: 6px 10px 10px; }
+  #activity-body.collapsed { display: none; }
+  .act {
+    font-size: 12px; line-height: 1.35; margin-top: 5px;
+    color: #cfcabe; text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  }
+  .act .t { color: #666; margin-right: 6px; font-variant-numeric: tabular-nums; }
+  .act.vad { color: var(--warn); }
+  .act.asr { color: #cde7ff; }
+  .act.stream { color: var(--info); }
+  .act.trigger { color: #ffe6b8; }
+  .act.error { color: #ffb4a8; }
+  .act.user { color: #cde7ff; }
+  .act.assistant { color: #ffe6b8; }
+  .act.system, .act.session { color: #b8ffd2; }
+  .act.work { color: #86efac; }
   canvas { display: none; }
 </style>
 </head>
@@ -102,8 +159,22 @@
   <video id="cam" playsinline autoplay muted></video>
 </div>
 <div id="hud">
-  <div id="brand">Sutando Omni</div>
-  <div id="status">idle</div>
+  <div id="hud-top">
+    <div id="brand">Sutando Omni</div>
+    <div id="status">idle</div>
+  </div>
+  <div id="chips">
+    <span class="chip" id="chip-voice">Voice: off</span>
+    <span class="chip" id="chip-vad">VAD: —</span>
+    <span class="chip" id="chip-asr">ASR: —</span>
+    <span class="chip" id="chip-stream">Stream: idle</span>
+    <span class="chip" id="chip-trigger">Trigger: —</span>
+    <span class="chip" id="chip-work">Work: —</span>
+  </div>
+  <div id="partial">
+    <div class="label" id="partial-label">live</div>
+    <div class="text" id="partial-text"></div>
+  </div>
 </div>
 <div id="login">
   <h1>Omni</h1>
@@ -113,6 +184,15 @@
   <button id="connect-btn" type="button">Start camera &amp; connect</button>
   <div id="login-error"></div>
 </div>
+<div id="activity">
+  <div id="activity-header">
+    <span>Activity · transcripts · triggers</span>
+    <span>
+      <button type="button" id="act-clear">Clear</button>
+    </span>
+  </div>
+  <div id="activity-body"></div>
+</div>
 <div id="bar">
   <button type="button" id="audio-unlock">Enable sound</button>
   <button type="button" id="mic-btn" class="on">Mic on</button>
@@ -121,18 +201,29 @@
   <button type="button" id="work-btn">Core…</button>
   <button type="button" id="disc-btn" class="danger">End</button>
 </div>
-<div id="log"></div>
 <canvas id="snap"></canvas>
 
 <script type="module">
 const statusEl = document.getElementById("status");
-const logEl = document.getElementById("log");
+const actBody = document.getElementById("activity-body");
+const activity = document.getElementById("activity");
+const chips = document.getElementById("chips");
+const partialBox = document.getElementById("partial");
+const partialLabel = document.getElementById("partial-label");
+const partialText = document.getElementById("partial-text");
 const cam = document.getElementById("cam");
 const canvas = document.getElementById("snap");
 const login = document.getElementById("login");
 const bar = document.getElementById("bar");
+const chipVoice = document.getElementById("chip-voice");
+const chipVad = document.getElementById("chip-vad");
+const chipAsr = document.getElementById("chip-asr");
+const chipStream = document.getElementById("chip-stream");
+const chipTrigger = document.getElementById("chip-trigger");
+const chipWork = document.getElementById("chip-work");
 
 let ws = null;
+let workStartedAt = 0;
 let stream = null;
 let audioCtx = null;
 let playCtx = null;
@@ -142,22 +233,78 @@ let micOn = true;
 let facing = "environment";
 let frameTimer = null;
 let playTime = 0;
+let sessionModel = "";
+let lastAsr = "";
 
 const params = new URLSearchParams(location.search);
 if (params.get("user")) document.getElementById("user").value = params.get("user");
 if (params.get("secret")) document.getElementById("secret").value = params.get("secret");
 
-function setStatus(t, err = false) {
+function setStatus(t, mode = "") {
   statusEl.textContent = t;
-  statusEl.classList.toggle("err", !!err);
+  statusEl.classList.remove("err", "live", "speak", "stream");
+  if (mode) statusEl.classList.add(mode);
 }
-function logLine(role, text) {
+function setChip(el, text, cls = "") {
+  el.textContent = text;
+  el.className = "chip" + (cls ? " " + cls : "");
+}
+function showPartial(role, text) {
+  if (!text) {
+    partialBox.style.display = "none";
+    return;
+  }
+  partialBox.style.display = "block";
+  partialLabel.textContent = role === "user" ? "ASR (live)" : "Assistant (streaming)";
+  partialText.textContent = text;
+}
+// One sticky Activity row per in-flight task_id; only the wait seconds update.
+const stickyWorkRows = new Map(); // task_id -> HTMLElement
+
+function logAct(kind, message, opts = {}) {
   const d = document.createElement("div");
-  d.className = role;
-  d.textContent = `${role}: ${text}`;
-  logEl.appendChild(d);
-  logEl.scrollTop = logEl.scrollHeight;
-  while (logEl.children.length > 40) logEl.removeChild(logEl.firstChild);
+  d.className = "act " + (kind || "");
+  const ts = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  d.innerHTML = `<span class="t">${ts}</span><span class="m">${escapeHtml(message)}</span>`;
+  if (opts.stickyId) {
+    d.dataset.taskId = opts.stickyId;
+    stickyWorkRows.set(opts.stickyId, d);
+  }
+  actBody.appendChild(d);
+  actBody.scrollTop = actBody.scrollHeight;
+  while (actBody.children.length > 80) {
+    const first = actBody.firstChild;
+    const tid = first && first.dataset ? first.dataset.taskId : "";
+    if (tid) stickyWorkRows.delete(tid);
+    actBody.removeChild(first);
+  }
+}
+
+function upsertStickyProcessing(taskId, elapsedMs) {
+  if (!taskId) return;
+  const fullId = taskId.startsWith("task-") ? taskId : `task-${taskId}`;
+  const msg = `Task processing… waited ${fmtMs(elapsedMs)} — ${fullId}`;
+  let row = stickyWorkRows.get(fullId);
+  if (!row) {
+    logAct("work", msg, { stickyId: fullId });
+    return;
+  }
+  const m = row.querySelector(".m");
+  if (m) m.textContent = msg;
+  // Keep original timestamp; only the message body changes.
+}
+
+function clearStickyProcessing(taskId) {
+  if (!taskId) return;
+  const fullId = taskId.startsWith("task-") ? taskId : `task-${taskId}`;
+  const row = stickyWorkRows.get(fullId);
+  if (row) {
+    row.remove();
+    stickyWorkRows.delete(fullId);
+  }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 function wsUrl() {
@@ -245,18 +392,15 @@ async function startMedia() {
     const pcm = downsampleTo16k(input, audioCtx.sampleRate);
     ws.send(JSON.stringify({ type: "audio", format: "pcm16le_16k", data: b64FromInt16(pcm) }));
   };
-  sourceNode.connect(processor);
-  processor.connect(audioCtx.destination); // keep processor alive; near-silent via gain would be nicer
-  // Mute local loopback
   const gain = audioCtx.createGain();
   gain.gain.value = 0;
-  processor.disconnect();
   sourceNode.connect(processor);
   processor.connect(gain);
   gain.connect(audioCtx.destination);
 
   if (frameTimer) clearInterval(frameTimer);
   frameTimer = setInterval(sendFrame, 1000);
+  setChip(chipVoice, micOn ? "Mic: on" : "Mic: off", micOn ? "on" : "");
 }
 
 function sendFrame() {
@@ -277,6 +421,26 @@ function sendFrame() {
   }, "image/jpeg", 0.7);
 }
 
+function resetLiveUi() {
+  setChip(chipVad, "VAD: —");
+  setChip(chipAsr, "ASR: —");
+  setChip(chipStream, "Stream: idle");
+  setChip(chipTrigger, "Trigger: —");
+  setChip(chipWork, "Work: —");
+  workStartedAt = 0;
+  showPartial("", "");
+  lastAsr = "";
+}
+
+function fmtMs(ms) {
+  if (ms == null || ms < 0) return "?";
+  if (ms < 1000) return ms + "ms";
+  const s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + "s";
+  const m = Math.floor(s / 60);
+  return m + "m" + String(Math.floor(s % 60)).padStart(2, "0") + "s";
+}
+
 function stopAll() {
   if (frameTimer) clearInterval(frameTimer);
   frameTimer = null;
@@ -287,8 +451,121 @@ function stopAll() {
   if (ws) { try { ws.close(); } catch {} }
   ws = null;
   bar.style.display = "none";
+  activity.style.display = "none";
+  chips.style.display = "none";
   login.style.display = "flex";
   setStatus("idle");
+  setChip(chipVoice, "Voice: off");
+  resetLiveUi();
+}
+
+function handleMsg(msg) {
+  if (msg.type === "session.ready") {
+    login.style.display = "none";
+    bar.style.display = "flex";
+    activity.style.display = "block";
+    chips.style.display = "flex";
+    sessionModel = msg.model || "qwen";
+    setStatus("listening", "live");
+    setChip(chipVoice, "Voice: live", "on");
+    resetLiveUi();
+    const tools = Array.isArray(msg.tools) ? msg.tools.join(",") : "";
+    logAct("session", `Connected · ${sessionModel}` + (msg.scene_change ? " · scene_change on" : "") + (tools ? ` · tools=[${tools}]` : ""));
+  } else if (msg.type === "status") {
+    const st = msg.state || "";
+    if (st === "user_speaking") setStatus("user speaking", "speak");
+    else if (st === "responding" || st === "proactive") setStatus(st, "stream");
+    else if (st === "working") setStatus("working", "stream");
+    else if (st === "listening") setStatus("listening", "live");
+    else setStatus(st);
+  } else if (msg.type === "vad") {
+    if (msg.state === "speech_started") {
+      setChip(chipVad, "VAD: speech", "hot");
+      showPartial("user", lastAsr || "…");
+    } else {
+      setChip(chipVad, "VAD: quiet", "on");
+    }
+  } else if (msg.type === "stream") {
+    if (msg.state === "started") setChip(chipStream, "Stream: out", "busy");
+    else if (msg.state === "audio") setChip(chipStream, `Stream: audio×${msg.chunks || 0}`, "busy");
+    else if (msg.state === "done") {
+      setChip(chipStream, msg.suppressed ? "Stream: suppressed" : "Stream: idle", msg.suppressed ? "hot" : "on");
+      showPartial("", "");
+    }
+  } else if (msg.type === "trigger") {
+    const label = `${msg.reason || "?"} · ${msg.state || ""}`;
+    setChip(chipTrigger, `Trigger: ${msg.reason || "?"}`, msg.state === "fired" || msg.state === "queued" ? "hot" : "");
+    logAct("trigger", `Trigger ${label}` + (msg.why ? ` (${msg.why})` : ""));
+  } else if (msg.type === "work") {
+    const taskId = msg.task_id || "";
+    const id = taskId.replace(/^task-/, "…");
+    const wait = fmtMs(msg.elapsed_ms);
+    if (msg.state === "tool_called") {
+      const tool = msg.tool || "?";
+      const params = msg.arguments
+        || (msg.parameters ? JSON.stringify(msg.parameters) : "");
+      setChip(chipWork, `Work: tool ${tool}`, "hot");
+      logAct("work", `Tool call: ${tool}(${params})`);
+    } else if (msg.state === "queued") {
+      workStartedAt = Date.now();
+      setChip(chipWork, "Work: queued", "busy");
+      logAct("work", `Task queued${id ? " " + id : ""} · ${msg.task || ""}`);
+      upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
+    } else if (msg.state === "processing" || msg.state === "waiting") {
+      setChip(chipWork, `Work: wait ${wait}`, "busy");
+      // Update one Activity line in place — do not spam new rows.
+      upsertStickyProcessing(taskId, msg.elapsed_ms || 0);
+    } else if (msg.state === "result") {
+      clearStickyProcessing(taskId);
+      setChip(chipWork, `Work: done ${wait}`, "on");
+      logAct("work", `Result back after ${wait}${id ? " · " + id : ""} — ${msg.preview || ""}`);
+      workStartedAt = 0;
+    } else if (msg.state === "timeout") {
+      clearStickyProcessing(taskId);
+      setChip(chipWork, `Work: timeout ${wait}`, "bad");
+      logAct("work", `Task timed out after ${wait}${id ? " · " + id : ""}`);
+      workStartedAt = 0;
+    }
+  } else if (msg.type === "activity") {
+    const message = msg.message || "";
+    // Ignore legacy server heartbeats if any still arrive.
+    if (/^Task processing/.test(message)) {
+      const m = message.match(/task-\d+/);
+      if (m) {
+        const em = message.match(/([\d.]+)s/);
+        upsertStickyProcessing(m[0], em ? Number(em[1]) * 1000 : 0);
+      }
+      return;
+    }
+    logAct(msg.kind || "system", message);
+  } else if (msg.type === "audio.out") {
+    playPcm24kBase64(msg.data);
+    setChip(chipStream, "Stream: playing", "busy");
+  } else if (msg.type === "transcript") {
+    const role = msg.role || "assistant";
+    const text = msg.text || "";
+    if (msg.partial) {
+      showPartial(role, text);
+      if (role === "user") {
+        lastAsr = text;
+        setChip(chipAsr, `ASR: ${text.slice(0, 28)}${text.length > 28 ? "…" : ""}`, "busy");
+      }
+    } else {
+      showPartial("", "");
+      if (role === "user") {
+        lastAsr = text;
+        setChip(chipAsr, `ASR: ${text.slice(0, 28)}${text.length > 28 ? "…" : ""}`, "on");
+      }
+      if (!msg.suppressed) logAct(role, `${role}: ${text}`);
+      else logAct("system", "assistant: (no speak)");
+    }
+  } else if (msg.type === "error") {
+    setStatus(msg.message || "error", "err");
+    setChip(chipStream, "Stream: error", "bad");
+    logAct("error", msg.message || "error");
+    const err = document.getElementById("login-error");
+    if (login.style.display !== "none") err.textContent = msg.message || "error";
+  }
 }
 
 document.getElementById("connect-btn").onclick = async () => {
@@ -303,30 +580,25 @@ document.getElementById("connect-btn").onclick = async () => {
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "session.start", user, auth: secret }));
       setStatus("connecting…");
+      logAct("session", "WebSocket open → session.start");
     };
     ws.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type === "session.ready") {
-        login.style.display = "none";
-        bar.style.display = "flex";
-        setStatus("listening");
-      } else if (msg.type === "status") {
-        setStatus(msg.state || "");
-      } else if (msg.type === "audio.out") {
-        playPcm24kBase64(msg.data);
-      } else if (msg.type === "transcript") {
-        if (!msg.suppressed) logLine(msg.role || "assistant", msg.text || "");
-      } else if (msg.type === "error") {
-        setStatus(msg.message || "error", true);
-        err.textContent = msg.message || "error";
-      }
+      handleMsg(msg);
     };
-    ws.onclose = () => setStatus("disconnected", true);
-    ws.onerror = () => setStatus("socket error", true);
+    ws.onclose = () => {
+      setStatus("disconnected", "err");
+      setChip(chipVoice, "Voice: off", "bad");
+      logAct("error", "WebSocket closed");
+    };
+    ws.onerror = () => {
+      setStatus("socket error", "err");
+      logAct("error", "WebSocket error");
+    };
   } catch (e) {
     err.textContent = String(e.message || e);
-    setStatus("media failed", true);
+    setStatus("media failed", "err");
   }
 };
 
@@ -335,14 +607,18 @@ document.getElementById("mic-btn").onclick = (e) => {
   micOn = !micOn;
   e.target.textContent = micOn ? "Mic on" : "Mic off";
   e.target.classList.toggle("on", micOn);
+  setChip(chipVoice, micOn ? "Mic: on" : "Mic: muted", micOn ? "on" : "hot");
+  logAct("system", micOn ? "Mic unmuted" : "Mic muted");
 };
 document.getElementById("flip-btn").onclick = async () => {
   facing = facing === "environment" ? "user" : "environment";
   await startMedia();
+  logAct("system", `Camera facing: ${facing}`);
 };
 document.getElementById("ask-btn").onclick = () => {
   if (ws?.readyState === 1) {
     ws.send(JSON.stringify({ type: "control", action: "prompt_manual", text: "Describe what you see in the camera right now." }));
+    setChip(chipTrigger, "Trigger: manual", "hot");
   }
 };
 document.getElementById("work-btn").onclick = () => {
@@ -352,6 +628,15 @@ document.getElementById("work-btn").onclick = () => {
   }
 };
 document.getElementById("disc-btn").onclick = () => stopAll();
+document.getElementById("act-clear").onclick = (e) => {
+  e.stopPropagation();
+  actBody.innerHTML = "";
+  stickyWorkRows.clear();
+};
+document.getElementById("activity-header").onclick = (e) => {
+  if (e.target.tagName === "BUTTON") return;
+  actBody.classList.toggle("collapsed");
+};
 </script>
 </body>
 </html>
