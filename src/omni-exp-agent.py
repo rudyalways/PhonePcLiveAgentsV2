@@ -46,7 +46,11 @@ from omni_exp_mode import (  # noqa: E402
     task_system_suffix,
     work_tool_description,
 )
-from omni_exp_research_capture import ResearchSessionBuffer  # noqa: E402
+from omni_exp_research_capture import (  # noqa: E402
+    ResearchSessionBuffer,
+    load_research_buffer,
+    save_research_buffer,
+)
 from omni_exp_result_speak import (  # noqa: E402
     DELIVER_RETRY_DELAYS_S,
     TRUST_DONE_CLAIM_S,
@@ -57,7 +61,7 @@ from omni_exp_result_speak import (  # noqa: E402
     is_stale_wait_claim,
     is_wait_meta_task,
 )
-from omni_exp_scene import SceneChangeSensor  # noqa: E402
+from omni_exp_scene import BoardInkSensor, SceneChangeSensor  # noqa: E402
 from omni_exp_speak_queue import SpeakItem, SpeakQueue  # noqa: E402
 from omni_exp_turn_gate import TurnGate, TurnRequest  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
@@ -106,6 +110,29 @@ SCENE_ENTER_THRESHOLD = float(_env_omni_exp("SCENE_THRESHOLD", "28"))
 RESEARCH_FLUSH_IDLE_S = float(_env_omni_exp("RESEARCH_FLUSH_IDLE_S", "90"))
 RESEARCH_FLUSH_MIN_INTERVAL_S = float(
     _env_omni_exp("RESEARCH_FLUSH_MIN_INTERVAL_S", "45")
+)
+RESEARCH_FLUSH_HOOK_COUNT = int(_env_omni_exp("RESEARCH_FLUSH_HOOK_COUNT", "5"))
+# Periodic meeting-scan heartbeat (seconds); 0 disables.
+# Phase-2 extras: default OFF — opt in via env (master switch is still MODE=research).
+# Meeting-scan interval: 0 disables (default). Set e.g. 120 to enable.
+RESEARCH_MEETING_SCAN_S = float(_env_omni_exp("RESEARCH_MEETING_SCAN_S", "0"))
+# Ignore upper face/walker band for research scene MAD (0–0.9). 0 disables mask.
+RESEARCH_MASK_UPPER = float(_env_omni_exp("RESEARCH_MASK_UPPER", "0.35"))
+RESEARCH_BOARD_INK = _env_omni_exp("RESEARCH_BOARD_INK", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+RESEARCH_BOARD_OCR = _env_omni_exp("RESEARCH_BOARD_OCR", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Persist ASR/hooks across phone WS reconnects (cheap; default ON in research).
+RESEARCH_PERSIST = _env_omni_exp("RESEARCH_PERSIST", "1").lower() in (
+    "1",
+    "true",
+    "yes",
 )
 # Optional research-only MAD threshold (lower = more sensitive). Empty → SCENE_THRESHOLD.
 _RESEARCH_SCENE_THRESHOLD_RAW = _env_omni_exp("RESEARCH_SCENE_THRESHOLD", "").strip()
@@ -966,17 +993,37 @@ class PhoneSession:
         self.username = username
         self.gate = TurnGate()
         self.gate.cooldowns_ms["scene_change"] = SCENE_COOLDOWN_MS
+        _mask_upper = RESEARCH_MASK_UPPER if OMNI_EXP_MODE == "research" else 0.0
         self.scene = SceneChangeSensor(
             enter_threshold=SCENE_ENTER_THRESHOLD,
             upload_dedupe_threshold=UPLOAD_DEDUPE_THRESHOLD,
             upload_keepalive_s=UPLOAD_KEEPALIVE_S,
+            mask_upper_fraction=_mask_upper,
         )
+        self.board_ink: BoardInkSensor | None = None
         self.research_buf: ResearchSessionBuffer | None = None
+        self._last_meeting_scan_at = 0.0
+        self._research_persist_at = 0.0
         if OMNI_EXP_MODE == "research":
-            self.research_buf = ResearchSessionBuffer(
-                flush_idle_s=RESEARCH_FLUSH_IDLE_S,
-                flush_min_interval_s=RESEARCH_FLUSH_MIN_INTERVAL_S,
-            )
+            if RESEARCH_PERSIST:
+                self.research_buf = load_research_buffer(
+                    WORKSPACE,
+                    username,
+                    flush_idle_s=RESEARCH_FLUSH_IDLE_S,
+                    flush_min_interval_s=RESEARCH_FLUSH_MIN_INTERVAL_S,
+                    flush_hook_count=RESEARCH_FLUSH_HOOK_COUNT,
+                )
+            else:
+                self.research_buf = ResearchSessionBuffer(
+                    flush_idle_s=RESEARCH_FLUSH_IDLE_S,
+                    flush_min_interval_s=RESEARCH_FLUSH_MIN_INTERVAL_S,
+                    flush_hook_count=RESEARCH_FLUSH_HOOK_COUNT,
+                )
+            if RESEARCH_BOARD_INK:
+                self.board_ink = BoardInkSensor(
+                    mask_upper_fraction=max(0.2, RESEARCH_MASK_UPPER or 0.35),
+                    ocr_enabled=RESEARCH_BOARD_OCR,
+                )
         # Latest JPEG from the client (even if upload was skipped) for speech keyframes.
         self._last_jpeg: bytes | None = None
         self.qwen: QwenOmniSession | None = None
@@ -1235,10 +1282,12 @@ class PhoneSession:
                 "write local HTML and open it",
             )
         elif OMNI_EXP_MODE == "research":
+            snap = self.research_buf.snapshot() if self.research_buf else {}
             await self.activity(
                 "session",
-                "RESEARCH mode — ASR/scene meeting capture + optional deep deck "
-                f"(scene_thr={SCENE_ENTER_THRESHOLD}; "
+                "RESEARCH mode — ASR/scene/ink meeting capture + optional deep deck "
+                f"(scene_thr={SCENE_ENTER_THRESHOLD}; mask_upper={RESEARCH_MASK_UPPER}; "
+                f"ink={'on' if self.board_ink else 'off'}; buf={snap}; "
                 "docs/omni-exp-whiteboard-meeting-capture.md)",
             )
         core = probe_core_status()
@@ -1540,6 +1589,7 @@ class PhoneSession:
                 await self.activity("asr", f"ASR: {tx[:120]}")
                 if self.research_buf is not None:
                     hooks = self.research_buf.add_asr(tx)
+                    self._persist_research_buf()
                     if hooks:
                         kinds = ",".join(sorted({h.kind for h in hooks}))
                         await self.activity(
@@ -1697,6 +1747,55 @@ class PhoneSession:
             logger.debug("vision upload ok bytes=%s", len(jpeg))
         if SCENE_CHANGE_ENABLED and self.scene.observe(jpeg):
             await self._prompt_scene()
+        if self.board_ink is not None and self.research_buf is not None:
+            if self.board_ink.observe(jpeg):
+                ocr = self.board_ink.last_ocr_text
+                self.research_buf.add_ink_note(ocr_text=ocr)
+                self._persist_research_buf(force=True)
+                await self.activity(
+                    "research",
+                    f"Board ink delta{(': ' + ocr[:80]) if ocr else ''}",
+                )
+                await self.maybe_flush_research_capture(reason="board_ink")
+
+    def _persist_research_buf(self, *, force: bool = False) -> None:
+        buf = self.research_buf
+        if buf is None or not RESEARCH_PERSIST:
+            return
+        now = time.time()
+        if not force and now - self._research_persist_at < 2.0:
+            return
+        self._research_persist_at = now
+        save_research_buffer(WORKSPACE, self.username, buf)
+
+    async def maybe_meeting_scan(self) -> None:
+        """Periodic meeting-scan heartbeat (research mode)."""
+        if self.research_buf is None or RESEARCH_MEETING_SCAN_S <= 0:
+            return
+        now = time.time()
+        if now - self._last_meeting_scan_at < RESEARCH_MEETING_SCAN_S:
+            return
+        self._last_meeting_scan_at = now
+        # Re-check board ink on latest frame; always nudge flush policy.
+        jpeg = self._last_jpeg or self.scene.last_accepted_jpeg
+        if jpeg and self.board_ink is not None:
+            # Temporarily clear cooldown so scan can notice accumulated ink.
+            prev_cd = self.board_ink.cooldown_s
+            self.board_ink.cooldown_s = 0.0
+            fired = self.board_ink.observe(jpeg)
+            self.board_ink.cooldown_s = prev_cd
+            if fired:
+                self.research_buf.add_ink_note(ocr_text=self.board_ink.last_ocr_text)
+        if self.research_buf.hooks_since_flush > 0:
+            self.research_buf.add_scene_note(
+                "meeting_scan heartbeat", source="scan"
+            )
+            self._persist_research_buf(force=True)
+            await self.activity(
+                "research",
+                f"Meeting scan · {self.research_buf.snapshot()}",
+            )
+            await self.maybe_flush_research_capture(reason="meeting_scan")
 
     async def _force_vision_keyframe(self, reason: str) -> None:
         """Push the latest camera JPEG into Qwen before a user/voice turn."""
@@ -1733,6 +1832,7 @@ class PhoneSession:
         await self.activity("trigger", "Auto trigger: scene_change")
         if self.research_buf is not None:
             self.research_buf.add_scene_note("scene_change fired (camera)")
+            self._persist_research_buf(force=True)
         ok, why = await self._try_start_prompt("scene_change", SCENE_PROMPT)
         if not ok:
             await self.activity("trigger", f"scene_change start failed: {why}")
@@ -1808,6 +1908,7 @@ class PhoneSession:
         )
         if status == "queued":
             buf.mark_flushed()
+            self._persist_research_buf(force=True)
             await self.activity(
                 "research",
                 f"Flush {kind} → {tid} ({reason}) · {buf.snapshot()}",
@@ -2205,12 +2306,16 @@ async def result_poller(app: web.Application) -> None:
                 await s.poll_results_once()
             except Exception as e:
                 logger.warning("result poll: %s", e)
-            # Idle capture flush (audio-first meeting buffer).
+            # Idle capture flush + meeting-scan heartbeat.
             if ticks % 4 == 0 and s.research_buf is not None:
                 try:
                     await s.maybe_flush_research_capture(reason="idle_tick")
                 except Exception as e:
                     logger.warning("research flush tick: %s", e)
+                try:
+                    await s.maybe_meeting_scan()
+                except Exception as e:
+                    logger.warning("research meeting scan: %s", e)
         # No attached phone session → still retire finished task+result pairs so
         # feeder/core don't keep re-driving them (Baidu re-open loop).
         if not sessions and ticks % 4 == 0:

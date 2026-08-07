@@ -87,11 +87,13 @@ Counter chrome: `主题 i/N` (or `主题 i/N · 页 a/b` when a topic spans two 
 
 Narration: **10–20 seconds** spoken Chinese per slide (~45–90 汉字).
 
-#### Format (PPT-like)
+#### Format (PPT-like) — human-friendly visuals
 
 - Full-viewport slides (`100vw` × `100vh`); only the active slide visible
-- Dark graphite `#12141a`, text `#f2f2f0`, accent `#3d9cf0`; PingFang SC / Microsoft YaHei stack
-- Bottom bar: 讲解 + 播放/暂停 + 静音 + model status + slide counter + progress dots
+- **Default light reading theme** (warm paper): bg `#f7f4ef`, text `#1c1917`, muted `#57534e`, accent teal `#0f766e` or clear blue `#1d4ed8` — high contrast, calm, no neon
+- Optional soft dark only when topic fits night/cinema; still AA+ contrast
+- Generous padding, sparse bullets, no cluttered card grids / purple glow / emoji chrome
+- Bottom bar: 讲解 + 播放/暂停 + 静音 + model status + `主题 i/N` counter + progress dots
 - Deck CSS/UI inline; **allowed network use**: first-time download of in-browser Chinese TTS runtime + model weights (then cache locally)
 
 #### Auto-explain — download model → run locally in the page

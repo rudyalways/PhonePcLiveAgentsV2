@@ -127,7 +127,11 @@ check(
 )
 check(
     "research HTML format tokens",
-    "#12141a" in stamp and "100vw" in stamp,
+    "100vw" in stamp
+    and "human-friendly" in stamp.lower()
+    and "#f7f4ef" in stamp
+    and "#1c1917" in stamp
+    and "high contrast" in stamp.lower(),
 )
 check(
     "research auto-play adapts to local TTS end",

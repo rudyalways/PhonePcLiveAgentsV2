@@ -15,7 +15,12 @@ from omni_exp_mode import (  # noqa: E402
     research_task_kind,
     task_system_suffix,
 )
-from omni_exp_research_capture import ResearchSessionBuffer  # noqa: E402
+from omni_exp_research_capture import (  # noqa: E402
+    ResearchSessionBuffer,
+    load_research_buffer,
+    research_capture_state_path,
+    save_research_buffer,
+)
 
 failures: list[str] = []
 
@@ -83,6 +88,35 @@ check(
     "format keeps deep tag",
     format_work_task("research", "[research-deep] foo") == "[research-deep] foo",
 )
+
+# ≥ M hooks flush (debounced)
+buf_m = ResearchSessionBuffer(flush_min_interval_s=0.0, flush_hook_count=3)
+for i in range(3):
+    buf_m.add_asr(f"we discussed topic number {i} in detail today")
+check("M-hooks flush", buf_m.should_flush() == "capture-flush")
+
+buf_ink = ResearchSessionBuffer()
+buf_ink.add_ink_note(ocr_text="auth deadline Friday")
+check("ink/OCR note", any(h.source == "ocr" for h in buf_ink.hooks))
+
+# Persist round-trip
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as td:
+    ws = Path(td)
+    buf_p = ResearchSessionBuffer(flush_idle_s=12, flush_min_interval_s=34, flush_hook_count=7)
+    buf_p.add_asr("待办：写纪要")
+    buf_p.add_scene_note("scene_change fired (camera)")
+    save_research_buffer(ws, "tester", buf_p)
+    path = research_capture_state_path(ws, "tester")
+    check("persist file exists", path.is_file())
+    loaded = load_research_buffer(
+        ws, "tester", flush_idle_s=12, flush_min_interval_s=34, flush_hook_count=7
+    )
+    check("persist restores ASR", any("待办" in t for _, t in loaded.asr_lines))
+    check("persist restores hooks", any(h.kind == "todo" for h in loaded.hooks))
+    check("persist keeps flush knobs", loaded.flush_hook_count == 7)
 
 if failures:
     raise SystemExit(f"{len(failures)} failure(s): {', '.join(failures)}")

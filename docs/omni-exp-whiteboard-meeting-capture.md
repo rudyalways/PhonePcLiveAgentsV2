@@ -1,6 +1,6 @@
 # Omni-exp: whiteboard / meeting-room capture
 
-**Status: MVP implemented** (`src/omni_exp_research_capture.py`, wired in `src/omni-exp-agent.py`; stamps in `src/omni_exp_mode.py`).
+**Status: implemented** (MVP + Phase 2) — `src/omni_exp_research_capture.py`, `src/omni_exp_scene.py` (`BoardInkSensor` + face mask), wired in `src/omni-exp-agent.py`; stamps in `src/omni_exp_mode.py`.
 
 Extends `OMNI_EXP_MODE=research` for meeting rooms: capture **discussion topics, todos, research follow-ups, and running summary** from **speech + whiteboard**, without relying on full-frame pixel MAD alone.
 
@@ -19,7 +19,7 @@ Thumb-MAD scene change fires on people walking / lighting, and **misses** ink + 
 | Research topics / follow-ups | “look into SOTA for…”, “研究一下竞品” |
 | Running summary | short bullets of what was agreed |
 
-Non-goals (v1): perfect handwriting OCR, speaker diarization, always-on deep-research decks every scribble.
+Non-goals: perfect handwriting OCR, speaker diarization, always-on deep-research decks every scribble. OCR is best-effort via system `tesseract` when installed.
 
 ## Architecture
 
@@ -27,10 +27,11 @@ Non-goals (v1): perfect handwriting OCR, speaker diarization, always-on deep-res
 mic ASR (final utterances)
         │
         ▼
- cue detector ──► append hooks ──► ResearchSessionBuffer
+ cue detector ──► append hooks ──► ResearchSessionBuffer ◄── persist state/
                                         ▲
-scene_change (retuned) ── vision note ──┘
-board OCR / ink (phase 2) ─────────────┘
+scene_change (face-masked MAD) ─ note ──┤
+board ink delta (+ optional OCR) ───────┤
+meeting_scan heartbeat ─────────────────┘
                                         │
                     flush policy ───────┼──► work [research-capture-flush]
                                         └──► work [research-deep] (rare)
@@ -40,19 +41,20 @@ board OCR / ink (phase 2) ─────────────┘
 
 | Layer | Role |
 |---|---|
-| Omni agent | Buffer ASR + scene notes; detect cues; flush to `work` |
-| Qwen | Still answers camera questions; research prompt encourages capture phrasing |
+| Omni agent | Buffer ASR + scene/ink notes; detect cues; flush to `work`; persist buffer |
+| Qwen | Answers camera questions; prefers accumulate; deep only when asked |
 | sutando-core stamp | `capture-flush` → notes MD + short result; `deep` → full research + Chinese deck |
 
-## MVP (implement now)
+## Implemented
 
 ### 1. Research session buffer
 
 In-process buffer on the omni phone session (`OMNI_EXP_MODE=research` only):
 
 - Ring of recent **user ASR finals** (text + ts)
-- Structured hooks: `topics`, `todos`, `research`, `notes`, `summary_bullets`
-- Cap size (e.g. 40 ASR lines, 30 hooks)
+- Structured hooks: `topics`, `todos`, `research`, `notes`, `summary`
+- Cap size (40 ASR lines, 30 hooks)
+- **Persisted** across WS reconnects: `<workspace>/state/omni-research-capture-<user>.json`
 
 ### 2. Audio cue detector
 
@@ -68,43 +70,57 @@ On hit: append hook + consider **capture flush** (debounced).
 
 | Kind | When | Core does |
 |---|---|---|
-| `capture-flush` | Cue hit (debounced), or buffer idle ≥ N s with new content, or ≥ M new hooks | Write/update `workspace/data/omni-research/meeting-<date>.md` with topics/todos/research/follow-ups/summary; short spoken result. **No** full HTML deck. |
-| `deep` | Explicit research ask, or task tagged `[research-deep]`, or user/Qwen requests deck | Existing research pipeline (MD + Chinese auto-play deck) |
+| `capture-flush` | Cue hit (debounced), idle ≥ N s with ≥2 hooks, or ≥ M new hooks | Write/update `workspace/data/omni-research/meeting-<date>.md`; short spoken result. **No** full HTML deck. |
+| `deep` | Explicit research ask / `[research-deep]` / deck request | Research pipeline (MD + Chinese auto-play deck) |
 
-Debounce: min interval between capture flushes (e.g. 45s) unless explicit deep ask.
+Debounce: min interval between capture flushes (default 45s) unless explicit deep ask.
 
 ### 4. Scene retune (research only)
 
-When mode is `research`:
-
-- Slightly **lower** `enter_threshold` (more sensitive to board pans) — env override kept
-- Prefer not treating every NO_SPEAK as failure; keep cooldown backoff
-- Scene prompt already asks for research `work`; buffer also records a short “scene note” when scene fires (for flush context)
-
-Full-frame MAD remains a **weak** backup; audio is primary.
+- Lower default MAD threshold (22 when `OMNI_EXP_SCENE_THRESHOLD` unset)
+- **`mask_upper_fraction`** (default 0.35) ignores upper face/walker band for scene MAD
+- Scene fire still records a short scene note; cooldown backoff unchanged
+- Audio remains primary; full-frame MAD is a weak backup
 
 ### 5. Prompts / stamps
 
-- Task tag `[research-capture-flush]` → capture-only core stamp
-- Task tag `[research-deep]` / normal research capture from Qwen → full deck stamp
-- Omni research voice: prefer accumulating; don’t demand a deck every utterance
+- `[research-capture-flush]` → capture-only core stamp
+- `[research-deep]` / `[research-mode]` → full deck stamp (human-friendly light theme)
+- Omni research voice: accumulate; don’t demand a deck every utterance
 
-## Phase 2 (not MVP)
+### 6. Board ink + OCR (opt-in: `RESEARCH_BOARD_INK=1`)
 
-- Board-crop OCR / ink delta (fire on text change)
-- Ignore upper face region for MAD
-- Periodic “meeting scan” heartbeat
-- Persist buffer across WS reconnects under workspace state
+`BoardInkSensor` watches the **lower** frame (same upper mask) with edge-enhanced MAD. On stabilized ink change → buffer note. OCR only if `RESEARCH_BOARD_OCR=1` and `tesseract` is on PATH (fail-open).
+
+### 7. Meeting-scan heartbeat (opt-in: `RESEARCH_MEETING_SCAN_S>0`)
+
+When enabled: re-check board ink on latest frame, note the scan if there is unflushed content, run flush policy.
 
 ## Config (env)
+
+`OMNI_EXP_MODE=research` is the master switch (buffer + ASR cues + flush). Phase-2 extras are **separate env flags** — default off except persist:
+
+| Flag | Default | What |
+|---|---|---|
+| `OMNI_EXP_RESEARCH_PERSIST` | `1` | Save/load buffer under `state/omni-research-capture-<user>.json` |
+| `OMNI_EXP_RESEARCH_BOARD_INK` | `0` | Lower-frame ink delta sensor |
+| `OMNI_EXP_RESEARCH_BOARD_OCR` | `0` | OCR on ink fire (needs ink=1 + `tesseract`; fail-open) |
+| `OMNI_EXP_RESEARCH_MEETING_SCAN_S` | `0` | Heartbeat seconds; `0` disables |
+| `OMNI_EXP_RESEARCH_MASK_UPPER` | `0.35` | Face/walker band ignored for scene MAD; `0` = full frame |
 
 ```bash
 OMNI_EXP_MODE=research
 OMNI_EXP_SCENE_CHANGE=1
-# Optional MVP knobs:
 # OMNI_EXP_RESEARCH_FLUSH_IDLE_S=90
 # OMNI_EXP_RESEARCH_FLUSH_MIN_INTERVAL_S=45
-# OMNI_EXP_RESEARCH_SCENE_THRESHOLD=22   # lower than default 28 when set
+# OMNI_EXP_RESEARCH_FLUSH_HOOK_COUNT=5
+# OMNI_EXP_RESEARCH_SCENE_THRESHOLD=22
+# OMNI_EXP_RESEARCH_MASK_UPPER=0.35
+# OMNI_EXP_RESEARCH_PERSIST=1
+# Opt-in Phase 2:
+# OMNI_EXP_RESEARCH_BOARD_INK=1
+# OMNI_EXP_RESEARCH_BOARD_OCR=1
+# OMNI_EXP_RESEARCH_MEETING_SCAN_S=120
 ```
 
 ## Success criteria
@@ -112,4 +128,5 @@ OMNI_EXP_SCENE_CHANGE=1
 1. Saying “待办：下周发方案” produces a capture flush into meeting notes without opening Chrome.
 2. Static camera + spoken research ask still flushes (audio path).
 3. Deep deck only when explicitly requested or `[research-deep]`.
-4. People walking across frame do not alone trigger a deep research deck.
+4. People walking across frame do not alone trigger a deep research deck (upper mask + no deck on capture-flush).
+5. Whiteboard ink change (lower frame) adds a buffer note; reconnect restores the buffer from workspace state.
