@@ -892,8 +892,8 @@ def stop_sutando_core() -> dict[str, Any]:
         logger.exception("stop core failed: %s", e)
         return {"ok": False, "stopped": False, "message": str(e), **probe_core_status()}
 
-# Operating mode: normal_with_gui | no_gui | no_gui_html_output | research.
-OMNI_EXP_MODE = normalize_omni_exp_mode(_env_omni_exp("MODE", "research"))
+# Operating mode: normal_with_gui | no_gui | no_gui_html_output | research | demo.
+OMNI_EXP_MODE = normalize_omni_exp_mode(_env_omni_exp("MODE", "demo"))
 # Research capture loop needs scene_change; force on (override OMNI_EXP_SCENE_CHANGE=0).
 if OMNI_EXP_MODE == "research":
     SCENE_CHANGE_ENABLED = True
@@ -1288,6 +1288,11 @@ class PhoneSession:
                 "session",
                 "NO GUI + HTML mode — research without browser search; "
                 "write local HTML and open it",
+            )
+        elif OMNI_EXP_MODE == "demo":
+            await self.activity(
+                "session",
+                "DEMO mode — one-page HTML with 4 topics (no TTS / auto-play deck)",
             )
         elif OMNI_EXP_MODE == "research":
             snap = self.research_buf.snapshot() if self.research_buf else {}

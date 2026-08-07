@@ -30,12 +30,12 @@ def check(label: str, cond: bool) -> None:
 
 
 check(
-    "default → research",
-    normalize_omni_exp_mode("") == "research",
+    "default → demo",
+    normalize_omni_exp_mode("") == "demo",
 )
 check(
-    "unknown → research",
-    normalize_omni_exp_mode("weird") == "research",
+    "unknown → demo",
+    normalize_omni_exp_mode("weird") == "demo",
 )
 check(
     "alias normal → normal_with_gui",
@@ -51,6 +51,8 @@ check(
     "alias research_mode → research",
     normalize_omni_exp_mode("research_mode") == "research",
 )
+check("demo canonical", normalize_omni_exp_mode("demo") == "demo")
+check("alias html_demo → demo", normalize_omni_exp_mode("html_demo") == "demo")
 
 gui = build_omni_exp_instructions("normal_with_gui")
 no_gui = build_omni_exp_instructions("no_gui")
@@ -97,6 +99,29 @@ check("research voice hint", "MODE: research (active)" in research)
 check(
     "research scene override",
     "SCENE CHANGE OVERRIDE (research mode)" in research,
+)
+demo = build_omni_exp_instructions("demo")
+demo_stamp = task_system_suffix("demo")
+check("demo voice hint", "MODE: demo (active)" in demo)
+check(
+    "demo core stamp is one-page 4 topics",
+    "Exactly FOUR topic sections" in demo_stamp
+    and "DEMO MODE" in demo_stamp
+    and "omni-demo" in demo_stamp,
+)
+check(
+    "demo forbids TTS / auto-play",
+    "FORBIDDEN" in demo_stamp
+    and "speechSynthesis" in demo_stamp
+    and "auto-play" in demo_stamp,
+)
+check(
+    "demo work tool mentions 4 topics",
+    "4 topic" in work_tool_description("demo"),
+)
+check(
+    "demo does not enable research scene override",
+    "SCENE CHANGE OVERRIDE" not in demo,
 )
 stamp = task_system_suffix("research")
 check(

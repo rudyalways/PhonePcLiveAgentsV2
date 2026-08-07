@@ -138,4 +138,4 @@ On any human jump: stop current TTS, show that slide’s `#explain`, **pause aut
 
 - Multi-hour continuous archival of every frame
 - Guaranteed live X API access (use available CLI/web fetch; degrade gracefully)
-- Stacking `OMNI_EXP_MODE` values (only one mode at a time; `research` is the default and already includes no-GUI search + HTML)
+- Stacking `OMNI_EXP_MODE` values (only one mode at a time; default is `demo`; set `research` for no-GUI search + auto-play HTML deck)

@@ -276,6 +276,8 @@ Do **not** call CC via a new RPC in v1. File bridge only. Ensure core watcher is
 
 **Boot session-recap (fast, default ON):** `/schedule-crons` runs `boot-recap.py` — `mark-ready` first, capped dialog extract (~48k chars), **no LLM**. Deep `/session-recap` stays on-demand. Set `SUTANDO_SESSION_RECAP_ON_BOOT=0` to skip.
 
+**`OMNI_EXP_MODE=demo` (default):** one scrollable HTML page with exactly **4 topic sections** under `workspace/data/omni-demo/` — no TTS, auto-play, or multi-slide deck. Set `OMNI_EXP_MODE=research` for the full auto-play deck + meeting capture.
+
 **Omni process survival:** Do **not** start omni as a child of an agent/Cursor shell (`nohup` alone is not enough — shell process-group SIGTERM kills it with no traceback). Use `bash src/start-omni-exp.sh --daemon` / `install-omni-exp-launchd.sh` → launchd KeepAlive. Runners live under `~/Library/Application Support/Sutando/omni-exp/` because macOS TCC blocks LaunchAgents from executing files under `~/Documents` (symptoms: exit 78 `EX_CONFIG` / “Operation not permitted”). Phone URL is **HTTPS only** (`https://127.0.0.1:7090/omni-exp`).
 
 ### Fresh Mac bootstrap (clone → run)
@@ -303,7 +305,7 @@ git clone <repo> && cd PhonePcLiveAgentsV2
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-omni-exp.txt
 cp .env.example .env
-# Edit .env: DASHSCOPE_API_KEY, REALTIME_BASE_URL (CN vs INTL), OMNI_EXP_MODE=research, …
+# Edit .env: DASHSCOPE_API_KEY, REALTIME_BASE_URL (CN vs INTL), OMNI_EXP_MODE=demo (default), …
 bash src/install-omni-exp-launchd.sh          # materialize runner + copy .env → Application Support
 # After every .env edit: re-run install (or --restart) so launchd sees new vars.
 

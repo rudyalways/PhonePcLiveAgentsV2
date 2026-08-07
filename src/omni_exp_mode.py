@@ -1,4 +1,4 @@
-"""Omni-exp operating modes: normal_with_gui | no_gui | no_gui_html_output | research.
+"""Omni-exp operating modes: normal_with_gui | no_gui | no_gui_html_output | research | demo.
 
 Split of responsibility:
   - Qwen system prompt / work tool desc: thin hints so voice phrases tasks correctly
@@ -170,6 +170,48 @@ _WORK_TOOL_DESC_RESEARCH = (
     "Markdown first, then a Chinese auto-play HTML deck (one slide per major topic); "
     "open the HTML. Do not use for routine todos — meeting notes may auto-flush "
     "separately. Speak a short summary when ready."
+)
+
+_DEMO_MIDDLE = (
+    "MODE: demo (active) — simple HTML demo for the product on camera.\n"
+    "- Call work for non-trivial product/topic asks.\n"
+    "- Phrase as non-GUI research (curl/fetch/CLI). Core writes ONE simple HTML page "
+    "with exactly 4 topic sections (no TTS / no auto-play deck).\n"
+    "- Speak a short summary when TASK_RESULT arrives.\n"
+    "\n"
+    "TOOLS:\n"
+    "- work: demo HTML page (4 topics). Same wait/result rules.\n"
+    "\n"
+)
+
+_WORK_TOOL_DESC_DEMO = (
+    "Delegate to core: light non-GUI research, then ONE local HTML page with exactly "
+    "4 topic sections (no auto-explain / TTS / slide deck). Open that file. "
+    "Speak a short summary when ready."
+)
+
+DEMO_TASK_SYSTEM = (
+    "===SUTANDO SYSTEM INSTRUCTIONS===\n"
+    "DEMO MODE — simple one-page HTML (no auto-play deck).\n"
+    "- SEARCH: curl/fetch/CLI/APIs only — do NOT open a browser search UI.\n"
+    "- Do not use Accessibility / click / type into apps to browse.\n"
+    "- OUTPUT (required): ONE self-contained HTML file under "
+    "workspace/data/omni-demo/<slug>-demo.html (mkdir -p as needed).\n"
+    "- Structure (required):\n"
+    "  * Single scrollable page (NOT a multi-slide PPT / NOT full-viewport slides).\n"
+    "  * Title + one-line thesis at top.\n"
+    "  * Exactly FOUR topic sections (h2), each with a short Chinese title (≤16字) "
+    "and 3–5 bullets. Pick the four most useful angles for the asked product/topic "
+    "(e.g. 品牌背景 / 产品特点 / 市场对比 / 使用建议 — adapt to the ask).\n"
+    "  * Optional footer with 2–3 source links.\n"
+    "- LANGUAGE: user-facing copy in Simplified Chinese; proper nouns may stay original.\n"
+    "- VISUAL: light paper theme (#f7f4ef bg, #1c1917 text, teal or blue accent); "
+    "generous padding; no purple neon / emoji chrome.\n"
+    "- FORBIDDEN: speechSynthesis / TTS / data-narration / auto-play / 播放讲解 / "
+    "multi-slide fixed 100vh decks / downloading voice models / prev-next slide chrome.\n"
+    "- OPEN: `open <absolute-path-to-html>` after writing.\n"
+    "- Results file: 1–3 sentence phone summary + absolute HTML path.\n"
+    "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
 )
 
 # Source of truth for sutando-core execution (appended to task files).
@@ -353,18 +395,20 @@ RESEARCH_TASK_SYSTEM = (
 )
 
 _VALID_MODES = frozenset(
-    {"normal_with_gui", "no_gui", "no_gui_html_output", "research"}
+    {"normal_with_gui", "no_gui", "no_gui_html_output", "research", "demo"}
 )
 
 
 def normalize_omni_exp_mode(raw: str | None) -> str:
     """Return a canonical mode name.
 
-    Default when unset/unknown: ``research`` (includes no_gui search + HTML deck).
+    Default when unset/unknown: ``demo`` (one-page HTML × 4 topics).
     """
-    v = (raw or "research").strip().lower().replace("-", "_").replace(" ", "_")
+    v = (raw or "demo").strip().lower().replace("-", "_").replace(" ", "_")
     if v in ("research", "research_mode", "scene_research"):
         return "research"
+    if v in ("demo", "demo_mode", "simple_demo", "html_demo"):
+        return "demo"
     if v in (
         "no_gui_html_output",
         "no_gui_html",
@@ -379,7 +423,7 @@ def normalize_omni_exp_mode(raw: str | None) -> str:
         return "normal_with_gui"
     if v in _VALID_MODES:
         return v
-    return "research"
+    return "demo"
 
 
 def build_omni_exp_instructions(mode: str, *, override: str | None = None) -> str:
@@ -396,6 +440,8 @@ def build_omni_exp_instructions(mode: str, *, override: str | None = None) -> st
         middle = _NO_GUI_HTML_MIDDLE
     elif m == "research":
         middle = _RESEARCH_MIDDLE
+    elif m == "demo":
+        middle = _DEMO_MIDDLE
     else:
         middle = _NORMAL_MIDDLE
     text = _COMMON_PREFIX + middle + _CRITICAL_AND_VOICE
@@ -412,6 +458,8 @@ def work_tool_description(mode: str) -> str:
         return _WORK_TOOL_DESC_NO_GUI_HTML
     if m == "research":
         return _WORK_TOOL_DESC_RESEARCH
+    if m == "demo":
+        return _WORK_TOOL_DESC_DEMO
     return _WORK_TOOL_DESC_NORMAL
 
 
@@ -445,6 +493,8 @@ def task_system_suffix(mode: str, task_body: str = "") -> str:
         return "\n" + NO_GUI_TASK_SYSTEM
     if m == "no_gui_html_output":
         return "\n" + NO_GUI_HTML_TASK_SYSTEM
+    if m == "demo":
+        return "\n" + DEMO_TASK_SYSTEM
     if m == "research":
         if research_task_kind(task_body) == "capture-flush":
             return "\n" + RESEARCH_CAPTURE_FLUSH_TASK_SYSTEM
