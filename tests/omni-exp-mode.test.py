@@ -110,14 +110,23 @@ check(
     and "omni-demo" in demo_stamp,
 )
 check(
+    "demo requires fancy SVG + Aug 2026 evidence",
+    "inline SVG" in demo_stamp
+    and "August 2026" in demo_stamp
+    and "https URL" in demo_stamp
+    and "quoted snippet" in demo_stamp,
+)
+check(
     "demo forbids TTS / auto-play",
     "FORBIDDEN" in demo_stamp
     and "speechSynthesis" in demo_stamp
-    and "auto-play" in demo_stamp,
+    and "auto-play" in demo_stamp
+    and "fabricated citations" in demo_stamp,
 )
 check(
     "demo work tool mentions 4 topics",
-    "4 topic" in work_tool_description("demo"),
+    "4 topic" in work_tool_description("demo")
+    and "SVG" in work_tool_description("demo"),
 )
 check(
     "demo does not enable research scene override",
