@@ -130,3 +130,20 @@ OMNI_EXP_SCENE_CHANGE=1
 3. Deep deck only when explicitly requested or `[research-deep]`.
 4. People walking across frame do not alone trigger a deep research deck (upper mask + no deck on capture-flush).
 5. Whiteboard ink change (lower frame) adds a buffer note; reconnect restores the buffer from workspace state.
+
+## Fresh Mac bootstrap
+
+Full clone→run checklist (venv, `.env`, launchd / Application Support, core, feeder, optional tesseract): see **Fresh Mac bootstrap** in [`omni-exp-agent-design.md`](./omni-exp-agent-design.md).
+
+Whiteboard-specific after omni is up:
+
+```bash
+# In .env (then re-run install-omni-exp-launchd.sh --restart):
+OMNI_EXP_MODE=research
+OMNI_EXP_RESEARCH_PERSIST=1
+OMNI_EXP_RESEARCH_BOARD_INK=1          # opt-in
+OMNI_EXP_RESEARCH_BOARD_OCR=1          # needs: brew install tesseract tesseract-lang
+OMNI_EXP_RESEARCH_MEETING_SCAN_S=120    # opt-in heartbeat
+```
+
+Persist file (per user, local workspace): `workspace/state/omni-research-capture-<user>.json` — not committed.

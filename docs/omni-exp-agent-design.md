@@ -271,6 +271,57 @@ Do **not** call CC via a new RPC in v1. File bridge only. Ensure core watcher is
 
 **Omni process survival:** Do **not** start omni as a child of an agent/Cursor shell (`nohup` alone is not enough — shell process-group SIGTERM kills it with no traceback). Use `bash src/start-omni-exp.sh --daemon` / `install-omni-exp-launchd.sh` → launchd KeepAlive. Runners live under `~/Library/Application Support/Sutando/omni-exp/` because macOS TCC blocks LaunchAgents from executing files under `~/Documents` (symptoms: exit 78 `EX_CONFIG` / “Operation not permitted”). Phone URL is **HTTPS only** (`https://127.0.0.1:7090/omni-exp`).
 
+### Fresh Mac bootstrap (clone → run)
+
+`git clone` alone is not enough. Code is portable; secrets, venv, launchd runners, and workspace state are **per-machine**.
+
+**In git:** `src/omni-exp-*.py`, `omni_exp_*`, `requirements-omni-exp.txt`, `.env.example`, docs.
+
+**Local / macOS (not shared via git):**
+
+| Artifact | Location | Role |
+|---|---|---|
+| `.env` | repo root (gitignored) | `DASHSCOPE_API_KEY`, `REALTIME_BASE_URL`, `OMNI_EXP_*` |
+| venv | `.venv/` | `pip install -r requirements-omni-exp.txt` |
+| TLS | `state/server.crt` + `.key` | phone HTTPS (often auto-created) |
+| Workspace | `workspace/` | tasks, results, research notes, capture persist JSON |
+| launchd + env copy | `~/Library/LaunchAgents/com.sutando.omni-exp-*` + `~/Library/Application Support/Sutando/omni-exp/` | KeepAlive; TCC-safe (avoid `~/Documents`) |
+| Feeder inbox | `~/Library/Application Support/Sutando/omni-exp-feeder/` | OpenRouter / no-Monitor task pickup |
+| Deck open | macOS `open` | research stamp opens HTML |
+| OCR (optional) | Homebrew `tesseract` + `chi_sim` | only if `OMNI_EXP_RESEARCH_BOARD_OCR=1` |
+| sutando-core | tmux + Claude login / Keychain | `work` capture-flush and deep decks |
+
+```bash
+git clone <repo> && cd PhonePcLiveAgentsV2
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-omni-exp.txt
+cp .env.example .env
+# Edit .env: DASHSCOPE_API_KEY, REALTIME_BASE_URL (CN vs INTL), OMNI_EXP_MODE=research, …
+bash src/install-omni-exp-launchd.sh          # materialize runner + copy .env → Application Support
+# After every .env edit: re-run install (or --restart) so launchd sees new vars.
+
+# Core path (needed for work / meeting notes / decks):
+bash src/agent/claude/cli/start-cli.sh
+# If core has no Monitor (e.g. OpenRouter): ensure feeder
+#   SUTANDO_TMUX_TASK_FEEDER=1
+#   bash src/install-omni-exp-tmux-task-feeder-launchd.sh   # if not already installed
+
+# Optional whiteboard OCR:
+#   brew install tesseract tesseract-lang
+#   OMNI_EXP_RESEARCH_BOARD_INK=1
+#   OMNI_EXP_RESEARCH_BOARD_OCR=1
+#   OMNI_EXP_RESEARCH_MEETING_SCAN_S=120   # optional heartbeat
+
+# Phone (same LAN): https://<mac-ip>:7090/omni-exp  — trust self-signed cert; allow mic/camera
+# Dev foreground (no launchd): bash src/start-omni-exp.sh
+```
+
+**Do not copy between machines:** `.env`, Keychain tokens, `Application Support/Sutando/omni-exp*`, or a filled `workspace/state/`. Each host bootstraps those.
+
+**Non-Mac:** agent can run foreground with Python + keys; launchd installers, Application Support paths, and `open <deck.html>` are macOS-shaped — use equivalents or skip daemon/open.
+
+Research / whiteboard flags: [`omni-exp-whiteboard-meeting-capture.md`](./omni-exp-whiteboard-meeting-capture.md).
+
 ### Phased delivery
 
 | Phase | Deliverable | Done when |

@@ -6,6 +6,9 @@ Aliases: `research_mode`, `scene_research`.
 Meeting / whiteboard note capture (audio-first, no deck every utterance):
 [`omni-exp-whiteboard-meeting-capture.md`](./omni-exp-whiteboard-meeting-capture.md).
 
+Fresh machine setup (venv, `.env`, launchd): **Fresh Mac bootstrap** in
+[`omni-exp-agent-design.md`](./omni-exp-agent-design.md).
+
 **Implemented in code** (`src/omni_exp_mode.py` + `src/omni-exp-agent.py` + `src/omni_exp_research_capture.py`):
 
 | Surface | What |
