@@ -1,10 +1,16 @@
 {
   "name": "schedule-crons",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "owner": "github:sonichi/sutando",
   "license": "MIT",
   "stability": "stable",
-  "description": "Re-create all session cron jobs for Sutando. Run this on startup or after a session restart.",
+  "description": "Re-create all session cron jobs for Sutando. Run this on startup or after a session restart. Manifest present to DECLARE optional cron-entry toggles (default OFF for omni-exp).",
+  "config": {
+    "SUTANDO_MORNING_BRIEFING_ENABLED": "0",
+    "SUTANDO_DAILY_INSIGHT_ENABLED": "0",
+    "SUTANDO_PENDING_QUESTIONS_CRON_ENABLED": "0",
+    "SUTANDO_SYNC_MEMORY_CRON_ENABLED": "0"
+  },
   "provenance": {
     "source_repo": "https://github.com/sonichi/sutando"
   }

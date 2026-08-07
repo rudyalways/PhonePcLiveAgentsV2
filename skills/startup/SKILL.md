@@ -36,9 +36,19 @@ The sequence below MUST run in this order. Each step is naturally idempotent, so
 
 **Hard rule — owner/omni work beats boot ceremony.** If `<workspace>/tasks/task-*.txt` exists at any point during `/startup` (including while `/schedule-crons` is mid-run), **stop cron registration**, process those tasks (oldest first: do the work, write matching `results/<basename>`), then resume. Never say "I'll finish schedule-crons first" while owner tasks wait — that is the 2026-08-06 omni stall class (core `.alive` but work stuck for minutes). Queued `TASK_FILE:` injections from the tmux feeder count as the same obligation.
 
+**Policy — task arrives while still “not ready”:**
+
+1. The task file on disk is the source of truth. Do **not** drop it; do **not** wait for the feeder.
+2. `/startup` Step 1 (or this hard rule mid-ceremony) **must** process it from `tasks/`.
+3. **Before** starting that owner work, run `mark-ready` so omni HUD / feeder stop showing BOOTING/BLOCKED while you are already executing the task. Ceremony (orphan-check / schedule-crons) continues **after** owner tasks drain.
+4. If there are **no** owner tasks yet, keep `core-booting.json` through cron ceremony and only `mark-ready` at Step 4 — that still prevents the feeder from spamming injects during schedule-crons.
+
 ### Step 0 — Boot readiness sentinel
 
-`start-cli.sh` already wrote `<workspace>/state/core-booting.json`. Leave it until the end of this skill. Do **not** call `mark-ready` until Step 4.
+`start-cli.sh` already wrote `<workspace>/state/core-booting.json`.
+
+- **Owner tasks present (Step 1 / hard rule):** call `mark-ready` immediately, then process tasks.
+- **No owner tasks:** leave booting until Step 4 (after ceremony).
 
 ### Step 1 — Pending owner tasks (before orphan-check / crons)
 
@@ -47,7 +57,13 @@ WS="$(bash scripts/sutando-config.sh workspace)"
 ls -1tr "$WS/tasks"/task-*.txt 2>/dev/null
 ```
 
-If any files are listed: process **all** of them now (oldest first). Only after `tasks/` has no remaining `task-*.txt` continue to Step 2. If none, continue immediately.
+If any files are listed:
+
+```bash
+python3 src/core_readiness.py mark-ready --source startup-owner-tasks
+```
+
+Then process **all** of them now (oldest first). Only after `tasks/` has no remaining `task-*.txt` continue to Step 2. If none, continue immediately (stay booting until Step 4).
 
 ### Step 2 — Task orphan check (optional)
 
@@ -86,15 +102,17 @@ session start
     ▼
 /startup
     │
-    ├─► step 1:  pending task-*.txt ──► process owner/omni work FIRST (or skip)
+    ├─► step 1:  pending task-*.txt?
+    │              yes ──► mark-ready ──► process owner/omni work FIRST
+    │              no  ──► stay booting
     │
     ├─► step 2:  /task-orphan-check (optional) ──► classifies + archives orphan tasks
     │
-    ├─► step 3:  /schedule-crons ──┬─► step 0 (yield + start watcher FIRST)
+    ├─► step 3:  /schedule-crons ──┬─► yield + start watcher FIRST
     │                               ├─► register crons.json + proactive fallback
     │                               └─► stamp + confirm
     │
-    └─► step 4: mark-ready + emit summary
+    └─► step 4: mark-ready (idempotent) + emit summary
 ```
 
 ## Re-invoking in an already-running session
@@ -115,3 +133,4 @@ If you find yourself wanting to put logic IN `/startup`, ask whether it belongs 
 - v0.1.0 — 2026-05-23 — initial draft. Per Chi 2026-05-23 Discord exchange about #1049 redesign ("make a new skill and include everything we need at start"). `/startup` becomes the canonical CLI entry; `/schedule-crons` remains callable for manual cron re-registration. Migration: launchd plists + CLI scripts switch to `/startup`.
 - v0.2.0 — 2026-06-21 — removed the fresh-session briefing step and its session sentinel (that sub-skill was deleted). `/startup` now runs orphan-check → schedules + watcher → confirm; sub-skill idempotency replaces the former sentinel guard.
 - v0.3.0 — 2026-08-06 — yield to pending `tasks/task-*.txt` before cron ceremony; mark `core-ready` via `src/core_readiness.py` so omni HUD can distinguish alive vs ready (fixes boot-stall where feeder injected while schedule-crons ran for minutes).
+- v0.4.0 — 2026-08-07 — if owner tasks exist at Step 1 / mid-ceremony, `mark-ready` **before** processing them so HUD/feeder don't stay BOOTING for the whole research job; no-task boots still mark-ready only at Step 4.

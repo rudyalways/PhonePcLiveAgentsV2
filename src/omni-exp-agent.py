@@ -641,10 +641,18 @@ def pipeline_debug(task_id: str, phase: str) -> dict[str, Any]:
     elif not core.get("alive"):
         verdict = "BLOCKED: sutando-core DOWN — task sits on disk"
     elif core.get("booting") or (core.get("alive") and not core.get("ready")):
-        verdict = (
-            "BLOCKED: sutando-core BOOTING (/startup) — not ready for work yet "
-            f"· reason={core.get('ready_reason') or 'booting'}"
-        )
+        # Task on disk is still valid — /startup Step 1 processes it; feeder must hold.
+        if on_disk or phase in ("task_written", "cc_processing"):
+            verdict = (
+                "WAITING: sutando-core still in /startup — task stays queued on disk "
+                "(startup will process it; feeder must not abandon) "
+                f"· reason={core.get('ready_reason') or 'booting'}"
+            )
+        else:
+            verdict = (
+                "WAITING: sutando-core BOOTING (/startup) — not ready for new work yet "
+                f"· reason={core.get('ready_reason') or 'booting'}"
+            )
     elif phase == "task_written" and on_disk and "inject" not in feeder.lower() and "nudge" not in feeder.lower():
         verdict = "WAITING: task on disk; feeder has not injected into tmux yet"
     elif phase == "task_written" and on_disk:

@@ -524,7 +524,31 @@ def generate_insight():
     return best
 
 
+def _daily_insight_enabled() -> bool:
+    """Honor SUTANDO_DAILY_INSIGHT_ENABLED (default OFF via schedule-crons manifest)."""
+    gate = Path(__file__).resolve().parent.parent / (
+        "skills/schedule-crons/scripts/cron-entry-enabled.py"
+    )
+    if not gate.is_file():
+        return False
+    try:
+        r = subprocess.run(
+            [sys.executable, str(gate), "daily-insight"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return (r.stdout or "").strip().splitlines()[:1] == ["enabled"]
+
+
 def main():
+    if not _daily_insight_enabled():
+        print("daily-insight skipped (SUTANDO_DAILY_INSIGHT_ENABLED=0)")
+        return
+
     today = datetime.now().strftime("%Y-%m-%d")
     output_path = RESULTS_DIR / f"insight-{today}.txt"
     # Sentinel survives discord-bridge's `dm-fallback` unlink of the

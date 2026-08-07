@@ -7,12 +7,16 @@ INBOX="$REPO/src/omni-exp-watch-tasks-to-tmux-inbox.sh"
 
 grep -q 'STUCK_S=.*15' "$DOC"
 grep -q 'core_idle' "$DOC"
+grep -q 'core_booting' "$DOC"
+grep -q 'hold .*pending — core booting' "$DOC"
 grep -q 'idle-burst' "$DOC"
 grep -q 'BURST_MAX' "$DOC"
 grep -q 'MAX_NUDGES' "$DOC"
 
 grep -q 'STUCK_S=.*15' "$INBOX"
 grep -q 'core_idle' "$INBOX"
+grep -q 'core_booting' "$INBOX"
+grep -q 'hold .*pending — core booting' "$INBOX"
 grep -q 'idle-burst' "$INBOX"
 grep -q 'SUTANDO_FEEDER_WS' "$INBOX"
 

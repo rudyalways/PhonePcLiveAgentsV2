@@ -431,8 +431,33 @@ def zero_reason():
     )
 
 
+def _pending_questions_cron_enabled() -> bool:
+    """Honor SUTANDO_PENDING_QUESTIONS_CRON_ENABLED (default OFF)."""
+    gate = Path(__file__).resolve().parent.parent / (
+        "skills/schedule-crons/scripts/cron-entry-enabled.py"
+    )
+    if not gate.is_file():
+        return False
+    try:
+        r = subprocess.run(
+            [sys.executable, str(gate), "pending-questions"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return (r.stdout or "").strip().splitlines()[:1] == ["enabled"]
+
+
 def main():
     force = "--force" in sys.argv
+    # Cron/default path respects the env gate; --force is an explicit owner nudge.
+    if not force and not _pending_questions_cron_enabled():
+        print("pending-questions skipped (SUTANDO_PENDING_QUESTIONS_CRON_ENABLED=0)")
+        return
+
     questions = get_waiting_questions()
     if not questions:
         # Never return silently: see zero_reason.__doc__.

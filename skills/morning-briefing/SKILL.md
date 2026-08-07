@@ -12,6 +12,20 @@ Generate a prioritized daily briefing from all your channels.
 
 ARGUMENTS: $ARGUMENTS
 
+## Kill switch (scheduled + slash)
+
+Re-source repo `.env` if present (`set -a; source .env; set +a`), then:
+
+```bash
+python3 skills/schedule-crons/scripts/cron-entry-enabled.py morning-briefing
+```
+
+If it prints `disabled` (default — `SUTANDO_MORNING_BRIEFING_ENABLED=0` / unset), emit exactly one line:
+
+`morning-briefing skipped (SUTANDO_MORNING_BRIEFING_ENABLED=0)`
+
+and end immediately — do not gather or deliver. Manual opt-in: set `SUTANDO_MORNING_BRIEFING_ENABLED=1` in `.env`. Missing gate script → treat as disabled (fail closed).
+
 ## What to gather
 
 **Step 0 — Calendar cache. CONDITIONAL: Google-calendar hosts only.**
@@ -45,7 +59,7 @@ python3 src/morning-briefing.py
 
 2. **GWS Calendar** — If the user uses Google Calendar (not just macOS Calendar), run `gws calendar +agenda --today`. List any meetings not already covered by the macOS Calendar output above.
 
-3. **Daily insight** — Run `python3 src/daily-insight.py`. If it produces an insight, include it at the end of the briefing as "💡 Insight: ..."
+3. **Daily insight** — Only if `python3 skills/schedule-crons/scripts/cron-entry-enabled.py daily-insight` prints `enabled`. Then run `python3 src/daily-insight.py`. If it produces an insight, include it at the end of the briefing as "💡 Insight: ...". (Script also self-gates; default OFF.)
 
 4. **Friction check** — Run `python3 src/friction-detector.py`. If friction items found, include as "⚠️ Friction: [count] items need attention" with the top 3.
 

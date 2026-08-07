@@ -269,6 +269,11 @@ Do **not** call CC via a new RPC in v1. File bridge only. Ensure core watcher is
 
 **Monitor fallback:** Canonical pickup is Claude Code `Monitor` → `watch-tasks-stream.sh`. On OpenRouter / non-Anthropic cores (no Monitor), `SUTANDO_TMUX_TASK_FEEDER=auto|1` installs launchd job `com.sutando.omni-exp-tmux-task-feeder` which injects `TASK_FILE:` into the `sutando-core` tmux pane.
 
+**Task while core still booting:** Keep the file in `tasks/`. `/startup` Step 1 processes it from disk (and `mark-ready`s first if owner tasks exist). The feeder **holds** (no abandon) while `state/core-booting.json` is fresh; omni HUD shows WAITING, not BLOCKED.
+
+**Optional owner crons (default OFF):** not required for omni-exp. Gated via `skills/schedule-crons/scripts/cron-entry-enabled.py` / manifest defaults `0`:
+`SUTANDO_MORNING_BRIEFING_ENABLED`, `SUTANDO_DAILY_INSIGHT_ENABLED`, `SUTANDO_PENDING_QUESTIONS_CRON_ENABLED`, `SUTANDO_SYNC_MEMORY_CRON_ENABLED`. `/schedule-crons` skips + CronDeletes when off. Opt in with `=1` in `.env`.
+
 **Omni process survival:** Do **not** start omni as a child of an agent/Cursor shell (`nohup` alone is not enough — shell process-group SIGTERM kills it with no traceback). Use `bash src/start-omni-exp.sh --daemon` / `install-omni-exp-launchd.sh` → launchd KeepAlive. Runners live under `~/Library/Application Support/Sutando/omni-exp/` because macOS TCC blocks LaunchAgents from executing files under `~/Documents` (symptoms: exit 78 `EX_CONFIG` / “Operation not permitted”). Phone URL is **HTTPS only** (`https://127.0.0.1:7090/omni-exp`).
 
 ### Fresh Mac bootstrap (clone → run)

@@ -72,6 +72,22 @@ if [ -f "$SCRIPT_PARENT/.env" ]; then
     set +a
 fi
 
+# Optional cron gate (default OFF via schedule-crons manifest). Manual opt-in:
+# SUTANDO_SYNC_MEMORY_CRON_ENABLED=1. Bypass for one-shot owner runs:
+# SUTANDO_SYNC_MEMORY_FORCE=1.
+if [ "${SUTANDO_SYNC_MEMORY_FORCE:-0}" != "1" ] \
+  && [ -f "$SCRIPT_PARENT/skills/schedule-crons/scripts/cron-entry-enabled.py" ]; then
+  _gate_out="$(
+    python3 "$SCRIPT_PARENT/skills/schedule-crons/scripts/cron-entry-enabled.py" sync-memory \
+      2>/dev/null || echo disabled
+  )"
+  if [ "$_gate_out" != "enabled" ]; then
+    echo "sync-memory skipped (SUTANDO_SYNC_MEMORY_CRON_ENABLED=0)"
+    exit 0
+  fi
+  unset _gate_out
+fi
+
 # One-time migration from legacy default (~/.sutando-memory-sync/) to the
 # new convention (~/.sutando/memory-sync/). Triggers only when the env var
 # is unset (user hasn't pinned a path), the legacy dir exists, AND the new

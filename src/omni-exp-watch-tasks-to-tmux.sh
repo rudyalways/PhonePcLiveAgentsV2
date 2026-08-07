@@ -72,6 +72,16 @@ session_ready() {
   tmux -S "$SOCK" has-session -t "$SESSION" 2>/dev/null
 }
 
+# Match src/core_readiness.py BOOTING_STALE_S (15 min). While booting, hold —
+# never abandon: /startup Step 1 processes tasks/ from disk.
+core_booting() {
+  local f="$WS/state/core-booting.json"
+  [[ -f "$f" ]] || return 1
+  local age
+  age=$(( $(date +%s) - $(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0) ))
+  [[ "$age" -lt 900 ]]
+}
+
 # True when the core pane looks free to accept new TASK_FILE prompts.
 core_idle() {
   local pane
@@ -184,6 +194,17 @@ while true; do
   fi
 
   now=$(date +%s)
+
+  # Booting: leave tasks queued. /startup reads tasks/ directly; do not abandon.
+  if core_booting; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) hold ${#pending[@]} pending — core booting (/startup owns tasks/)" >>"$LOG"
+    if [[ -n "$inflight_base" ]]; then
+      inflight_at=$now
+      inflight_nudges=0
+    fi
+    sleep "$POLL_S"
+    continue
+  fi
 
   # Idle + backlog: burst-inject every pending task into Claude's queue.
   if core_idle; then

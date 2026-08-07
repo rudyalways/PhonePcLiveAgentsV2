@@ -55,6 +55,15 @@ When `core.runtime` is `codex`, the canonical unmarked `main-loop` entry (`promp
    - **Skip any entry with `"launchd": true`** — it is owned by the OS-level cron-runner (see "Reliable OS-level crons" below), which emits its task independently. Registering it here too would double-fire (duplicate deliveries — the exact noise class the launchd path was built to avoid).
    - **Skip the proactive-loop entry when the whole-loop toggle is off.** First re-source repo `.env` if present (`set -a; source .env; set +a`) so a flip to `SUTANDO_PROACTIVE_LOOP_ENABLED=0` is seen without a core restart, then run `python3 skills/proactive-loop/scripts/proactive-loop-enabled.py` (prints `enabled` / `disabled`). When it prints `disabled`, skip any entry whose `prompt_skill` is `proactive-loop` or whose `prompt` body invokes `/proactive-loop`; every other entry registers normally. When the script is absent, treat it as `enabled` — a missing optional script must not silently stop the owner's loop. This is the WHOLE-LOOP gate and is distinct from `SUTANDO_SELF_DEVELOPMENT_ENABLED`, which only narrows what a pass does once it has already started.
    - **Disarm already-registered loop jobs when the toggle is off.** After the gate prints `disabled`, scan `CronList` and `CronDelete` every existing job whose name is `main-loop` or whose prompt invokes `/proactive-loop` (including the `*/10` bootstrap fallback). Log one line per deletion: `proactive-loop cron deleted (SUTANDO_PROACTIVE_LOOP_ENABLED=0): <id-or-name>`. Skipping registration alone is not enough — a loop that was armed while the flag was on must be torn down on the next `/schedule-crons`.
+   - **Skip optional owner digests/hygiene when their toggles are off (default OFF).** Same `.env` re-source as above, then for each entry below run `python3 skills/schedule-crons/scripts/cron-entry-enabled.py <name>`:
+     | entry | env (default 0) | match |
+     |---|---|---|
+     | `morning-briefing` | `SUTANDO_MORNING_BRIEFING_ENABLED` | `name`/`prompt_skill` `morning-briefing` or `/morning-briefing` |
+     | `daily-insight` | `SUTANDO_DAILY_INSIGHT_ENABLED` | `name` `daily-insight` or `daily-insight.py` |
+     | `pending-questions` | `SUTANDO_PENDING_QUESTIONS_CRON_ENABLED` | `name` `pending-questions` or `check-pending-questions.py` |
+     | `sync-memory` | `SUTANDO_SYNC_MEMORY_CRON_ENABLED` | `name` `sync-memory` or `sync-memory.sh` |
+     When a gate prints `disabled`, skip that entry and log one line: `<name> skipped (<ENV>=0)`. **Missing script → treat as disabled** (fail closed). Opt in with `=1` in `.env`. None of these are required for omni-exp work-bridge.
+   - **Disarm already-registered optional jobs when off.** After each gate prints `disabled`, `CronDelete` matching jobs from `CronList`. Log: `<name> cron deleted (<ENV>=0): <id-or-name>`.
    - Skip if a job with matching prompt/name already exists
    - Call `CronCreate` with the cron expression and prompt:
      - If `prompt_skill` is set, pass `prompt: "/skill-name"` (the leading slash makes the scheduled cron fire the skill as a slash command at its scheduled time).
