@@ -30,21 +30,21 @@ Any work-summary the recap produces — boot catchup, human brief, or an on-dema
 
 Save durable work-summaries under `<workspace>/notes/work-summaries/YYYY-MM-DD.md` (owner-created folder 2026-07-13), one file per summary, each opening with a `*[workflow, summary] — author | window | requested-by*` line.
 
-## Automatic recap on restart (owner directive 2026-07-13; gated 2026-08-07)
+## Automatic recap on restart (owner directive 2026-07-13; fast path 2026-08-07)
 
-**Primary consumer: the next session's agent** (owner 2026-07-13). The boot recap is how the fresh core catches up properly — deeper and less biased than relay notes (which are short, curated, and lost on crash-exits). The human-facing room post is the secondary product.
+**Primary consumer: the next session's agent** (owner 2026-07-13). Boot catchup must not block omni for minutes.
 
-**Boot gate (default OFF).** `/schedule-crons` step 5.6 only runs this when:
+**Boot = fast mechanical extract (default ON).** `/schedule-crons` step 5.6 runs:
 
 ```bash
-python3 skills/session-recap/scripts/session-recap-on-boot-enabled.py
+python3 skills/session-recap/scripts/boot-recap.py
 ```
 
-prints `enabled`. Shipped default is `SUTANDO_SESSION_RECAP_ON_BOOT=0` (manifest). Also forced off when `SUTANDO_SKIP_STARTUP=1` (omni Start-core). Opt in with `SUTANDO_SESSION_RECAP_ON_BOOT=1` in `.env`. On-demand `/session-recap` is unchanged and never gated.
+That script `mark-ready`s first, dumps a **capped dialog** extract (default 48k chars, `SUTANDO_SESSION_RECAP_BOOT_MAX_CHARS`), and writes `<workspace>/state/last-session-recap.md` + stamp — **no LLM / no haiku subagent**. Yields (exit 2) if `tasks/task-*.txt` are pending. Set `SUTANDO_SESSION_RECAP_ON_BOOT=0` to skip boot catchup entirely.
 
-When the gate is on, `/schedule-crons` must `mark-ready` **before** dumping transcripts (and must yield to pending `tasks/task-*.txt`). Then it runs this skill twice-in-one:
-1. **Agent catchup (the point):** generate a structured recap of the previous session tuned for the agent — open loops, in-flight PRs + their exact states, pending owner asks, decisions + their rationale, artifacts written, errors whose fixes are unverified. Generating it at boot puts it directly in the new session's context; also write it to `<workspace>/state/last-session-recap.md` so anything else can read it.
-2. **Human brief:** if `recap_room` is set in `<workspace>/hosts/<hostname>/recap.json` (sibling of crons.json, which stays a bare job list) and a previous session transcript exists, produce a ~10-line recap of the previous session — what shipped, key decisions, owner asks left open, artifacts written; routine ops dropped — and post it to `recap_room` via gateway op:message. **Privacy (owner rule 2026-07-13): `recap_room` MUST be a private, owner-only room** — a recap can contain anything from a session (drafts, credentials context, private conversations). Never point it at a shared/team room; when in doubt, skip the post and leave the recap on disk under `data/session-recaps/`. Idempotence: stamp `<workspace>/state/last-recap-session.txt` with the recapped session uuid; skip if it already names that session (protects mid-session /schedule-crons re-runs from duplicate posts). Deep recaps stay on-demand.
+**Deep LLM recap stays on-demand** via `/session-recap` (this skill's full procedure below) — not during boot.
+
+**Human room post (optional):** if `recap_room` is set in `<workspace>/hosts/<hostname>/recap.json` and is private/owner-only, `/schedule-crons` may post a short pointer that boot-fast recap is on disk. Never point `recap_room` at a shared/team room.
 
 ## Notes
 

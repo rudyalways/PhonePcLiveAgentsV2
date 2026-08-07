@@ -1,12 +1,13 @@
 {
   "name": "session-recap",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "owner": "github:sonichi/sutando",
   "license": "MIT",
   "stability": "stable",
-  "description": "Reconstruct past core sessions from transcripts. Manifest declares SUTANDO_SESSION_RECAP_ON_BOOT (default OFF — omni-exp / work-bridge boots must not block on recap).",
+  "description": "Reconstruct past core sessions from transcripts. Boot path uses fast mechanical boot-recap.py (default ON); deep LLM via /session-recap.",
   "config": {
-    "SUTANDO_SESSION_RECAP_ON_BOOT": "0"
+    "SUTANDO_SESSION_RECAP_ON_BOOT": "1",
+    "SUTANDO_SESSION_RECAP_BOOT_MAX_CHARS": "48000"
   },
   "provenance": {
     "source_repo": "https://github.com/sonichi/sutando"

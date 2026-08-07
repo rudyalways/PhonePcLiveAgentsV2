@@ -79,7 +79,7 @@ Invoke `/schedule-crons`. That skill **starts the streaming watcher before CronC
 - Reading host `crons.json`
 - Calling `CronCreate` for each entry that isn't already scheduled
 - Ensuring a fallback `/proactive-loop` cron exists at `*/10 * * * *` if `crons.json` doesn't include one (post-#954 belt-and-suspenders) — **skipped entirely** when `python3 skills/proactive-loop/scripts/proactive-loop-enabled.py` prints `disabled` (`SUTANDO_PROACTIVE_LOOP_ENABLED=0`)
-- **Boot session-recap** — **skipped by default** (`SUTANDO_SESSION_RECAP_ON_BOOT=0`). When enabled, schedule-crons `mark-ready`s **before** the transcript dump so omni is not stuck WAITING. See schedule-crons step 5.6.
+- **Boot session-recap** — fast `boot-recap.py` (capped dialog, no LLM); `mark-ready` before dump. See schedule-crons step 5.6.
 
 ### Step 4 — Mark ready + confirm
 
@@ -135,4 +135,4 @@ If you find yourself wanting to put logic IN `/startup`, ask whether it belongs 
 - v0.2.0 — 2026-06-21 — removed the fresh-session briefing step and its session sentinel (that sub-skill was deleted). `/startup` now runs orphan-check → schedules + watcher → confirm; sub-skill idempotency replaces the former sentinel guard.
 - v0.3.0 — 2026-08-06 — yield to pending `tasks/task-*.txt` before cron ceremony; mark `core-ready` via `src/core_readiness.py` so omni HUD can distinguish alive vs ready (fixes boot-stall where feeder injected while schedule-crons ran for minutes).
 - v0.4.0 — 2026-08-07 — if owner tasks exist at Step 1 / mid-ceremony, `mark-ready` **before** processing them so HUD/feeder don't stay BOOTING for the whole research job; no-task boots still mark-ready only at Step 4.
-- v0.4.1 — 2026-08-07 — boot `session-recap` default OFF (`SUTANDO_SESSION_RECAP_ON_BOOT`); when on, mark-ready before dump (omni stall class).
+- v0.4.1 — 2026-08-07 — boot session-recap uses fast `boot-recap.py` (mark-ready first, capped dialog, no LLM); deep `/session-recap` on-demand.

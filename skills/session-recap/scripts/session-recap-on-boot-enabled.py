@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Resolve whether automatic session-recap should run during /schedule-crons boot.
+"""Resolve whether boot session-recap should run during /schedule-crons.
 
 Precedence:
 
-    SUTANDO_SKIP_STARTUP=1 → disabled (omni Start-core / skip-startup path)
     environment override > session-recap/manifest.json config default
 
-Shipped default is OFF so omni-exp / work-bridge boots are not blocked for
-minutes dumping the previous transcript. Opt in with
-SUTANDO_SESSION_RECAP_ON_BOOT=1. Invalid values and a missing manifest fail
-closed (disabled). Consumers treat a missing script as disabled too.
+Shipped default is ON. Set SUTANDO_SESSION_RECAP_ON_BOOT=0 to skip.
+Boot path uses the fast mechanical ``boot-recap.py`` (no LLM); deep LLM
+recap stays on-demand via ``/session-recap``.
+
+Invalid values fail closed (disabled). A missing script is treated as
+enabled by consumers so boot catchup does not silently disappear.
 
 Usage:
   python3 skills/session-recap/scripts/session-recap-on-boot-enabled.py
@@ -24,7 +25,6 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 ENV_NAME = "SUTANDO_SESSION_RECAP_ON_BOOT"
-SKIP_STARTUP_ENV = "SUTANDO_SKIP_STARTUP"
 TRUE_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off", "disabled"})
 MANIFEST_PATH = Path(__file__).resolve().parents[1] / "manifest.json"
@@ -42,22 +42,16 @@ def _manifest_default(manifest_path: Path = MANIFEST_PATH) -> Optional[str]:
     return str(value) if value is not None else None
 
 
-def _truthy(raw: Optional[str]) -> bool:
-    return (raw or "").strip().lower() in TRUE_VALUES
-
-
 def session_recap_on_boot_enabled(
     environ: Optional[Mapping[str, str]] = None,
     manifest_path: Path = MANIFEST_PATH,
 ) -> bool:
     env = os.environ if environ is None else environ
-    # Omni Start-core sets SUTANDO_SKIP_STARTUP=1 — never burn boot on recap.
-    if _truthy(env.get(SKIP_STARTUP_ENV)):
-        return False
-
     raw = env.get(ENV_NAME)
     if raw is None:
         raw = _manifest_default(manifest_path)
+    if raw is None:
+        return True  # fail-open when undeclared
     normalized = (raw or "").strip().lower()
     if normalized in TRUE_VALUES:
         return True
