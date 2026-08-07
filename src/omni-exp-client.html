@@ -242,6 +242,15 @@
   #core-btn { display: none; }
   #core-btn.show { display: inline-block; }
   #core-btn.stop { background: var(--danger); color: #fff; }
+  #core-btn.starting {
+    background: rgba(251, 191, 36, 0.28);
+    color: var(--warn);
+    border: 1px solid rgba(251, 191, 36, 0.55);
+  }
+  #core-btn.start {
+    background: var(--accent);
+    color: #1a140c;
+  }
   canvas { display: none; }
 </style>
 </head>
@@ -300,7 +309,7 @@
   <button type="button" id="flip-btn">Flip</button>
   <button type="button" id="ask-btn">Ask view</button>
   <button type="button" id="work-btn">Task…</button>
-  <button type="button" id="core-btn">Start core</button>
+  <button type="button" id="core-btn">Start</button>
   <button type="button" id="disc-btn" class="danger">End</button>
 </div>
 <canvas id="snap"></canvas>
@@ -328,6 +337,9 @@ const coreBtn = document.getElementById("core-btn");
 
 let ws = null;
 let coreAlive = false;
+/** down | starting | ready | error — drives Start / Starting… / Stop label */
+let corePhase = "down";
+let coreStartPending = false;
 let workStartedAt = 0;
 let stream = null;
 let audioCtx = null;
@@ -844,15 +856,55 @@ function resetLiveUi() {
   setChip(chipTrigger, "Trigger: —");
   setChip(chipWork, "Work: —");
   setChip(chipCore, "Core: —");
-  coreBtn.classList.remove("show", "stop");
-  coreBtn.textContent = "Start core";
+  coreAlive = false;
+  corePhase = "down";
+  coreStartPending = false;
+  paintCoreBtn();
   workStartedAt = 0;
   showPartial("", "");
   lastAsr = "";
   clearAllTasks();
 }
 
+function paintCoreBtn() {
+  coreBtn.classList.remove("show", "stop", "starting", "start");
+  coreBtn.disabled = false;
+  if (corePhase === "ready" || corePhase === "error") {
+    coreBtn.textContent = "Stop";
+    coreBtn.title =
+      corePhase === "error"
+        ? "Core is up but unhealthy — stop the tmux session"
+        : "Stop sutando-core (tmux session)";
+    coreBtn.classList.add("show", "stop");
+  } else if (corePhase === "starting") {
+    // Label = Starting (not Stop). Click still force-stops a stuck boot.
+    coreBtn.textContent = "Starting…";
+    coreBtn.title =
+      "Core is starting / in /startup. Not ready for Stop yet — click to force-stop if stuck.";
+    coreBtn.classList.add("show", "starting");
+  } else {
+    coreBtn.textContent = "Start";
+    coreBtn.title = "Start sutando-core";
+    coreBtn.classList.add("show", "start");
+  }
+}
+
 function setCoreStatus(msg) {
+  // core_start / core_stop ACKs may omit probe fields — don't wipe phase then.
+  if (!("alive" in msg) && (msg.started != null || msg.stopped != null || msg.message)) {
+    if (msg.ok && msg.started) {
+      coreStartPending = true;
+      corePhase = "starting";
+      paintCoreBtn();
+    }
+    if (msg.ok && msg.stopped) {
+      coreStartPending = false;
+      coreAlive = false;
+      corePhase = "down";
+      paintCoreBtn();
+    }
+    return;
+  }
   coreAlive = !!msg.alive;
   const age = msg.age_s == null ? "?" : (msg.age_s < 120 ? msg.age_s + "s" : Math.round(msg.age_s / 60) + "m");
   const pend = msg.pending_tasks != null ? ` · ${msg.pending_tasks} queued` : "";
@@ -860,40 +912,38 @@ function setCoreStatus(msg) {
   const paneTag = paneErr ? ` · ${paneErr}` : "";
   const ready = !!msg.ready;
   const booting = !!msg.booting || (msg.alive && !ready && !paneErr);
+
   if (msg.alive && ready && !paneErr) {
+    coreStartPending = false;
+    corePhase = "ready";
     setChip(chipCore, `Core: ready ${age}${pend}`, "on");
-    if (msg.can_stop !== false) {
-      coreBtn.textContent = "Stop core";
-      coreBtn.classList.add("show", "stop");
-    } else {
-      coreBtn.classList.remove("show", "stop");
-    }
   } else if (msg.alive && booting && !paneErr) {
-    setChip(chipCore, `Core: booting ${age}${pend}`, "busy");
-    if (msg.can_stop !== false) {
-      coreBtn.textContent = "Stop core";
-      coreBtn.classList.add("show", "stop");
-    } else {
-      coreBtn.classList.remove("show", "stop");
-    }
+    coreStartPending = false;
+    corePhase = "starting";
+    setChip(chipCore, `Core: starting ${age}${pend}`, "busy");
   } else if (msg.alive && paneErr) {
+    coreStartPending = false;
+    corePhase = "error";
     setChip(chipCore, `Core: API err ${age}${paneTag}${pend}`, "bad");
-    if (msg.can_stop !== false) {
-      coreBtn.textContent = "Stop core";
-      coreBtn.classList.add("show", "stop");
-    } else {
-      coreBtn.classList.remove("show", "stop");
-    }
+  } else if (coreStartPending && !msg.alive) {
+    // Local Start click — keep Starting… until .alive appears or timeout.
+    corePhase = "starting";
+    setChip(chipCore, `Core: starting…${pend}`, "busy");
   } else {
+    coreStartPending = false;
+    corePhase = "down";
     setChip(chipCore, `Core: DOWN (${age})${pend}`, "bad");
-    if (msg.can_start !== false) {
-      coreBtn.textContent = "Start core";
-      coreBtn.classList.add("show");
-      coreBtn.classList.remove("stop");
-    } else {
-      coreBtn.classList.remove("show", "stop");
-    }
   }
+
+  if (msg.can_start === false && corePhase === "down") {
+    coreBtn.classList.remove("show", "stop", "starting", "start");
+    coreBtn.textContent = "Start";
+  } else if (msg.can_stop === false && (corePhase === "ready" || corePhase === "error")) {
+    coreBtn.classList.remove("show", "stop", "starting", "start");
+  } else {
+    paintCoreBtn();
+  }
+
   const tip = [
     msg.ready_reason ? `ready_reason=${msg.ready_reason}` : "",
     msg.watcher_alive != null ? `watcher=${msg.watcher_alive ? "up" : "down"}` : "",
@@ -1208,11 +1258,28 @@ document.getElementById("work-btn").onclick = () => {
 };
 coreBtn.onclick = () => {
   if (ws?.readyState !== 1) return;
+  // Start only when down. Stop only when ready/error.
+  // Starting… → force-stop (escape hatch for stuck /startup).
+  let action;
+  if (corePhase === "down") {
+    action = "start_core";
+    coreStartPending = true;
+    corePhase = "starting";
+    paintCoreBtn();
+    logAct("core", "Starting sutando-core…");
+  } else if (corePhase === "starting") {
+    action = "stop_core";
+    logAct("core", "Force-stopping sutando-core (was still starting)…");
+  } else {
+    action = "stop_core";
+    logAct("core", "Stopping sutando-core…");
+  }
   coreBtn.disabled = true;
-  const action = coreAlive ? "stop_core" : "start_core";
-  logAct("core", action === "start_core" ? "Starting sutando-core…" : "Stopping sutando-core…");
   ws.send(JSON.stringify({ type: "control", action }));
-  setTimeout(() => { coreBtn.disabled = false; }, 5000);
+  setTimeout(() => {
+    coreBtn.disabled = false;
+    paintCoreBtn();
+  }, 5000);
 };
 document.getElementById("disc-btn").onclick = () => stopAll();
 document.getElementById("act-clear").onclick = (e) => {

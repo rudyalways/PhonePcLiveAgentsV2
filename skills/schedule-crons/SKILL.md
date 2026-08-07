@@ -74,10 +74,25 @@ When `core.runtime` is `codex`, the canonical unmarked `main-loop` entry (`promp
 5. **Re-ensure** the streaming task watcher (idempotent). Step 0 already starts it before CronCreate; this step only restarts if the PID sentinel died mid-registration. Same Monitor args + PID-check rules as step 0. Don't use `pgrep -f watch-tasks-stream`. Don't kick off `bash src/watch-tasks.sh` (retired 2026-05-14).
 5.5. **Ensure the core heartbeat is running (sonichi/sutando#2198 prerequisite).** `src/core_heartbeat.py` (the writer of `state/cores/<hostname>.alive`) is started by `src/startup.sh` — but the CLI boot path lands here without ever running startup.sh (observed 2026-07-20: desktop-supervised core running for 20+ min with `state/cores/` empty, so the dashboard/health-check read the core as dead and the stop-path had no pid/socket target). Check freshness of `"$WORKSPACE/state/cores/$(bash scripts/sutando-config.sh host-label).alive"` — if the file is missing or its mtime is older than 90 seconds (the documented staleness threshold), start the heartbeat: `nohup python3 src/core_heartbeat.py > /tmp/core-heartbeat.log 2>&1 &`. Freshness-of-.alive is the running-check by design — do NOT use `pgrep -f core_heartbeat` (same wrapper-argv self-match anti-pattern as step 5's watcher note), and a fresh mtime is exactly the signal every other reader of the file trusts. Idempotent on mid-session re-runs: a live heartbeat keeps the mtime younger than 90s, so the start is skipped.
 
-5.6. **Auto session-recap on boot (owner directive 2026-07-13).** When more than one session transcript exists (i.e. there is a previous session to recap), run the `session-recap` skill's boot recap over the previous session. Per the recap contract (`skills/session-recap/SKILL.md` "Automatic recap on restart"), this is **two behaviors with different gates** — do NOT gate the whole step on `recap_room`:
-   - **Agent catchup — ALWAYS (gate: a previous transcript exists).** Generate the structured next-session recap and write it to `<workspace>/state/last-session-recap.md` (also stamp `state/last-recap-session.txt`). This is the primary purpose — it seeds the fresh core's context at boot — and does **not** depend on `recap_room`. A host with no `recap.json` still gets this.
-   - **Human room post — ONLY if `recap_room` is set (and private).** If `recap_room` is configured in this host's `recap.json` — `<workspace>/hosts/<hostname>/recap.json`, per the hosts/<hostname>/ per-host state convention, sibling of `crons.json` (which itself stays a bare job list) and names a private, owner-only room, additionally post the brief to `recap_room` (gateway op:message). No `recap_room`, or a non-private one → skip the post, leave the recap on disk under `data/session-recaps/`.
-   Idempotence lives in the recap skill's `state/last-recap-session.txt` stamp — a mid-session `/schedule-crons` re-run finds the previous session already stamped and skips both the write and the post, so this never double-writes or double-posts (same guard philosophy as the dynamic-loop freshness sentinel in step 3).
+5.6. **Auto session-recap on boot (gated; default OFF).** Boot recap historically blocked omni for minutes (session-recap dump of a large prior transcript before `mark-ready`). Gate it:
+
+   ```bash
+   # Re-source .env first (same as proactive-loop gate).
+   set -a; [ -f .env ] && . ./.env; set +a
+   python3 skills/session-recap/scripts/session-recap-on-boot-enabled.py
+   ```
+
+   - Prints `disabled` (shipped default; also when `SUTANDO_SKIP_STARTUP=1`) → **skip the entire step**. Log exactly one line: `session-recap on boot skipped (SUTANDO_SESSION_RECAP_ON_BOOT=0)`. **Missing script → treat as disabled** (fail closed; do not re-arm a multi-minute boot stall).
+   - Prints `enabled` (`SUTANDO_SESSION_RECAP_ON_BOOT=1` and not skip-startup) → continue below.
+
+   **Before any dump/summarize when enabled:**  
+   1. If `<workspace>/tasks/task-*.txt` exists → yield (hard rule): `mark-ready --source startup-owner-tasks`, process tasks, then resume.  
+   2. Else call `python3 src/core_readiness.py mark-ready --source startup-before-recap` so omni HUD/feeder leave BOOTING **before** the slow transcript dump. Recap must never hold `core-booting.json`.
+
+   Then, when more than one session transcript exists, run the `session-recap` skill's boot recap. Per `skills/session-recap/SKILL.md` "Automatic recap on restart" — two behaviors; do NOT gate the whole step on `recap_room`:
+   - **Agent catchup** — generate structured next-session recap → `<workspace>/state/last-session-recap.md` + stamp `state/last-recap-session.txt`.
+   - **Human room post — ONLY if `recap_room` is set (and private)** in `<workspace>/hosts/<hostname>/recap.json`.
+   Idempotence: stamp `last-recap-session.txt`; mid-session `/schedule-crons` re-run skips if already stamped. **Mid-recap interrupt:** if a new `task-*.txt` appears while dumping/summarizing, **abort recap immediately**, process the task(s), and do not resume recap on this boot (on-demand `/session-recap` remains available).
 
 5.7. **Stamp completion for the health-check divergence guard.** After all registrations (and the fallback check in step 4), count the session-owned entries you actually registered this run (CronCreate successes + pre-existing matches from step 3, including the main-loop/fallback) and write the stamp — script-visible proof that THIS core boot completed registration:
    ```bash
