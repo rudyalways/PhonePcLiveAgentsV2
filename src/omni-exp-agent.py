@@ -489,6 +489,14 @@ def sweep_orphan_feeder_inbox() -> int:
 WORK_DEDUPE_S = float(_env_omni_exp("WORK_DEDUPE_S", "180"))
 # Reclaim result files younger than this after omni-exp restart.
 WORK_RECLAIM_MAX_AGE_S = float(_env_omni_exp("WORK_RECLAIM_MAX_AGE_S", "1800"))
+# When 1: each session.start wipes recent-done / research-capture / in-memory
+# pending work so browser refresh is a clean slate. Default off — preserves
+# work-dedupe across brief reconnects.
+CLEAR_CONTEXT_ON_START = _env_omni_exp("CLEAR_CONTEXT_ON_START", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 OMNI_EXP_SUPPORT = (
     Path.home() / "Library" / "Application Support" / "Sutando" / "omni-exp"
 )
@@ -524,6 +532,30 @@ def save_recent_done(done: dict[str, tuple[float, str]]) -> None:
         RECENT_DONE_PATH.write_text(json.dumps(payload), encoding="utf-8")
     except Exception as e:
         logger.warning("recent-done save failed: %s", e)
+
+
+def clear_session_durable_context(username: str) -> None:
+    """Drop cross-refresh work-dedupe + research capture so Start/refresh is a clean slate.
+
+    Qwen conversation itself is new per ``start_qwen``; this clears the disk state that
+    otherwise survives browser refresh / reconnect.
+    """
+    save_recent_done({})
+    try:
+        from omni_exp_research_capture import research_capture_state_path
+
+        path = research_capture_state_path(WORKSPACE, username)
+        if path.is_file():
+            path.unlink()
+    except Exception as e:
+        logger.warning("research-capture clear failed: %s", e)
+    for name in ("voice-session-context.json",):
+        try:
+            p = WORKSPACE / "state" / name
+            if p.is_file():
+                p.unlink()
+        except Exception as e:
+            logger.warning("state clear %s failed: %s", name, e)
 
 
 def cleanup_completed_task_pairs() -> int:
@@ -1255,6 +1287,21 @@ class PhoneSession:
         if not api_key:
             await self.send({"type": "error", "message": "DASHSCOPE_API_KEY not set on server"})
             return
+        # Opt-in: OMNI_EXP_CLEAR_CONTEXT_ON_START=1 wipes durable + session soft state.
+        if CLEAR_CONTEXT_ON_START:
+            clear_session_durable_context(self.username)
+            self._recent_done = {}
+            self._pending_work.clear()
+            self._spoken_task_ids.clear()
+            self._handled_call_ids.clear()
+            self._turn_seq = 0
+            self._turn_id = "-"
+            if self.research_buf is not None:
+                self.research_buf = type(self.research_buf)(
+                    flush_idle_s=self.research_buf.flush_idle_s,
+                    flush_min_interval_s=self.research_buf.flush_min_interval_s,
+                    flush_hook_count=self.research_buf.flush_hook_count,
+                )
         self.qwen = QwenOmniSession(
             api_key=api_key,
             on_event=self._on_qwen_event,
@@ -1273,10 +1320,12 @@ class PhoneSession:
             }
         )
         await self.status("listening")
-        await self.activity(
-            "session",
-            f"Qwen ready ({self.qwen.model}) · tool: work · mode={OMNI_EXP_MODE}",
+        ready_msg = (
+            f"Qwen ready ({self.qwen.model}) · tool: work · mode={OMNI_EXP_MODE}"
         )
+        if CLEAR_CONTEXT_ON_START:
+            ready_msg += " · prior context cleared"
+        await self.activity("session", ready_msg)
         await self.activity("session", f"Tasks dir: {TASKS_DIR}")
         if OMNI_EXP_MODE == "no_gui":
             await self.activity(
