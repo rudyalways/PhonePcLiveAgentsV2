@@ -96,7 +96,8 @@ Narration: **10–20 seconds** spoken Chinese per slide (~45–90 汉字).
 - **Default light reading theme** (warm paper): bg `#f7f4ef`, text `#1c1917`, muted `#57534e`, accent teal `#0f766e` or clear blue `#1d4ed8` — high contrast, calm, no neon
 - Optional soft dark only when topic fits night/cinema; still AA+ contrast
 - Generous padding, sparse bullets, no cluttered card grids / purple glow / emoji chrome
-- Bottom bar: 讲解 + 播放/暂停 + 静音 + model status + `主题 i/N` counter + progress dots
+- Bottom bar: **上一页 / 下一页** + 讲解 + 播放/暂停 + 静音 + model status + `主题 i/N` counter + progress dots (dots clickable)
+- Keyboard: ← / → for prev / next; human nav pauses auto-play until 播放
 - Deck CSS/UI inline; **allowed network use**: first-time download of in-browser Chinese TTS runtime + model weights (then cache locally)
 
 #### Auto-explain — download model → run locally in the page
@@ -116,6 +117,16 @@ Narration: **10–20 seconds** spoken Chinese per slide (~45–90 汉字).
 | Mute / TTS unavailable | Timer ≈ `max(8s, 0.35s × chars/2)`, cap 20s |
 
 Do **not** start advancing while the model is still downloading. No fixed 10s when TTS is speaking.
+
+#### Human navigation (required)
+
+| Control | Behavior |
+|---|---|
+| 「上一页」 / ← | Previous slide (wrap to last) |
+| 「下一页」 / → | Next slide (wrap to first) |
+| Progress dots | Jump to that slide |
+
+On any human jump: stop current TTS, show that slide’s `#explain`, **pause auto-play** until 播放. Nav must work even while the voice model is still downloading. Auto-play-only decks (no prev/next) are forbidden.
 
 ## Voice behavior (thin)
 

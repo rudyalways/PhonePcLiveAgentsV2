@@ -123,7 +123,16 @@ check(
     "research HTML requires Simplified Chinese",
     "Simplified Chinese" in stamp
     and "zh-CN" in stamp
-    and "播放/暂停" in stamp,
+    and "播放/暂停" in stamp
+    and "上一页" in stamp
+    and "下一页" in stamp,
+)
+check(
+    "research HTML requires human prev/next nav",
+    "D6) Human navigation" in stamp
+    and "data-action=prev" in stamp
+    and "data-action=next" in stamp
+    and "FORBIDDEN: auto-play-only" in stamp,
 )
 check(
     "research HTML format tokens",
