@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
+from aiohttp.client_exceptions import ClientConnectionResetError
 from dotenv import load_dotenv
 
 REPO = Path(__file__).resolve().parent.parent
@@ -2425,6 +2426,70 @@ async def result_poller(app: web.Application) -> None:
         await asyncio.sleep(0.5)
 
 
+class _SessionStart(Exception):
+    """Control-flow signal: session.start handled, carry the new session up."""
+
+    def __init__(self, session: "PhoneSession") -> None:
+        self.session = session
+
+
+async def _dispatch_ws_message(
+    app: web.Application,
+    ws: web.WebSocketResponse,
+    session: "PhoneSession | None",
+    typ: str | None,
+    data: dict[str, Any],
+) -> None:
+    if typ == "session.start":
+        user = str(data.get("user") or "default").strip()
+        secret = str(data.get("auth") or data.get("secret") or "")
+        if AUTH_REQUIRED and load_users() and not verify_user(user, secret):
+            await ws.send_json({"type": "error", "message": "auth failed"})
+            await ws.close()
+            return
+        if not load_users() and AUTH_REQUIRED:
+            logger.warning("No users.json — accepting user=%s without auth", user)
+        session = PhoneSession(ws, user)
+        app["sessions"].add(session)
+        await session.start_qwen()
+        raise _SessionStart(session)
+    if not session:
+        await ws.send_json({"type": "error", "message": "send session.start first"})
+        return
+    if typ == "audio":
+        await session.handle_audio(str(data.get("data") or ""))
+    elif typ == "image":
+        await session.handle_image(str(data.get("data") or ""))
+    elif typ == "control":
+        action = data.get("action")
+        if action == "prompt_manual":
+            await session.handle_manual_prompt(str(data.get("text") or "Describe what you see."))
+        elif action == "work":
+            await session.enqueue_work(str(data.get("task") or ""), source="manual")
+        elif action == "core_status":
+            await session.push_core_status()
+        elif action == "start_core":
+            result = await asyncio.to_thread(start_sutando_core)
+            await session.send({"type": "core_start", **result})
+            await session.push_core_status()
+            await session.activity(
+                "session" if result.get("ok") else "error",
+                result.get("message") or json.dumps(result)[:200],
+            )
+        elif action == "stop_core":
+            result = await asyncio.to_thread(stop_sutando_core)
+            await session.send({"type": "core_stop", **result})
+            await session.push_core_status()
+            await session.activity(
+                "session" if result.get("ok") else "error",
+                result.get("message") or json.dumps(result)[:200],
+            )
+        elif action == "ping":
+            await session.send({"type": "pong", "ts": time.time()})
+    else:
+        await session.send({"type": "error", "message": f"unknown type {typ}"})
+
+
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(max_msg_size=8 * 1024 * 1024)
     await ws.prepare(request)
@@ -2435,6 +2500,17 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             if msg.type != WSMsgType.TEXT:
                 if msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
                     break
+                if msg.type == WSMsgType.BINARY:
+                    # Frames must be TEXT JSON ({"type":"image","data":<b64>}).
+                    # Reply loudly — a binary-sending client otherwise sees
+                    # every frame "succeed" while the agent drops them all.
+                    await ws.send_json(
+                        {
+                            "type": "error",
+                            "message": "binary frames unsupported — send"
+                            ' {"type":"image","data":"<base64 jpeg>"} as text',
+                        }
+                    )
                 continue
             try:
                 data = json.loads(msg.data)
@@ -2442,52 +2518,22 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_json({"type": "error", "message": "invalid json"})
                 continue
             typ = data.get("type")
-            if typ == "session.start":
-                user = str(data.get("user") or "default").strip()
-                secret = str(data.get("auth") or data.get("secret") or "")
-                if AUTH_REQUIRED and load_users() and not verify_user(user, secret):
-                    await ws.send_json({"type": "error", "message": "auth failed"})
-                    await ws.close()
+            try:
+                await _dispatch_ws_message(app, ws, session, typ, data)
+            except _SessionStart as started:
+                session = started.session
+            except (ConnectionResetError, ClientConnectionResetError):
+                # Client transport already closing — nothing to reply to.
+                break
+            except RuntimeError as e:
+                # e.g. "Qwen WS not connected" after upstream drop: tell the
+                # client instead of 500-ing the whole handler (which killed
+                # the connection with an aiohttp server traceback).
+                logger.warning("ws message %s failed: %s", typ, e)
+                try:
+                    await ws.send_json({"type": "error", "message": str(e)[:300]})
+                except Exception:
                     break
-                if not load_users() and AUTH_REQUIRED:
-                    logger.warning("No users.json — accepting user=%s without auth", user)
-                session = PhoneSession(ws, user)
-                app["sessions"].add(session)
-                await session.start_qwen()
-            elif not session:
-                await ws.send_json({"type": "error", "message": "send session.start first"})
-            elif typ == "audio":
-                await session.handle_audio(str(data.get("data") or ""))
-            elif typ == "image":
-                await session.handle_image(str(data.get("data") or ""))
-            elif typ == "control":
-                action = data.get("action")
-                if action == "prompt_manual":
-                    await session.handle_manual_prompt(str(data.get("text") or "Describe what you see."))
-                elif action == "work":
-                    await session.enqueue_work(str(data.get("task") or ""), source="manual")
-                elif action == "core_status":
-                    await session.push_core_status()
-                elif action == "start_core":
-                    result = await asyncio.to_thread(start_sutando_core)
-                    await session.send({"type": "core_start", **result})
-                    await session.push_core_status()
-                    await session.activity(
-                        "session" if result.get("ok") else "error",
-                        result.get("message") or json.dumps(result)[:200],
-                    )
-                elif action == "stop_core":
-                    result = await asyncio.to_thread(stop_sutando_core)
-                    await session.send({"type": "core_stop", **result})
-                    await session.push_core_status()
-                    await session.activity(
-                        "session" if result.get("ok") else "error",
-                        result.get("message") or json.dumps(result)[:200],
-                    )
-                elif action == "ping":
-                    await session.send({"type": "pong", "ts": time.time()})
-            else:
-                await session.send({"type": "error", "message": f"unknown type {typ}"})
     finally:
         if session:
             session._closed = True
