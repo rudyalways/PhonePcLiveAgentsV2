@@ -79,7 +79,7 @@ class FeederStats {
 // MARK: - ScreenCaptureKit Feeder
 
 @available(macOS 12.3, *)
-class ScreenCaptureKitFeeder {
+class ScreenCaptureKitFeeder: NSObject {
     private let config: FeederConfig
     private let stats = FeederStats()
     private var stream: SCStream?
@@ -90,6 +90,7 @@ class ScreenCaptureKitFeeder {
 
     init(config: FeederConfig = .default) {
         self.config = config
+        super.init()
     }
 
     func start() async throws {
@@ -168,11 +169,23 @@ class ScreenCaptureKitFeeder {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
 
-        let session = URLSession(configuration: .default)
+        // The agent uses a self-signed cert (state/server.crt) — accept it
+        // for this localhost-only test tool.
+        let session = URLSession(
+            configuration: .default,
+            delegate: InsecureTLSDelegate(),
+            delegateQueue: nil
+        )
         wsTask = session.webSocketTask(with: request)
         wsTask?.resume()
 
-        print("  WebSocket: connected")
+        // Mandatory handshake — the agent rejects everything until
+        // session.start arrives (see omni-exp-agent.py ws_handler).
+        let start: [String: Any] = ["type": "session.start", "user": "sck-feeder", "auth": ""]
+        let startData = try JSONSerialization.data(withJSONObject: start)
+        try await wsTask?.send(.string(String(data: startData, encoding: .utf8)!))
+
+        print("  WebSocket: connected, session.start sent")
     }
 
     private func sendLatestFrame() async {
@@ -183,8 +196,14 @@ class ScreenCaptureKitFeeder {
         }
 
         do {
-            let message = URLSessionWebSocketTask.Message.data(frameData)
-            try await wsTask.send(message)
+            // The agent accepts only TEXT JSON frames; WS binary is rejected.
+            let payload: [String: Any] = [
+                "type": "image",
+                "mime": "image/jpeg",
+                "data": frameData.base64EncodedString(),
+            ]
+            let json = try JSONSerialization.data(withJSONObject: payload)
+            try await wsTask.send(.string(String(data: json, encoding: .utf8)!))
             stats.recordSuccess(bytes: frameData.count)
 
             if stats.framesSent % 10 == 0 {
@@ -240,6 +259,23 @@ extension ScreenCaptureKitFeeder: SCStreamOutput {
     }
 }
 
+// MARK: - TLS (test-only)
+
+/// Accepts the agent's self-signed localhost certificate. Test-only.
+final class InsecureTLSDelegate: NSObject, URLSessionDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
 // MARK: - Error Types
 
 enum FeederError: Error {
@@ -250,7 +286,6 @@ enum FeederError: Error {
 // MARK: - CLI Entry Point
 
 @available(macOS 12.3, *)
-@main
 struct ScreenCaptureKitFeederCLI {
     static func main() async {
         let args = CommandLine.arguments
@@ -279,13 +314,17 @@ struct ScreenCaptureKitFeederCLI {
 
         let feeder = ScreenCaptureKitFeeder(config: config)
 
-        // Handle shutdown signal
-        signal(SIGINT) { _ in
+        // Handle shutdown signal. A plain signal() C-function-pointer
+        // cannot capture `feeder`; use a DispatchSourceSignal instead.
+        signal(SIGINT, SIG_IGN)
+        let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigSrc.setEventHandler {
             Task {
                 await feeder.stop()
                 exit(0)
             }
         }
+        sigSrc.resume()
 
         do {
             try await feeder.start()
@@ -320,4 +359,13 @@ struct ScreenCaptureKitFeederCLI {
           swift screencapturekit-feeder.swift --fps 2.0
         """)
     }
+}
+
+
+// Script-mode entry point (@main is illegal when the file has top-level code).
+if #available(macOS 12.3, *) {
+    await ScreenCaptureKitFeederCLI.main()
+} else {
+    print("Error: macOS 12.3+ required for ScreenCaptureKit")
+    exit(1)
 }
