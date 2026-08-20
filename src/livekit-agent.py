@@ -681,10 +681,20 @@ class SutandoAgent(Agent):
         """Capture the current screen and describe what's on it."""
         try:
             port = os.environ.get("SCREEN_CAPTURE_PORT", "7900")
+            # /capture requires the shared token (same-origin CSRF guard) —
+            # without it the server answers 403 {"error":"forbidden"} and this
+            # tool reported "Screenshot captured: unknown".
+            token_path = Path.home() / ".config" / "sutando" / "screen-capture-token"
+            try:
+                token = token_path.read_text().strip()
+            except OSError:
+                token = ""
             result = subprocess.run(
                 [
                     "curl",
                     "-s",
+                    "-H",
+                    f"X-Sutando-Capture-Token: {token}",
                     f"http://localhost:{port}/capture",
                 ],
                 timeout=10,
@@ -692,6 +702,8 @@ class SutandoAgent(Agent):
                 text=True,
             )
             data = json.loads(result.stdout)
+            if data.get("status") != "ok":
+                return f"Screen capture failed: {data.get('error', 'unknown')}"
             return f"Screenshot captured: {data.get('path', 'unknown')}"
         except Exception as e:
             return f"Screen capture failed: {e}"
