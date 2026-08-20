@@ -15,7 +15,7 @@ Proves the whole embodied loop on one real example **without touching the live
 
 ```
 intent string
-  → resolver.py   capture via :7845  →  gemini-3-flash-preview
+  → resolver.py   capture via :7900  →  gemini-3-flash-preview
                   (native [y,x] 0-1000 format, thinking off)      [ADR-0001]
   → /tmp/pointer-cmd.json   (IPC: {nx,ny,label,say,ts})
   → pointer-overlay (Swift) screenSaver/click-through window,

@@ -1756,7 +1756,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // User-stopped recordings get the server's 4h cap, not the 600s default (#2279 added ?max; this caller never sent it).
         let maxParam = starting ? "&max=14400" : ""
-        guard let url = URL(string: "http://localhost:7845/capture-video?action=\(action)\(maxParam)") else { return }
+        let capPort = ProcessInfo.processInfo.environment["SCREEN_CAPTURE_PORT"] ?? "7900"
+        guard let url = URL(string: "http://localhost:\(capPort)/capture-video?action=\(action)\(maxParam)") else { return }
         var req = URLRequest(url: url)
         // /capture-video requires a shared token (the server writes it to a 0600
         // file a web page can't read; a browser also can't set a custom header on
@@ -2254,7 +2255,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               let tsv = o["ts"] as? Double, tsv > pointerLastTS else { return }
         pointerLastTS = tsv
         // hide-before-capture: point_at publishes {hide:true} just before it
-        // screenshots, because the :7845 server uses `screencapture` (raw
+        // screenshots, because the :7900 server uses `screencapture` (raw
         // framebuffer, ignores sharingType). Tear the overlay fully off the
         // screen so a stale pointer can't bias the next capture (Codex review,
         // high).

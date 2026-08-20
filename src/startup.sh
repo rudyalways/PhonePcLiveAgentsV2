@@ -531,9 +531,9 @@ if [ "$PERM_OK" -eq 0 ]; then
   echo "    → System Settings → Privacy & Security → Screen & System Audio Recording"
   echo "    → Add the app running this terminal (Terminal.app / iTerm2 / Warp / VS Code / Cursor / etc.)"
   echo "    → Fully Quit the terminal app, then re-open. macOS caches the perm until process restart."
-  if lsof -i :7845 > /dev/null 2>&1; then
-    echo "    → A screen-capture server is already running on :7845 with the old (denied) perm."
-    echo "      Kill it before re-running: lsof -ti:7845 | xargs kill"
+  if lsof -i :"${SCREEN_CAPTURE_PORT:-7900}" > /dev/null 2>&1; then
+    echo "    → A screen-capture server is already running on :${SCREEN_CAPTURE_PORT:-7900} with the old (denied) perm."
+    echo "      Kill it before re-running: lsof -ti:${SCREEN_CAPTURE_PORT:-7900} | xargs kill"
   fi
 else
   echo "  ✓ Screen Recording"
@@ -892,14 +892,18 @@ else
   echo "  ✓ agent API (already running)"
 fi
 
-# 5. Screen capture server (port 7845)
+# 5. Screen capture server (port ${SCREEN_CAPTURE_PORT:-7900} — matches the
+# server's own default; it reads SCREEN_CAPTURE_PORT itself). Historic bug:
+# this block guarded/verified :7845 while the server bound :7900, so every
+# startup spawned a duplicate that died on EADDRINUSE and verify always
+# reported the service down.
 # Skip when Screen Recording perm is missing — otherwise we'd start a server
-# that returns black-PNG denials, which is exactly the stale-7845 state the
+# that returns black-PNG denials, which is exactly the stale-port state the
 # permcheck above warns about.
-reap_wedged_listener 7845 screen-capture
-if ! lsof -i :7845 > /dev/null 2>&1; then
+reap_wedged_listener "${SCREEN_CAPTURE_PORT:-7900}" screen-capture
+if ! lsof -i :"${SCREEN_CAPTURE_PORT:-7900}" > /dev/null 2>&1; then
   if [ "$PERM_OK" -eq 1 ]; then
-    echo "  Starting screen capture (port 7845)..."
+    echo "  Starting screen capture (port ${SCREEN_CAPTURE_PORT:-7900})..."
     python3 src/screen-capture-server.py > "$LOGS_DIR/screen-capture.log" 2>&1 &
     echo "  ✓ screen capture"
   else
@@ -1329,7 +1333,7 @@ echo ""
 # Verify services actually started (wait a moment, then check ports)
 sleep 3
 echo "Verifying services..."
-VERIFY_PORTS="$WEB_CLIENT_PORT:web-client ${DASHBOARD_PORT:-7951}:dashboard ${AGENT_API_PORT:-7950}:agent-api 7845:screen-capture"
+VERIFY_PORTS="$WEB_CLIENT_PORT:web-client ${DASHBOARD_PORT:-7951}:dashboard ${AGENT_API_PORT:-7950}:agent-api ${SCREEN_CAPTURE_PORT:-7900}:screen-capture"
 if [ "${SKIP_VOICE:-}" != "1" ]; then
   VERIFY_PORTS="9900:voice-agent $VERIFY_PORTS"
 fi

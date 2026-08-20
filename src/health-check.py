@@ -2321,18 +2321,23 @@ def fix_launchd(label: str) -> str:
     return f"failed to restart {label}: {result.stderr.strip()}"
 
 
+def _screen_capture_port() -> int:
+    """Screen-capture-server port — same env override + default the server uses."""
+    return int(os.environ.get("SCREEN_CAPTURE_PORT", "7900"))
+
+
 def fix_screen_capture() -> str:
-    """Restart the screen-capture server (:7845), guarded like startup.sh.
+    """Restart the screen-capture server (SCREEN_CAPTURE_PORT, default :7900), guarded like startup.sh.
 
     Order matters: reap any existing listener first (a dead-perm or wedged
     server holds the port and would block the new bind), then re-verify
     Screen Recording with a real capture — an all-black denial PNG
     compresses to ~43KB at 5K resolution, so <5000 bytes means the
     permission is missing or stale. Starting a server without the perm
-    would recreate the stale-:7845 state startup.sh's PERM_OK gate exists
+    would recreate the stale-port state startup.sh's PERM_OK gate exists
     to prevent: every /capture answered with a black-PNG denial.
     """
-    subprocess.run("/usr/sbin/lsof -ti:7845 | xargs kill 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run(f"/usr/sbin/lsof -ti:{_screen_capture_port()} | xargs kill 2>/dev/null", shell=True, capture_output=True)
     probe = Path("/tmp/sutando-healthfix-permcheck.png")
     subprocess.run(["/usr/sbin/screencapture", "-x", str(probe)], capture_output=True)
     size = probe.stat().st_size if probe.exists() else 0
@@ -2346,8 +2351,8 @@ def fix_screen_capture() -> str:
                      stdout=open(str(log_path), "a"), stderr=subprocess.STDOUT,
                      start_new_session=True)
     time.sleep(1.5)
-    after = check_port(7845, "screen-capture")
-    return "restarted on :7845" if after["status"] == "ok" else (
+    after = check_port(_screen_capture_port(), "screen-capture")
+    return f"restarted on :{_screen_capture_port()}" if after["status"] == "ok" else (
         f"restart attempted but port check says {after['status']} — see {log_path}")
 
 
@@ -5377,7 +5382,7 @@ def run_all_checks() -> list[dict]:
     checks.append(web_check)
 
     # Optional services (downgrade missing to warning, not failure)
-    for port, name in [(7950, "agent-api"), (7951, "dashboard"), (7900, "screen-capture")]:
+    for port, name in [(7950, "agent-api"), (7951, "dashboard"), (_screen_capture_port(), "screen-capture")]:
         c = check_port(port, name, probe=True)
         if c["status"] == "down":
             c["status"] = "warn"
@@ -7120,7 +7125,7 @@ def main():
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
 
-    # Screen-capture (:7845) is optional, so a down server is downgraded to
+    # Screen-capture (:7900) is optional, so a down server is downgraded to
     # warn and never enters `issues` — the fix loop above can't reach it. An
     # owner running --fix still wants it back when the Screen Recording
     # permission is in place, so dispatch off `checks` here. Runs even when

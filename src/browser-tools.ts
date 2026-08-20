@@ -543,7 +543,7 @@ export const pointAtTool: ToolDefinition = {
 		if (!query?.trim()) return { error: 'point_at needs a query (what to point at)' };
 		try {
 			// 0. Clear any overlay still on screen from a previous point_at
-			// before screenshotting. The :7845 server shells out to
+			// before screenshotting. The :7900 server shells out to
 			// `screencapture`, which grabs the raw framebuffer and ignores
 			// NSWindow.sharingType — so the only way to keep a stale pointer
 			// out of the shot (and out of the model's input, which would bias
@@ -553,7 +553,7 @@ export const pointAtTool: ToolDefinition = {
 			// ~8s capture + ~60s model budget below.
 			publishPointerCmd({ hide: true, ts: Date.now() / 1000 });
 			await new Promise(r => setTimeout(r, 250));
-			// 1. capture the main display (single-display scope guard) via :7845.
+			// 1. capture the main display (single-display scope guard) via :7900.
 			// Timeout-bounded — point_at is on the sub-second inline lane and must
 			// never hang it if the capture server is wedged.
 			const _capTok2 = readCaptureToken();
