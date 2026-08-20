@@ -9,7 +9,7 @@ Usage:
     from screencapturekit_feeder_wrapper import ScreenCaptureKitFeeder
 
     async def test():
-        feeder = ScreenCaptureKitFeeder(fps=0.2, omni_port=7090)
+        feeder = ScreenCaptureKitFeeder(fps=0.5, omni_port=7090)
         await feeder.start()
         await asyncio.sleep(30)  # Let it run
         stats = await feeder.stop()
@@ -17,8 +17,10 @@ Usage:
 """
 
 import asyncio
+import queue
 import signal
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -37,19 +39,23 @@ class FeederStats:
         self.total_mb = 0.0
         self._parse(output)
 
-    def _parse(self, output: str):
+    def _parse(self, output: str) -> None:
         """Parse statistics from Swift feeder output."""
         for line in output.splitlines():
-            if "Frames sent:" in line:
-                self.frames_sent = int(line.split(":")[-1].strip())
-            elif "Frames failed:" in line:
-                self.frames_failed = int(line.split(":")[-1].strip())
-            elif "Duration:" in line:
-                self.duration_s = float(line.split(":")[1].strip().rstrip("s"))
-            elif "Average FPS:" in line:
-                self.avg_fps = float(line.split(":")[-1].strip())
-            elif "Total data:" in line:
-                self.total_mb = float(line.split(":")[1].strip().rstrip("MB"))
+            try:
+                if "Frames sent:" in line:
+                    self.frames_sent = int(line.split(":")[-1].strip())
+                elif "Frames failed:" in line:
+                    self.frames_failed = int(line.split(":")[-1].strip())
+                elif "Duration:" in line:
+                    self.duration_s = float(line.split(":")[1].strip().rstrip("s"))
+                elif "Average FPS:" in line:
+                    self.avg_fps = float(line.split(":")[-1].strip())
+                elif "Total data:" in line:
+                    self.total_mb = float(line.split(":")[1].strip().rstrip("MB"))
+            except (ValueError, IndexError):
+                # malformed line — skip rather than crash
+                pass
 
     def __str__(self) -> str:
         return (
@@ -80,7 +86,7 @@ class ScreenCaptureKitFeeder:
 
         Args:
             fps: Frame rate (default 0.5 = 1 frame every 2 seconds)
-            omni_host: Omni-exp agent hostname
+            omni_host: Omni-exp agent hostname (passed as --host to Swift)
             omni_port: Omni-exp agent port
         """
         self.fps = fps
@@ -88,6 +94,8 @@ class ScreenCaptureKitFeeder:
         self.omni_port = omni_port
         self._process: Optional[subprocess.Popen] = None
         self._output_lines: list[str] = []
+        self._drain_queue: queue.Queue = queue.Queue()
+        self._drain_thread: Optional[threading.Thread] = None
 
     async def start(self) -> None:
         """Start the screen capture feeder."""
@@ -111,14 +119,13 @@ class ScreenCaptureKitFeeder:
                 "  xcode-select --install"
             )
 
-        # Start the Swift feeder subprocess
+        # Start the Swift feeder subprocess. Pass --host so omni_host is honoured.
         cmd = [
             "swift",
             str(SWIFT_FEEDER),
-            "--fps",
-            str(self.fps),
-            "--port",
-            str(self.omni_port),
+            "--fps", str(self.fps),
+            "--port", str(self.omni_port),
+            "--host", self.omni_host,
         ]
 
         self._process = subprocess.Popen(
@@ -129,60 +136,104 @@ class ScreenCaptureKitFeeder:
             bufsize=1,
         )
 
+        # Background thread drains stdout continuously so the pipe never
+        # fills (~64KB) and stalls Swift's capture loop.
+        self._drain_thread = threading.Thread(
+            target=self._drain_stdout, daemon=True
+        )
+        self._drain_thread.start()
+
         # Wait for startup confirmation
         await self._wait_for_startup()
 
-    async def _wait_for_startup(self, timeout_s: float = 10.0) -> None:
-        """Wait for the feeder to report it has started."""
-        if not self._process or not self._process.stdout:
+    def _drain_stdout(self) -> None:
+        """Continuously read stdout lines into the queue (runs in a thread)."""
+        assert self._process and self._process.stdout
+        for line in self._process.stdout:
+            self._drain_queue.put(line.rstrip())
+
+    async def _wait_for_startup(self, timeout_s: float = 30.0) -> None:
+        """Wait for the feeder to report it has started.
+
+        Timeout raised to 30s because `swift <file>` compiles on first run
+        (~2s warm) and Screen Recording permission prompts may add delay.
+        On timeout the subprocess is killed to prevent a leaked process.
+        """
+        if not self._process:
             raise RuntimeError("Process not started")
 
         deadline = asyncio.get_event_loop().time() + timeout_s
+        try:
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    line = self._drain_queue.get_nowait()
+                except queue.Empty:
+                    if self._process.poll() is not None:
+                        raise RuntimeError("Feeder process exited during startup")
+                    await asyncio.sleep(0.1)
+                    continue
 
-        while asyncio.get_event_loop().time() < deadline:
-            line = await asyncio.get_event_loop().run_in_executor(
-                None, self._process.stdout.readline
-            )
+                self._output_lines.append(line)
+                print(line)
+                if "Capture started" in line:
+                    return
 
-            if not line:
-                if self._process.poll() is not None:
-                    raise RuntimeError("Feeder process exited during startup")
-                await asyncio.sleep(0.1)
-                continue
-
-            self._output_lines.append(line.rstrip())
-            print(line.rstrip())
-
-            if "Capture started" in line:
-                return
-
-        raise TimeoutError("Feeder did not start within timeout")
+            raise TimeoutError("Feeder did not start within timeout")
+        except (TimeoutError, RuntimeError):
+            if self._process and self._process.poll() is None:
+                self._process.kill()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, self._process.wait
+                        ),
+                        timeout=3.0,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            raise
 
     async def stop(self) -> FeederStats:
         """Stop the feeder and return statistics."""
         if not self._process:
             return FeederStats("")
 
-        # Send SIGINT (Ctrl+C) to trigger graceful shutdown
-        self._process.send_signal(signal.SIGINT)
+        # Flush any queued lines captured so far
+        while True:
+            try:
+                self._output_lines.append(self._drain_queue.get_nowait())
+            except queue.Empty:
+                break
 
-        # Collect remaining output
+        # Send SIGINT (Ctrl+C) to trigger graceful shutdown + stat printing
         try:
-            stdout, _ = await asyncio.wait_for(
+            self._process.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            pass  # already dead
+
+        # Wait for process to exit, collecting final output
+        try:
+            await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
-                    None, self._process.communicate
+                    None, self._process.wait
                 ),
-                timeout=5.0,
+                timeout=8.0,
             )
-            if stdout:
-                self._output_lines.append(stdout)
         except asyncio.TimeoutError:
             self._process.kill()
             await asyncio.get_event_loop().run_in_executor(
                 None, self._process.wait
             )
 
+        # Drain any remaining lines from the queue after process exit
+        while True:
+            try:
+                self._output_lines.append(self._drain_queue.get_nowait())
+            except queue.Empty:
+                break
+
         output = "\n".join(self._output_lines)
+        self._process = None
         return FeederStats(output)
 
 
@@ -190,16 +241,19 @@ async def main():
     """Example usage."""
     fps = 0.5
     port = 7090
+    host = "localhost"
 
     import sys
     if len(sys.argv) > 1:
         fps = float(sys.argv[1])
     if len(sys.argv) > 2:
         port = int(sys.argv[2])
+    if len(sys.argv) > 3:
+        host = sys.argv[3]
 
-    print(f"Starting ScreenCaptureKit feeder at {fps} fps...")
+    print(f"Starting ScreenCaptureKit feeder at {fps} fps → {host}:{port}...")
 
-    feeder = ScreenCaptureKitFeeder(fps=fps, omni_port=port)
+    feeder = ScreenCaptureKitFeeder(fps=fps, omni_port=port, omni_host=host)
 
     try:
         await feeder.start()

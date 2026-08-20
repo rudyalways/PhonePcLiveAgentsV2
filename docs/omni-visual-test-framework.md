@@ -8,7 +8,8 @@ The `OmniVisualTestFeeder` provides:
 - **Synthetic test pattern generation** — no screen capture needed, minimal CPU/energy cost
 - **Real screenshot capture** — via screen-capture-server for integration tests
 - **ScreenCaptureKit capture** — high-performance native capture (macOS 12.3+)
-- **Configurable frame rate** — default 10s interval for cost-effective testing
+- **Video source feeding** — a podcast, a recording, a YouTube URL, or a LiveKit track
+- **Configurable frame rate** — default 2s interval for cost-effective testing
 - **Test control primitives** — wait for N frames, inject single frames, collect statistics
 
 ## Components
@@ -30,16 +31,27 @@ The `OmniVisualTestFeeder` provides:
 - Zero disk I/O (direct memory streaming)
 - **Best for performance-critical tests**
 
-### 3. Example Tests
-**File**: `tests/omni-visual-test-feeder-example.test.py`
+### 3. Video Source Feeder
+**File**: `tests/visual_feeder/video_source_feeder.py`
 
-Demonstrates usage patterns for both feeders.
+Feeds real, changing video content instead of synthetic patterns:
+- **file** — local video file decoded by ffmpeg
+- **url** — remote / YouTube / podcast link resolved by yt-dlp
+- **livekit** — subscribes to a published video track in a LiveKit room
+
+Delivery reuses `OmniVisualTestFeeder.inject_single_frame`, so the wire
+protocol has one implementation. See `docs/omni-visual-video-feeder.md`.
+
+### 4. Example Tests
+**Files**: `tests/omni-visual-test-feeder-example.test.py`, `tests/omni-visual-video-feeder.test.py`
+
+Demonstrates usage patterns for all feeders.
 
 ## Location
 
-- **Implementation**: `tests/visual_feeder/omni_visual_test_feeder.py`
-- **Example tests**: `tests/omni-visual-test-feeder-example.test.py`
-- **Documentation**: this file
+- **Implementation**: `tests/visual_feeder/*`
+- **Example tests**: `tests/omni-visual-test-feeder-example.test.py`, `tests/omni-visual-video-feeder.test.py`
+- **Documentation**: this file + `docs/omni-visual-video-feeder.md`
 
 ## Why a Separate Component?
 
