@@ -72,6 +72,9 @@ class QwenOmniSession:
         self._audio_sent = False
         self._send_lock = asyncio.Lock()
         self.responding = False
+        # Set when a response.create is needed but the server still has an active
+        # response (common: tool output arrives ~ms before response.done).
+        self._pending_response_create = False
 
     @property
     def connected(self) -> bool:
@@ -160,27 +163,54 @@ class QwenOmniSession:
             }
         )
 
-    async def send_function_output(self, call_id: str, output: dict[str, Any] | str) -> None:
-        body = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
-        logger.info("TOOL_OUTPUT call_id=%s output=%s", call_id, body)
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "event_id": _eid("tool_out"),
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": body,
-                },
-            }
-        )
+    async def _send_response_create_unlocked(self, *, event_id: str) -> None:
         await self._send(
             {
                 "type": "response.create",
-                "event_id": _eid("response_after_tool"),
+                "event_id": event_id,
                 "response": {},
             }
         )
+
+    async def _request_response_create(self, *, event_id: str) -> None:
+        """Create a response, or defer until response.done if one is already active."""
+        async with self._send_lock:
+            if self.responding:
+                self._pending_response_create = True
+                logger.info(
+                    "Defer response.create (%s) — server still has an active response",
+                    event_id,
+                )
+                return
+            self._pending_response_create = False
+            await self._send_response_create_unlocked(event_id=event_id)
+
+    async def send_function_output(self, call_id: str, output: dict[str, Any] | str) -> None:
+        body = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+        logger.info("TOOL_OUTPUT call_id=%s output=%s", call_id, body)
+        async with self._send_lock:
+            await self._send(
+                {
+                    "type": "conversation.item.create",
+                    "event_id": _eid("tool_out"),
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": body,
+                    },
+                }
+            )
+            if self.responding:
+                # Tool args often finish before the tool-calling response.done —
+                # creating now yields: Conversation already has an active response.
+                self._pending_response_create = True
+                logger.info(
+                    "TOOL_OUTPUT deferred response.create until response.done call_id=%s",
+                    call_id,
+                )
+                return
+            self._pending_response_create = False
+            await self._send_response_create_unlocked(event_id=_eid("response_after_tool"))
 
     async def _read_loop(self) -> None:
         assert self._ws
@@ -207,6 +237,31 @@ class QwenOmniSession:
             self.responding = True
         elif et == "response.done":
             self.responding = False
+            # Flush tool-follow-up (or other deferred) response.create now that idle.
+            if self._pending_response_create:
+                self._pending_response_create = False
+                try:
+                    async with self._send_lock:
+                        if not self.responding:
+                            await self._send_response_create_unlocked(
+                                event_id=_eid("response_after_done")
+                            )
+                        else:
+                            self._pending_response_create = True
+                except Exception as e:
+                    logger.warning("deferred response.create failed: %s", e)
+        elif et == "error":
+            err = data.get("error") if isinstance(data.get("error"), dict) else {}
+            msg = str((err or {}).get("message") or data.get("message") or data)
+            if "active response" in msg.lower():
+                # Server rejected a create — clear local flag; try cancel so we recover.
+                self.responding = True  # server says one is active
+                self._pending_response_create = True
+                try:
+                    await self.cancel_response()
+                except Exception as e:
+                    logger.warning("cancel after active-response error failed: %s", e)
+                    self.responding = False
         elif et == "input_audio_buffer.speech_started" and self.responding:
             # Barge-in
             try:
@@ -270,6 +325,13 @@ class QwenOmniSession:
     async def prompt_turn(self, text: str) -> None:
         """PromptTrigger: nudge model with text; ensure audio exists; force response."""
         silence = b"\x00\x00" * 1600
+        # If a response is already active, cancel first so response.create is legal.
+        if self.responding:
+            try:
+                await self.cancel_response()
+            except Exception as e:
+                logger.warning("cancel before prompt_turn failed: %s", e)
+            await asyncio.sleep(0.05)
         async with self._send_lock:
             if not self._audio_sent:
                 await self._append_audio_unlocked(silence)
@@ -285,4 +347,9 @@ class QwenOmniSession:
                     },
                 }
             )
-            await self._send({"type": "response.create", "event_id": _eid("resp")})
+            if self.responding:
+                self._pending_response_create = True
+                logger.info("prompt_turn deferred response.create — still responding")
+                return
+            self._pending_response_create = False
+            await self._send_response_create_unlocked(event_id=_eid("resp"))

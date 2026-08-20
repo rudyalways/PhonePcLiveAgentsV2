@@ -84,6 +84,49 @@ class TestImageAudioOrder(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_tool_output_defers_response_create_while_responding(self):
+        async def run():
+            s = QwenOmniSession(api_key="k", on_event=lambda _e: None, instructions="x")
+            sent: list[dict] = []
+
+            async def capture(payload):
+                sent.append(payload)
+
+            s._send = capture  # type: ignore[method-assign]
+            s.responding = True
+            await s.send_function_output("call_1", {"ok": True})
+            types = [p["type"] for p in sent]
+            self.assertEqual(types, ["conversation.item.create"])
+            self.assertTrue(s._pending_response_create)
+
+            # response.done should flush the deferred create
+            await s._dispatch({"type": "response.done"})
+            types2 = [p["type"] for p in sent]
+            self.assertIn("response.create", types2)
+            self.assertFalse(s._pending_response_create)
+            self.assertFalse(s.responding)
+
+        asyncio.run(run())
+
+    def test_tool_output_creates_immediately_when_idle(self):
+        async def run():
+            s = QwenOmniSession(api_key="k", on_event=lambda _e: None, instructions="x")
+            sent: list[str] = []
+
+            async def capture(payload):
+                sent.append(payload["type"])
+
+            s._send = capture  # type: ignore[method-assign]
+            s.responding = False
+            await s.send_function_output("call_2", {"ok": True})
+            self.assertEqual(
+                sent,
+                ["conversation.item.create", "response.create"],
+            )
+            self.assertFalse(s._pending_response_create)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

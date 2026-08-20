@@ -1689,8 +1689,27 @@ class PhoneSession:
                     # Fallback if provider never emits *.arguments.done
                     await self._handle_tool_call(data)
         elif et == "error":
-            await self.send({"type": "error", "message": json.dumps(data.get("error", data))})
-            await self.activity("error", "Qwen error", detail=str(data.get("error", data))[:200])
+            err_obj = data.get("error", data)
+            err_msg = (
+                str(err_obj.get("message") or err_obj)
+                if isinstance(err_obj, dict)
+                else str(err_obj)
+            )
+            await self.send({"type": "error", "message": json.dumps(err_obj, ensure_ascii=False)})
+            await self.activity("error", "Qwen error", detail=err_msg[:200])
+            # "Conversation already has an active response" — unlock TurnGate so
+            # speak-queue / scene prompts are not stuck busy forever.
+            if "active response" in err_msg.lower():
+                self.gate.end_response()
+                self._pending_prompt_reason = None
+                await self.activity(
+                    "work",
+                    f"{self._turn_tag()} Recovered from active-response conflict",
+                )
+                try:
+                    await self.drain_speak_queue()
+                except Exception as e:
+                    await self.activity("error", f"speak drain after conflict: {e}")
 
     async def _handle_tool_call(self, data: dict[str, Any]) -> None:
         call_id, name, arguments = _extract_function_call(data)
