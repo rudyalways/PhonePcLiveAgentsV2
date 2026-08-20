@@ -60,22 +60,17 @@ lsof -i :7900
 
 ## Best Practices
 
-### 1. Always Use Context Managers (When Available)
+### 1. Use try/finally for Cleanup
 ```python
-async with ScreenCaptureKitFeeder(fps=0.5) as feeder:
-    await asyncio.sleep(30)
-    # Automatically stops on exit
-```
-
-### 2. Use try/finally for Cleanup
-```python
-feeder = ScreenCaptureKitFeeder()
+feeder = OmniVisualTestFeeder(mode='synthetic')
 try:
     await feeder.start()
     # ... test code ...
 finally:
     await feeder.stop()  # Always runs, even on exception
 ```
+
+Note: `async with` context manager syntax is not implemented. Always use `try/finally`.
 
 ### 3. Set Timeouts on Tests
 ```python
