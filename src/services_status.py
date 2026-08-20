@@ -223,7 +223,7 @@ def service_registry() -> list[dict]:
     the services shown in the dashboard of Sutando-desktop"). Ports + pgrep
     patterns mirror `src/health-check.py` (the detection source of truth):
     voice-agent :9900, web-client :8080, conversation-server :3100,
-    screen-capture :7845, credential-proxy :7846; gateway + bridges are pgrep'd
+    screen-capture :7900 (SCREEN_CAPTURE_PORT), credential-proxy :7846; gateway + bridges are pgrep'd
     (no fixed port). A service not running reports `offline` (correct — the UI
     shows it greyed), so listing all is safe on hosts that run only some."""
     host = _host_label()
@@ -248,7 +248,7 @@ def service_registry() -> list[dict]:
         {"id": "conversation-server", "name": "Phone",
          "probe": ("port", 3100)},
         {"id": "screen-capture", "name": "Screen Capture",
-         "probe": ("port", 7845)},
+         "probe": ("port", int(os.environ.get("SCREEN_CAPTURE_PORT", "7900")))},
         {"id": "credential-proxy", "name": "Credential Proxy",
          "probe": ("port", 7846)},
         # `$`-anchored, like the gateway row above. An UNANCHORED pattern also

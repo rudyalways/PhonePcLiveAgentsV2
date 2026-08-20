@@ -2,7 +2,7 @@
 """Pointer Teacher tracer — RESOLVER.
 Intent string -> on-screen Target, written to the IPC command file.
 
-Slice proven by the grill POCs: capture (:7845) -> gemini-3-flash-preview
+Slice proven by the grill POCs: capture (:7900) -> gemini-3-flash-preview
 (native [y,x] 0-1000 format, thinking off) -> normalized point + spoken line.
 AX-first is the documented next layer (open item #3) — vision-only here, which
 is the path the POC actually proved.
@@ -35,11 +35,12 @@ for line in open(os.path.expanduser("~/Documents/GitHub/sutando/.env"),
         key = line.split("=", 1)[1].strip().strip('"').strip("'"); break
 key or die("no GEMINI_API_KEY")
 
-# 1. capture main display via the production :7845 server
+# 1. capture main display via the production screen-capture server
 t0 = time.time()
 _tok_path = os.path.expanduser("~/.config/sutando/screen-capture-token")
 _cap_tok = open(_tok_path).read().strip() if os.path.exists(_tok_path) else None
-_cap_req = urllib.request.Request("http://localhost:7845/capture?display=1")
+_cap_port = os.environ.get("SCREEN_CAPTURE_PORT", "7900")
+_cap_req = urllib.request.Request(f"http://localhost:{_cap_port}/capture?display=1")
 if _cap_tok:
     _cap_req.add_header("X-Sutando-Capture-Token", _cap_tok)
 cap = json.load(urllib.request.urlopen(_cap_req, timeout=8))

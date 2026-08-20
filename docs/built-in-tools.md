@@ -9,9 +9,9 @@ gws calendar +agenda --week              # this week
 gws calendar +agenda --days 7 --format json   # next 7 days, JSON for parsing
 ```
 
-**Screen capture** — see what's on the user's screen. The screen-capture server runs on port 7845 (started by `src/startup.sh`):
+**Screen capture** — see what's on the user's screen. The screen-capture server runs on port 7900 (SCREEN_CAPTURE_PORT) (started by `src/startup.sh`):
 ```bash
-curl -s http://localhost:7845/capture | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])'
+curl -s http://localhost:7900/capture | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])'
 # Multi-display: add ?all=true to capture every display, or ?display=N for a specific one.
 ```
 Then use the Read tool on the returned path to view the screenshot. Use this for any screen-related question: "what am I looking at", "help me with this", "what's on my screen", etc.

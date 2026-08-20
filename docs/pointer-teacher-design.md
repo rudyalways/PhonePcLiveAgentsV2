@@ -21,7 +21,7 @@ Clicky's soul is not Q&A — it is *teaching happens while you work, in the real
 | Clicky piece | Sutando home | Action |
 |---|---|---|
 | Push-to-talk | Always-on `bodhi` VoiceSession + a dedicated arming hotkey | Reuse; add hotkey gate |
-| Screenshot | `:7845` capture server | Reuse |
+| Screenshot | `:7900` capture server | Reuse |
 | `[POINT]` brain | **new `point_at` inline tool** | AX-first (via `macos-use`) → `gemini-3-flash-preview` native-format fallback |
 | TTS | Voice agent already speaks | Reuse |
 | `OverlayWindow` flight | Extend `src/Sutando/main.swift` `hudWindow` (already `.screenSaver`, click-through, all-spaces) with a SwiftUI triangle + bezier flight | Port rendering only; drive via local IPC from `point_at` |
@@ -53,7 +53,7 @@ The tracer (`pointer-teacher-tracer/`) proved the whole embodied loop. It is now
 | `say` via `say(1)` | Voice agent narrates — `point_at` returns `say` + an instruction forcing Gemini to speak it | ✅ done |
 | Standalone binary launched from agent shell (could not reach the GUI session) | Runs inside `Sutando.app`'s real menubar GUI session — **this is the fix for the "I didn't see any pointer" visibility problem** | ✅ done |
 
-End-to-end: voice/utterance → `point_at(query)` → capture `:7845` → `gemini-3-flash-preview` → `state/pointer-cmd.json` → `Sutando.app` flies the triangle → voice speaks the `say` line.
+End-to-end: voice/utterance → `point_at(query)` → capture `:7900` → `gemini-3-flash-preview` → `state/pointer-cmd.json` → `Sutando.app` flies the triangle → voice speaks the `say` line.
 
 **Invocation (v1 simplification).** The decision log called for a hotkey gate. In practice the always-on `bodhi` voice agent already provides the gesture, and the privacy property the hotkey was protecting ("screen captured only on the gesture") already holds — `point_at` captures *only* when invoked, never ambiently. So v1 ships **voice-driven** (the tool description triggers it on "where do I…/show me…/point at…/teach me…"); a dedicated arming hotkey stays future scope, not a blocker. Not an ADR — fully reversible (add a `point_teacher` action to `registerHotKey()` later).
 

@@ -56,13 +56,13 @@ export interface VisionSource {
 	capture(): Promise<VisionFrame>;
 }
 
-// --- screen-capture-server (:7845) lazy start ----------------------------
-// The screen source grabs frames from the screen-capture-server on :7845. That
+// --- screen-capture-server (:7900) lazy start ----------------------------
+// The screen source grabs frames from the screen-capture-server on :7900. That
 // server is launched by startup.sh (the OSS menu-bar path) — but NOT by
 // start-cli.sh, which is how the bundled desktop app (ag2-space/ag2space-cinny-
 // desktop) launches the core. So in the bundled app the Watch toggle hit a dead
-// :7845 (connection refused) and silently did nothing, even with Screen Recording
-// granted. Rather than depend on every launch path remembering to start :7845,
+// :7900 (connection refused) and silently did nothing, even with Screen Recording
+// granted. Rather than depend on every launch path remembering to start :7900,
 // the vision pipeline starts it ON DEMAND here: self-healing, works identically
 // in the OSS app and the bundled Tauri app. (First-run macOS Screen Recording
 // prompting via CGRequestScreenCaptureAccess is a documented follow-up — this
@@ -83,7 +83,7 @@ function _portListening(port: number): Promise<boolean> {
 	});
 }
 
-/** Ensure the screen-capture-server is up on :7845, spawning it if absent.
+/** Ensure the screen-capture-server is up on :7900, spawning it if absent.
  *  Reuses a running server (startup.sh's, or a prior lazy spawn); memoizes the
  *  in-flight spawn so concurrent captures don't double-start it. */
 export async function ensureScreenCaptureServer(): Promise<void> {
@@ -112,7 +112,7 @@ export async function ensureScreenCaptureServer(): Promise<void> {
 			if (await _portListening(SCREEN_CAPTURE_PORT)) return;
 			await new Promise((r) => setTimeout(r, 200));
 		}
-		throw new Error('screen-capture-server did not come up on :7845 within 8s');
+		throw new Error(`screen-capture-server did not come up on :${SCREEN_CAPTURE_PORT} within 8s`);
 	})();
 	_screenCaptureStarting = start;
 	try {
@@ -122,7 +122,7 @@ export async function ensureScreenCaptureServer(): Promise<void> {
 		// dedupe a CONCURRENT spawn, not to cache a completed one. Memoizing the
 		// resolved promise would make a later call short-circuit past the spawn even
 		// after the detached server has died/crashed — the port check above would
-		// see :7845 down but this guard would return the stale "up" promise, leaving
+		// see :7900 down but this guard would return the stale "up" promise, leaving
 		// Watch connection-refused until the whole voice-agent restarts (review P1 on
 		// 0589a18). Clearing here means the next capture re-checks the port and
 		// re-spawns if the server is gone — true self-healing.

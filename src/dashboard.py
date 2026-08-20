@@ -686,7 +686,7 @@ def render_dashboard() -> str:
 <a href="http://localhost:8080" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Voice UI :8080</a>
 <a href="http://localhost:7843" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Task API :7843</a>
 <a href="http://localhost:7844" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Dashboard :7844</a>
-<a href="http://localhost:7845" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Screen Capture :7845</a>
+<a href="http://localhost:7900" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Screen Capture :7900</a>
 <a href="/notes-ui" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Notes Browser</a>
 <a href="https://github.com/sonichi/sutando" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">GitHub</a>
 <a href="https://sutando.ai" target="_blank" rel="noopener noreferrer" onclick="openQuickLink(event,this)">Website</a>
