@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Sutando Omni</title>
+<script data-hls-preload="1" src="https://unpkg.com/hls.js@1.5.12/dist/hls.min.js" async defer></script>
 <style>
   :root {
     --ink: #e8e6e1;
@@ -103,6 +104,11 @@
     font-family: ui-sans-serif, system-ui, sans-serif;
   }
   #connect-btn { width: 100%; background: var(--accent); color: #1a140c; }
+  #source-select { display: flex; gap: 6px; margin: 14px 0 12px; flex-wrap: wrap; }
+  .src-btn { font-size: 13px; padding: 5px 10px; border-radius: 6px; background: rgba(255,255,255,0.06); color: var(--muted); cursor: pointer; border: 1px solid transparent; }
+  .src-btn.on { background: rgba(196,165,116,0.22); color: var(--ink); border-color: rgba(196,165,116,0.5); }
+  #source-url, #source-file, #loop-wrap { width: 100%; margin-bottom: 8px; color: var(--ink); font-size: 14px; }
+  #loop-wrap { display: none; font-size: 13px; color: var(--muted); margin-top: 2px; }
   #login-error { color: #ffb4a8; font-size: 13px; min-height: 1.2em; margin-top: 8px; }
   #bar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 3;
@@ -278,8 +284,19 @@
   </div>
 </div>
 <div id="login">
+  <input type="hidden" id="source-mode" value="live" />
   <h1>Omni</h1>
   <p>Camera-first guide. Voice when you speak; scene changes can prompt quietly.</p>
+  <div id="source-select">
+    <label class="src-btn on" data-mode="live">Live</label>
+    <label class="src-btn" data-mode="file">File</label>
+    <label class="src-btn" data-mode="url">URL</label>
+    <label class="src-btn" data-mode="stream">Stream</label>
+    <label class="src-btn" data-mode="demo">Demo reel</label>
+  </div>
+  <input id="source-file" type="file" accept="video/*" style="display:none" />
+  <input id="source-url" type="text" placeholder="Video URL (.mp4 / .m3u8)…" style="display:none" autocomplete="off" />
+  <label id="loop-wrap" style="display:none"><input type="checkbox" id="source-loop" /> Loop</label>
   <input id="user" type="text" placeholder="Username" autocomplete="username" />
   <input id="secret" type="password" placeholder="Password" autocomplete="current-password" />
   <button id="connect-btn" type="button">Start camera &amp; connect</button>
@@ -334,6 +351,15 @@ const chipTrigger = document.getElementById("chip-trigger");
 const chipWork = document.getElementById("chip-work");
 const chipCore = document.getElementById("chip-core");
 const coreBtn = document.getElementById("core-btn");
+const sourceMode = document.getElementById("source-mode");
+const sourceFile = document.getElementById("source-file");
+const sourceUrl = document.getElementById("source-url");
+const sourceLoop = document.getElementById("source-loop");
+const loopWrap = document.getElementById("loop-wrap");
+const connectLabel = document.getElementById("connect-btn");
+const micBtnEl = document.getElementById("mic-btn");
+let inputMode = "live"; // live | file | url | stream | demo
+let hlsInstance = null;  // hls.js instance, created only when a live stream is played
 
 let ws = null;
 let coreAlive = false;
@@ -352,6 +378,39 @@ let frameTimer = null;
 let playTime = 0;
 let sessionModel = "";
 let lastAsr = "";
+let videoMediaElNode = null; // createMediaElementSource node, built once in video modes
+let isCamera = true;        // false when playing a file/url/stream/demo
+let videoAudioOn = true;    // for video modes: always true until user pauses the video
+
+// Source selector
+document.querySelectorAll(".src-btn").forEach((el) => {
+  el.addEventListener("click", () => {
+    document.querySelectorAll(".src-btn").forEach(b => b.classList.remove("on"));
+    el.classList.add("on");
+    inputMode = el.dataset.mode || "live";
+    sourceMode.value = inputMode;
+    sourceFile.style.display = inputMode === "file" ? "" : "none";
+    sourceUrl.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
+    loopWrap.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
+    if (inputMode === "demo") {
+      sourceUrl.value = location.origin + "/omni-demo/omni-tasks-demo.mp4";
+      sourceLoop.checked = true;
+      sourceUrl.style.display = "none";
+      loopWrap.style.display = "none";
+    }
+    isCamera = inputMode === "live";
+    connectLabel.textContent = inputMode === "live"
+      ? "Start camera & connect"
+      : inputMode === "file"
+        ? "Start video & connect"
+        : "Connect";
+  });
+});
+// Live stream default: loop on
+sourceUrl.addEventListener("input", () => {
+  const v = sourceUrl.value.trim().toLowerCase();
+  if (v.endsWith(".m3u8")) { sourceLoop.checked = true; loopWrap.style.display = ""; }
+});
 
 const params = new URLSearchParams(location.search);
 if (params.get("user")) document.getElementById("user").value = params.get("user");
@@ -798,24 +857,61 @@ function playPcm24kBase64(b64) {
 }
 
 async function startMedia() {
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true },
-    video: {
-      facingMode: { ideal: facing },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-    },
-  });
-  cam.srcObject = stream;
-  cam.classList.toggle("mirror", facing === "user");
-  await cam.play().catch(() => {});
+  // Tear down prior state
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+  processor = null; sourceNode = null; videoMediaElNode = null;
+  cam.srcObject = null; cam.src = "";
+  cam.classList.remove("mirror");
 
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  sourceNode = audioCtx.createMediaStreamSource(stream);
+
+  if (isCamera) {
+    // ── camera mode ──────────────────────────────────────────────────
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: {
+        facingMode: { ideal: facing },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    });
+    cam.srcObject = stream;
+    cam.classList.toggle("mirror", facing === "user");
+    await cam.play().catch(() => {});
+    sourceNode = audioCtx.createMediaStreamSource(stream);
+    buildInputGraph();
+    setChip(chipVoice, micOn ? "Mic: on" : "Mic: off", micOn ? "on" : "");
+    micBtnEl.style.display = "";
+  } else {
+    // ── file / url / stream / demo ──────────────────────────────────
+    micBtnEl.style.display = "none";
+    const src = inputMode === "file" && sourceFile.files?.[0]
+      ? URL.createObjectURL(sourceFile.files[0])
+      : sourceUrl.value.trim();
+    cam.loop = !!sourceLoop.checked;
+    cam.src = src;
+    cam.muted = true; // autoplay policy: audio captured via MediaElementSource
+    await cam.play().catch(() => {});
+    loadHlsIfNeeded(src);
+    // CreateMediaElementSource can only be called once per element
+    videoMediaElNode = videoMediaElNode || audioCtx.createMediaElementSource(cam);
+    sourceNode = videoMediaElNode;
+    buildInputGraph();
+    setChip(chipVoice, "Mic: video", "on");
+  }
+  if (frameTimer) clearInterval(frameTimer);
+  frameTimer = setInterval(sendFrame, 1000);
+}
+
+function buildInputGraph() {
+  try { processor && processor.disconnect(); } catch {}
+  try { sourceNode && sourceNode.disconnect(); } catch {}
   processor = audioCtx.createScriptProcessor(4096, 1, 1);
   processor.onaudioprocess = (e) => {
-    if (!micOn || !ws || ws.readyState !== 1) return;
+    const send = isCamera ? micOn : videoAudioOn;
+    if (!send || !ws || ws.readyState !== 1) return;
     const input = e.inputBuffer.getChannelData(0);
     const pcm = downsampleTo16k(input, audioCtx.sampleRate);
     ws.send(JSON.stringify({ type: "audio", format: "pcm16le_16k", data: b64FromInt16(pcm) }));
@@ -825,11 +921,34 @@ async function startMedia() {
   sourceNode.connect(processor);
   processor.connect(gain);
   gain.connect(audioCtx.destination);
-
-  if (frameTimer) clearInterval(frameTimer);
-  frameTimer = setInterval(sendFrame, 1000);
-  setChip(chipVoice, micOn ? "Mic: on" : "Mic: off", micOn ? "on" : "");
 }
+
+function loadHlsIfNeeded(url) {
+  if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
+  const v = (url || "").toLowerCase();
+  if (!v.endsWith(".m3u8")) return;
+  const HlsCtor = window.Hls;
+  if (HlsCtor && HlsCtor.isSupported()) {
+    hlsInstance = new HlsCtor();
+    hlsInstance.loadSource(url);
+    hlsInstance.attachMedia(cam);
+  } // else: browser plays natively (Safari) or will fail gracefully
+}
+
+// Load hls.js once when a stream is selected and the script isn't present yet.
+function ensureHlsScriptLoaded() {
+  if (window.Hls || !inputMode === "stream") return;
+  if (document.querySelector('script[data-hls]')) return;
+  const s = document.createElement("script");
+  s.src = "https://unpkg.com/hls.js@1.5.12/dist/hls.min.js";
+  s.dataset.hls = "1";
+  s.async = true;
+  document.head.appendChild(s);
+}
+if (inputMode === "stream") ensureHlsScriptLoaded();
+document.querySelectorAll(".src-btn").forEach(el => el.addEventListener("click", () => {
+  if (el.dataset.mode === "stream") ensureHlsScriptLoaded();
+}));
 
 function sendFrame() {
   if (!ws || ws.readyState !== 1 || !cam.videoWidth) return;
@@ -967,10 +1086,12 @@ function stopAll() {
   frameTimer = null;
   try { processor && processor.disconnect(); } catch {}
   try { sourceNode && sourceNode.disconnect(); } catch {}
+  if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
   if (ws) { try { ws.close(); } catch {} }
   ws = null;
+  cam.pause(); cam.src = ""; cam.srcObject = null;
   bar.style.display = "none";
   activity.style.display = "none";
   tasksEl.style.display = "none";
@@ -1186,6 +1307,8 @@ document.getElementById("connect-btn").onclick = async () => {
   clearAllTasks();
   try {
     await startMedia();
+    // Repurpose mic button label for video modes
+    micBtnEl.textContent = isCamera ? (micOn ? "Mic on" : "Mic off") : (cam.paused ? "Play" : "Pause");
     await ensurePlayCtx();
     ws = new WebSocket(wsUrl());
     ws.onopen = () => {
@@ -1223,13 +1346,6 @@ document.getElementById("connect-btn").onclick = async () => {
 };
 
 document.getElementById("audio-unlock").onclick = () => ensurePlayCtx();
-document.getElementById("mic-btn").onclick = (e) => {
-  micOn = !micOn;
-  e.target.textContent = micOn ? "Mic on" : "Mic off";
-  e.target.classList.toggle("on", micOn);
-  setChip(chipVoice, micOn ? "Mic: on" : "Mic: muted", micOn ? "on" : "hot");
-  logAct("system", micOn ? "Mic unmuted" : "Mic muted");
-};
 document.getElementById("flip-btn").onclick = async () => {
   facing = facing === "environment" ? "user" : "environment";
   await startMedia();
@@ -1282,6 +1398,29 @@ coreBtn.onclick = () => {
   }, 5000);
 };
 document.getElementById("disc-btn").onclick = () => stopAll();
+
+// In video modes, repurpose the Mic button as Play / Pause.
+micBtnEl.onclick = () => {
+  if (isCamera) {
+    micOn = !micOn;
+    micBtnEl.textContent = micOn ? "Mic on" : "Mic off";
+    micBtnEl.classList.toggle("on", micOn);
+    setChip(chipVoice, micOn ? "Mic: on" : "Mic: muted", micOn ? "on" : "hot");
+    logAct("system", micOn ? "Mic unmuted" : "Mic muted");
+  } else {
+    if (cam.paused) {
+      cam.play().catch(() => {});
+      videoAudioOn = true;
+      micBtnEl.textContent = "Pause";
+      micBtnEl.classList.add("on");
+    } else {
+      cam.pause();
+      videoAudioOn = false;
+      micBtnEl.textContent = "Play";
+      micBtnEl.classList.remove("on");
+    }
+  }
+};
 document.getElementById("act-clear").onclick = (e) => {
   e.stopPropagation();
   actBody.innerHTML = "";

@@ -2551,6 +2551,25 @@ async def index(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(CLIENT_HTML)
 
 
+DEMO_ASSETS_DIR = REPO / "state" / "omni-demo"
+
+
+async def serve_demo_asset(request: web.Request) -> web.StreamResponse:
+    """Serve generated demo assets (e.g. /omni-demo/omni-tasks-demo.mp4)."""
+    name = request.match_info.get("name", "")
+    if not name or "/" in name or ".." in name:
+        return web.Response(status=400)
+    try:
+        path = (DEMO_ASSETS_DIR / name).resolve()
+        path.relative_to(DEMO_ASSETS_DIR.resolve())
+    except Exception:
+        return web.Response(status=404)
+    if not path.exists():
+        return web.Response(status=404)
+    ct = "video/mp4" if name.endswith(".mp4") else "application/octet-stream"
+    return web.FileResponse(path, headers={"Content-Type": ct})
+
+
 async def legacy_omni_redirect(_request: web.Request) -> web.StreamResponse:
     """Old /omni bookmarks → canonical /omni-exp (no separate app)."""
     raise web.HTTPFound("/omni-exp")
@@ -2580,6 +2599,7 @@ def make_app() -> web.Application:
     # Pre-rename paths: redirect only (do not serve a second identity).
     app.router.add_get("/omni", legacy_omni_redirect)
     app.router.add_get("/omni-client.html", legacy_omni_redirect)
+    app.router.add_get("/omni-demo/{name}", serve_demo_asset)
     app.router.add_get("/ws", ws_handler)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
