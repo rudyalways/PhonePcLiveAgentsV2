@@ -294,6 +294,7 @@
     <label class="src-btn" data-mode="stream">Stream</label>
     <label class="src-btn" data-mode="demo">Demo reel</label>
     <label class="src-btn" data-mode="demo-podcast">Podcast demo</label>
+    <label class="src-btn" data-mode="demo-multi">Multi-speaker demo</label>
   </div>
   <input id="source-file" type="file" accept="video/*" style="display:none" />
   <input id="source-url" type="text" placeholder="Video URL (.mp4 / .m3u8)…" style="display:none" autocomplete="off" />
@@ -393,10 +394,12 @@ document.querySelectorAll(".src-btn").forEach((el) => {
     sourceFile.style.display = inputMode === "file" ? "" : "none";
     sourceUrl.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
     loopWrap.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
-    if (inputMode === "demo" || inputMode === "demo-podcast") {
+    if (inputMode === "demo" || inputMode === "demo-podcast" || inputMode === "demo-multi") {
       sourceUrl.value = inputMode === "demo-podcast"
         ? location.origin + "/omni-demo/omni-podcast-demo.mp4"
-        : location.origin + "/omni-demo/omni-tasks-demo.mp4";
+        : inputMode === "demo-multi"
+          ? location.origin + "/omni-demo/omni-multi-speaker-demo.mp4"
+          : location.origin + "/omni-demo/omni-tasks-demo.mp4";
       sourceLoop.checked = true;
       sourceUrl.style.display = "none";
       loopWrap.style.display = "none";
@@ -408,7 +411,9 @@ document.querySelectorAll(".src-btn").forEach((el) => {
         ? "Start video & connect"
         : inputMode === "demo-podcast"
           ? "Play podcast demo"
-          : "Connect";
+          : inputMode === "demo-multi"
+            ? "Play multi-speaker demo"
+            : "Connect";
   });
 });
 // Live stream default: loop on
