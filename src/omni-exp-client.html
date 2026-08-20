@@ -293,6 +293,7 @@
     <label class="src-btn" data-mode="url">URL</label>
     <label class="src-btn" data-mode="stream">Stream</label>
     <label class="src-btn" data-mode="demo">Demo reel</label>
+    <label class="src-btn" data-mode="demo-podcast">Podcast demo</label>
   </div>
   <input id="source-file" type="file" accept="video/*" style="display:none" />
   <input id="source-url" type="text" placeholder="Video URL (.mp4 / .m3u8)…" style="display:none" autocomplete="off" />
@@ -392,8 +393,10 @@ document.querySelectorAll(".src-btn").forEach((el) => {
     sourceFile.style.display = inputMode === "file" ? "" : "none";
     sourceUrl.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
     loopWrap.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
-    if (inputMode === "demo") {
-      sourceUrl.value = location.origin + "/omni-demo/omni-tasks-demo.mp4";
+    if (inputMode === "demo" || inputMode === "demo-podcast") {
+      sourceUrl.value = inputMode === "demo-podcast"
+        ? location.origin + "/omni-demo/omni-podcast-demo.mp4"
+        : location.origin + "/omni-demo/omni-tasks-demo.mp4";
       sourceLoop.checked = true;
       sourceUrl.style.display = "none";
       loopWrap.style.display = "none";
@@ -403,7 +406,9 @@ document.querySelectorAll(".src-btn").forEach((el) => {
       ? "Start camera & connect"
       : inputMode === "file"
         ? "Start video & connect"
-        : "Connect";
+        : inputMode === "demo-podcast"
+          ? "Play podcast demo"
+          : "Connect";
   });
 });
 // Live stream default: loop on
@@ -891,6 +896,9 @@ async function startMedia() {
       ? URL.createObjectURL(sourceFile.files[0])
       : sourceUrl.value.trim();
     cam.loop = !!sourceLoop.checked;
+    // CORS is required so toBlob() can read pixels from remote sources.
+    // File objects (blob: URLs) are same-origin and work without this.
+    cam.crossOrigin = (inputMode === "file" && sourceFile.files?.[0]) ? "" : "anonymous";
     cam.src = src;
     cam.muted = true; // autoplay policy: audio captured via MediaElementSource
     await cam.play().catch(() => {});
@@ -926,9 +934,15 @@ function buildInputGraph() {
 function loadHlsIfNeeded(url) {
   if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
   const v = (url || "").toLowerCase();
-  if (!v.endsWith(".m3u8")) return;
+  // blob: and data: URLs are same-origin — no CORS needed and setting it
+  // causes some browsers to reject the stream entirely.
+  if (!v.endsWith(".m3u8")) {
+    if (v.startsWith("blob:") || v.startsWith("data:")) cam.crossOrigin = "";
+    return;
+  }
   const HlsCtor = window.Hls;
   if (HlsCtor && HlsCtor.isSupported()) {
+    cam.crossOrigin = "anonymous"; // hls.js needs CORS to read video pixels
     hlsInstance = new HlsCtor();
     hlsInstance.loadSource(url);
     hlsInstance.attachMedia(cam);
@@ -937,7 +951,7 @@ function loadHlsIfNeeded(url) {
 
 // Load hls.js once when a stream is selected and the script isn't present yet.
 function ensureHlsScriptLoaded() {
-  if (window.Hls || !inputMode === "stream") return;
+  if (window.Hls || inputMode !== "stream") return;
   if (document.querySelector('script[data-hls]')) return;
   const s = document.createElement("script");
   s.src = "https://unpkg.com/hls.js@1.5.12/dist/hls.min.js";
@@ -957,7 +971,13 @@ function sendFrame() {
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d");
-  ctx.drawImage(cam, 0, 0, w, h);
+  try {
+    ctx.drawImage(cam, 0, 0, w, h);
+  } catch {
+    // Tainted canvas: CORS blocked pixel read from a remote source.
+    // The server must return `Access-Control-Allow-Origin: *` for the stream.
+    return;
+  }
   canvas.toBlob(async (blob) => {
     if (!blob || !ws || ws.readyState !== 1) return;
     const buf = await blob.arrayBuffer();
@@ -1089,6 +1109,8 @@ function stopAll() {
   if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+  processor = null; sourceNode = null;
   if (ws) { try { ws.close(); } catch {} }
   ws = null;
   cam.pause(); cam.src = ""; cam.srcObject = null;
