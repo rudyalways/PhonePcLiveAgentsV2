@@ -172,6 +172,68 @@ _WORK_TOOL_DESC_RESEARCH = (
     "separately. Speak a short summary when ready."
 )
 
+_BENCHMARK_PROACTIVE_MIDDLE = (
+    "MODE: benchmark_proactive (active) — proactive video analysis without user prompts.\n"
+    "CONTINUOUSLY analyze the video stream and create work tasks when you detect:\n"
+    "- A clear topic or subject (person speaking, product demo, tutorial, etc.)\n"
+    "- Key information that should be captured (speaker identity, main topics, actions)\n"
+    "- Important visual or audio events (scene changes, demonstrations, key points)\n"
+    "\n"
+    "Call work proactively to:\n"
+    "1. Identify who is speaking and what they're discussing\n"
+    "2. Summarize key topics and main points\n"
+    "3. Extract important information (names, products, concepts)\n"
+    "4. Note significant visual content or demonstrations\n"
+    "\n"
+    "Do NOT wait for user questions — proactively create analysis tasks as you watch.\n"
+    "Create a new work task every 30-60 seconds of video content to capture ongoing analysis.\n"
+    "\n"
+    "TOOLS:\n"
+    "- work: Proactive analysis tool. Call frequently with what you're observing.\n"
+    "\n"
+)
+
+_BENCHMARK_INTERACTIVE_MIDDLE = (
+    "MODE: benchmark_interactive (active) — simulated user questions during video.\n"
+    "You will receive SIMULATED USER PROMPTS asking about the video content.\n"
+    "Answer these questions by calling work with the question + current video context.\n"
+    "\n"
+    "For each simulated question:\n"
+    "1. Call work with the question and relevant video observations\n"
+    "2. Wait for TASK_RESULT\n"
+    "3. Speak the answer concisely\n"
+    "\n"
+    "Common question types:\n"
+    "- 'Who is speaking?' → identify speakers by name/role\n"
+    "- 'What is the topic?' → identify main subject/theme\n"
+    "- 'Summarize this' → extract key points from video\n"
+    "- 'What are they doing?' → describe visible actions/demonstrations\n"
+    "\n"
+    "TOOLS:\n"
+    "- work: Answer user questions about video. Same wait/result rules.\n"
+    "\n"
+)
+
+_DEMO_MIDDLE = (
+    "\n"
+    "When you receive a question like 'Who is speaking?' or 'What is the topic?':\n"
+    "- Call work immediately with the question + what you see in the current frames\n"
+    "- Provide context from the video to help answer the question\n"
+    "- Wait for TASK_RESULT and speak the answer\n"
+    "\n"
+    "TOOLS:\n"
+    "- work: Answer user questions using video context. Call for every question.\n"
+    "\n"
+)
+
+BENCHMARK_TASK_SYSTEM = (
+    "===SUTANDO SYSTEM INSTRUCTIONS===\n"
+    "BENCHMARK MODE — analyze video content and extract information.\n"
+    "The user's request is a video analysis task. Process it normally with all available tools.\n"
+    "Output: plain text summary of findings (who, what, topics, key points).\n"
+    "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
+)
+
 _DEMO_MIDDLE = (
     "MODE: demo (active) — stunning HTML demo for the product on camera.\n"
     "- Call work for non-trivial product/topic asks.\n"
@@ -413,7 +475,8 @@ RESEARCH_TASK_SYSTEM = (
 )
 
 _VALID_MODES = frozenset(
-    {"normal_with_gui", "no_gui", "no_gui_html_output", "research", "demo"}
+    {"normal_with_gui", "no_gui", "no_gui_html_output", "research", "demo",
+     "benchmark_proactive", "benchmark_interactive"}
 )
 
 
@@ -439,6 +502,10 @@ def normalize_omni_exp_mode(raw: str | None) -> str:
         return "no_gui"
     if v in ("normal_with_gui", "normal", "gui", "with_gui"):
         return "normal_with_gui"
+    if v in ("benchmark_proactive", "proactive", "auto_analyze"):
+        return "benchmark_proactive"
+    if v in ("benchmark_interactive", "interactive", "simulated"):
+        return "benchmark_interactive"
     if v in _VALID_MODES:
         return v
     return "demo"
@@ -460,6 +527,10 @@ def build_omni_exp_instructions(mode: str, *, override: str | None = None) -> st
         middle = _RESEARCH_MIDDLE
     elif m == "demo":
         middle = _DEMO_MIDDLE
+    elif m == "benchmark_proactive":
+        middle = _BENCHMARK_PROACTIVE_MIDDLE
+    elif m == "benchmark_interactive":
+        middle = _BENCHMARK_INTERACTIVE_MIDDLE
     else:
         middle = _NORMAL_MIDDLE
     text = _COMMON_PREFIX + middle + _CRITICAL_AND_VOICE
@@ -478,6 +549,8 @@ def work_tool_description(mode: str) -> str:
         return _WORK_TOOL_DESC_RESEARCH
     if m == "demo":
         return _WORK_TOOL_DESC_DEMO
+    if m in ("benchmark_proactive", "benchmark_interactive"):
+        return "Analyze video content and create tasks. Call frequently for proactive analysis."
     return _WORK_TOOL_DESC_NORMAL
 
 
@@ -513,6 +586,8 @@ def task_system_suffix(mode: str, task_body: str = "") -> str:
         return "\n" + NO_GUI_HTML_TASK_SYSTEM
     if m == "demo":
         return "\n" + DEMO_TASK_SYSTEM
+    if m in ("benchmark_proactive", "benchmark_interactive"):
+        return "\n" + BENCHMARK_TASK_SYSTEM
     if m == "research":
         if research_task_kind(task_body) == "capture-flush":
             return "\n" + RESEARCH_CAPTURE_FLUSH_TASK_SYSTEM
