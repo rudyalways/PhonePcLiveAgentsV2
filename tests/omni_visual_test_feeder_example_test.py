@@ -16,6 +16,7 @@ import asyncio
 import socket
 import sys
 from pathlib import Path
+import pytest
 
 # Add feeder directory to path for imports
 REPO = Path(__file__).resolve().parent.parent
@@ -34,6 +35,7 @@ def _port_open(port: int) -> bool:
         return s.connect_ex(("localhost", port)) == 0
 
 
+@pytest.mark.asyncio
 async def test_synthetic_frames_low_frequency():
     """Test synthetic frame generation at low frequency (cost-effective for tests)."""
     feeder = OmniVisualTestFeeder(
@@ -67,6 +69,7 @@ async def test_synthetic_frames_low_frequency():
         raise
 
 
+@pytest.mark.asyncio
 async def test_manual_frame_injection():
     """Test manual single-frame injection (useful for specific test scenarios)."""
     feeder = OmniVisualTestFeeder(mode='synthetic', omni_port=7090)
@@ -100,6 +103,7 @@ async def test_manual_frame_injection():
         await feeder.stop()
 
 
+@pytest.mark.asyncio
 async def test_real_screenshots_if_available():
     """Test real screenshot capture (requires screen-capture-server running)."""
     if not _port_open(7900) or not read_capture_token():

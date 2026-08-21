@@ -132,8 +132,8 @@ class OmniVisualTestFeeder:
         omni_host: str = 'localhost',
         omni_port: int = 7090,
         screen_capture_port: int = 7900,
-        user: str = 'feeder-test',
-        secret: str = '',
+        user: str = 'feedertest',
+        secret: str = 'testsecret',
         ready_timeout_s: float = 15.0,
         max_width: int = 1024,
     ):
@@ -165,6 +165,7 @@ class OmniVisualTestFeeder:
         self._ws: Optional[ClientWebSocketResponse] = None  # type: ignore
         self._session: Optional[ClientSession] = None  # type: ignore
         self._session_started = False
+        self._connection_lock = asyncio.Lock()
         self.stats = FrameStats()
 
     async def connect(self) -> None:
@@ -224,9 +225,26 @@ class OmniVisualTestFeeder:
             })
             self.stats.frames_sent += 1
             return True
+        except (ConnectionError, TimeoutError, asyncio.TimeoutError) as e:
+            print(f"Network error sending frame: {e}")
+            self.stats.frames_failed += 1
+            # Close connection so next attempt reconnects
+            await self._close_connection()
+            return False
         except Exception as e:
             print(f"Frame injection failed: {e}")
             self.stats.frames_failed += 1
+            return False
+
+    async def _send_ping(self) -> bool:
+        """Send ping to keep connection alive (agent expects control/ping)."""
+        try:
+            await self._ensure_connection()
+            if not self._ws or self._ws.closed:
+                return False
+            await self._ws.send_json({"type": "control", "action": "ping"})
+            return True
+        except Exception:
             return False
 
     async def inject_audio(self, pcm16le_16k: bytes, chunk_ms: int = 100) -> bool:
@@ -296,73 +314,88 @@ class OmniVisualTestFeeder:
 
     async def _ensure_connection(self) -> None:
         """Ensure WebSocket connection + session.start handshake are done."""
-        if not HAS_AIOHTTP or not aiohttp:
-            raise RuntimeError("aiohttp required")
+        async with self._connection_lock:
+            if not HAS_AIOHTTP or not aiohttp:
+                raise RuntimeError("aiohttp required")
 
-        if self._ws and not self._ws.closed:
-            return
+            # Check if current connection is actually usable
+            if self._ws and not self._ws.closed and self._session_started:
+                return
 
-        if not self._session or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        self._session_started = False
+            # Clean up any stale connection first
+            if self._ws:
+                await self._close_connection()
 
-        # The agent serves wss:// only when state/server.crt+key exist,
-        # plain ws:// otherwise. Try TLS first (self-signed → no verify),
-        # fall back to plain ws.
-        sslctx = ssl.create_default_context()
-        sslctx.check_hostname = False
-        sslctx.verify_mode = ssl.CERT_NONE
-        last_err: Optional[Exception] = None
-        for scheme, ssl_arg in (("wss", sslctx), ("ws", None)):
-            url = f"{scheme}://{self.omni_host}:{self.omni_port}/ws"
-            try:
-                self._ws = await self._session.ws_connect(url, ssl=ssl_arg, max_msg_size=8 * 1024 * 1024)
-                break
-            except Exception as e:
-                last_err = e
-                self._ws = None
-        if not self._ws:
-            print(f"WebSocket connection failed: {last_err}")
-            raise last_err  # type: ignore[misc]
+            if not self._session or self._session.closed:
+                timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=15)
+                self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session_started = False
 
-        # Mandatory handshake — everything before session.start is rejected.
-        await self._ws.send_json({
-            "type": "session.start",
-            "user": self.user,
-            "auth": self.secret,
-        })
-        # Wait for session.ready. The agent connects to Qwen upstream inside
-        # session.start handling (can take several seconds) and processes WS
-        # messages sequentially — frames sent before session.ready would queue
-        # unread and be lost if the upstream connect fails. An error frame
-        # (e.g. "auth failed") is fatal.
-        deadline = time.time() + self.ready_timeout_s
-        ready = False
-        while time.time() < deadline:
-            try:
-                msg = await self._ws.receive(timeout=deadline - time.time())
-            except asyncio.TimeoutError:
-                break
-            if msg.type != aiohttp.WSMsgType.TEXT:
-                if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    raise RuntimeError("connection closed during session.start handshake")
-                continue
-            data = json.loads(msg.data)
-            if data.get("type") == "error":
-                raise RuntimeError(f"session.start rejected: {data.get('message')}")
-            if data.get("type") == "session.ready":
-                ready = True
-                break
-            # status/activity frames before ready are fine — keep waiting
-        if not ready:
-            raise TimeoutError(
-                f"no session.ready within {self.ready_timeout_s}s — Qwen upstream connect failed?"
-            )
-        self._session_started = True
+            # The agent serves wss:// only when state/server.crt+key exist,
+            # plain ws:// otherwise. Try TLS first (self-signed → no verify),
+            # fall back to plain ws.
+            sslctx = ssl.create_default_context()
+            sslctx.check_hostname = False
+            sslctx.verify_mode = ssl.CERT_NONE
+            last_err: Optional[Exception] = None
+            for scheme, ssl_arg in (("wss", sslctx), ("ws", None)):
+                url = f"{scheme}://{self.omni_host}:{self.omni_port}/ws"
+                try:
+                    self._ws = await self._session.ws_connect(
+                        url,
+                        ssl=ssl_arg,
+                        max_msg_size=8 * 1024 * 1024,
+                        heartbeat=30.0
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    self._ws = None
+            if not self._ws:
+                raise last_err  # type: ignore[misc]
 
-        # Drain incoming messages so server-side rejections are visible in stats
-        # instead of silently accumulating in the socket buffer.
-        self._reader_task = asyncio.create_task(self._read_loop())
+            # Mandatory handshake — everything before session.start is rejected.
+            await self._ws.send_json({
+                "type": "session.start",
+                "user": self.user,
+                "auth": self.secret,
+            })
+            # Wait for session.ready. The agent connects to Qwen upstream inside
+            # session.start handling (can take several seconds) and processes WS
+            # messages sequentially — frames sent before session.ready would queue
+            # unread and be lost if the upstream connect fails. An error frame
+            # (e.g. "auth failed") is fatal.
+            deadline = time.time() + self.ready_timeout_s
+            ready = False
+            while time.time() < deadline:
+                try:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    msg = await self._ws.receive(timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError(f"connection closed during session.start handshake (msg.type={msg.type})")
+                    # PING/PONG are handled automatically by aiohttp, just continue
+                    continue
+                data = json.loads(msg.data)
+                if data.get("type") == "error":
+                    raise RuntimeError(f"session.start rejected: {data.get('message')}")
+                if data.get("type") == "session.ready":
+                    ready = True
+                    break
+                # status/activity frames before ready are fine — keep waiting
+            if not ready:
+                raise TimeoutError(
+                    f"no session.ready within {self.ready_timeout_s}s — Qwen upstream connect failed?"
+                )
+            self._session_started = True
+
+            # Drain incoming messages so server-side rejections are visible in stats
+            # instead of silently accumulating in the socket buffer.
+            self._reader_task = asyncio.create_task(self._read_loop())
 
     async def _read_loop(self) -> None:
         """Track incoming messages; count error frames from the agent."""
@@ -371,6 +404,12 @@ class OmniVisualTestFeeder:
             return
         try:
             async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.CLOSED:
+                    print("WebSocket closed by server")
+                    break
+                if msg.type == aiohttp.WSMsgType.ERROR:
+                    print(f"WebSocket error: {ws.exception()}")
+                    break
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
                 try:
@@ -381,8 +420,10 @@ class OmniVisualTestFeeder:
                     self.stats.errors_received += 1
                     self.stats.last_errors.append(str(data.get("message", ""))[:200])
                     del self.stats.last_errors[:-5]
-        except Exception:
+        except asyncio.CancelledError:
             pass
+        except Exception as e:
+            print(f"Read loop error: {e}")
 
     async def _close_connection(self) -> None:
         """Close WebSocket connection."""
@@ -396,24 +437,46 @@ class OmniVisualTestFeeder:
         self._session = None
 
     async def _feed_loop(self) -> None:
-        """Main frame feeding loop."""
+        """Main frame feeding loop with exponential backoff on failures."""
+        consecutive_failures = 0
+        max_backoff = min(self.interval_s * 4, 30.0)
+        last_ping = time.time()
+        ping_interval = 5.0  # Send ping every 5s to keep connection alive
+
         while self._running:
             try:
                 await self._ensure_connection()
+
+                # Send periodic ping to keep connection alive
+                if time.time() - last_ping > ping_interval:
+                    await self._send_ping()
+                    last_ping = time.time()
+
                 frame_data = await self._capture_frame()
                 success = await self.inject_single_frame(frame_data)
 
-                if not success:
-                    print(f"Frame send failed (sent={self.stats.frames_sent}, failed={self.stats.frames_failed})")
-
-                await asyncio.sleep(self.interval_s)
+                if success:
+                    consecutive_failures = 0
+                    await asyncio.sleep(self.interval_s)
+                else:
+                    consecutive_failures += 1
+                    backoff = min(self.interval_s * (1.5 ** consecutive_failures), max_backoff)
+                    print(f"Frame send failed (sent={self.stats.frames_sent}, "
+                          f"failed={self.stats.frames_failed}, backing off {backoff:.1f}s)")
+                    await asyncio.sleep(backoff)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"Feed loop error: {e}")
+                consecutive_failures += 1
+                # Connection failures during handshake need longer backoff to avoid hammering
+                base_backoff = 2.0 if "handshake" in str(e) else self.interval_s
+                backoff = min(base_backoff * (1.5 ** consecutive_failures), max_backoff)
+                print(f"Feed loop error: {e}, backing off {backoff:.1f}s")
                 self.stats.frames_failed += 1
-                await asyncio.sleep(self.interval_s)
+                # Close stale connection so next iteration reconnects
+                await self._close_connection()
+                await asyncio.sleep(backoff)
 
     async def _capture_frame(self) -> bytes:
         """Capture a single frame based on mode."""

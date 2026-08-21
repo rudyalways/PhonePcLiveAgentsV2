@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tests" / "visual_feeder"))
@@ -167,6 +168,14 @@ async def main() -> int:
         return 1
     finally:
         await feeder.stop()
+
+
+@pytest.mark.asyncio
+async def test_omni_exp_visual_feeder_e2e():
+    """Pytest wrapper for the E2E test."""
+    result = await main()
+    if result != 0:
+        raise AssertionError("E2E test failed")
 
 
 if __name__ == "__main__":
