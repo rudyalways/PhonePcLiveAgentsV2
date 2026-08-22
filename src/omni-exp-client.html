@@ -438,8 +438,10 @@ document.querySelectorAll(".src-btn").forEach((el) => {
       sourceUrl.style.display = "none";
       loopWrap.style.display = "none";
     }
-    // Auto-open native file picker immediately when File is selected
-    if (isFile) { setTimeout(() => sourceFile.click(), 50); }
+    // Auto-open native file picker immediately when File is selected.
+    // Must be synchronous within the click handler — setTimeout breaks the
+    // browser's user-gesture security check and silently does nothing.
+    if (isFile) { sourceFile.click(); }
     isCamera = inputMode === "live";
     connectLabel.textContent = inputMode === "live"
       ? "Start camera & connect"
