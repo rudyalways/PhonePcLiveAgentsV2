@@ -108,7 +108,10 @@
   .src-btn { font-size: 13px; padding: 5px 10px; border-radius: 6px; background: rgba(255,255,255,0.06); color: var(--muted); cursor: pointer; border: 1px solid transparent; }
   .src-btn.on { background: rgba(196,165,116,0.22); color: var(--ink); border-color: rgba(196,165,116,0.5); }
   #source-url, #loop-wrap { width: 100%; margin-bottom: 8px; color: var(--ink); font-size: 14px; }
-  #loop-wrap { display: none; font-size: 13px; color: var(--muted); margin-top: 2px; }
+  #loop-wrap, #proactive-wrap {
+    display: none; font-size: 13px; color: var(--muted); margin-top: 2px;
+  }
+  #proactive-wrap { display: flex; align-items: center; gap: 6px; color: var(--ink); }
   /* File picker — styled button + filename chip, no raw input visible */
   #source-file { display: none; }
   #file-pick-btn {
@@ -319,6 +322,7 @@
   <input id="file-path-input" type="text" placeholder="or paste path: /Users/you/Movies/podcast.mp4" style="display:none" autocomplete="off" />
   <input id="source-url" type="text" placeholder="Video URL (.mp4 / .m3u8)…" style="display:none" autocomplete="off" />
   <label id="loop-wrap" style="display:none"><input type="checkbox" id="source-loop" /> Loop</label>
+  <label id="proactive-wrap"><input type="checkbox" id="source-proactive" /> 🤖 Proactive analysis (auto-creates tasks every ~45s)</label>
   <input id="user" type="text" placeholder="Username (optional)" autocomplete="username" />
   <input id="secret" type="password" placeholder="Password (optional)" autocomplete="current-password" />
   <button id="connect-btn" type="button">Start camera &amp; connect</button>
@@ -407,6 +411,8 @@ let videoAudioCtx = null;   // persistent AudioContext for video — NEVER close
 let videoProcessor = null;  // ScriptProcessor on videoAudioCtx, recreated each connect
 let isCamera = true;        // false when playing a file/url/stream/demo
 let videoAudioOn = true;    // for video modes: always true until user pauses the video
+let proactiveTimer = null;  // setInterval handle for auto-prompting in video modes
+let proactiveOn = false;    // user-toggled proactive analysis
 
 // Source selector
 const filePathInput = document.getElementById("file-path-input");
@@ -1019,7 +1025,35 @@ async function startMedia() {
   frameTimer = setInterval(sendFrame, 1000);
 }
 
-function buildInputGraph() {
+function startProactiveTimer() {
+  stopProactiveTimer();
+  // Send an analysis prompt every 45 seconds to trigger work tasks
+  const prompts = [
+    "What is being discussed or shown right now? If there's anything actionable, important, or worth capturing, create a task for it.",
+    "Summarize what you've observed in the last minute. Create a work task for any key points, action items, or topics worth researching.",
+    "What's the main topic right now? Create a task to capture the key information you've seen and heard.",
+  ];
+  let idx = 0;
+  proactiveTimer = setInterval(() => {
+    if (!ws || ws.readyState !== 1) return;
+    sendFrame(); // ensure fresh frame in Qwen's buffer
+    setTimeout(() => {
+      if (!ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({
+        type: "control",
+        action: "prompt_manual",
+        text: prompts[idx % prompts.length],
+      }));
+      idx++;
+      logAct("trigger", "Proactive analysis prompt sent");
+    }, 150);
+  }, 45000);
+  logAct("session", "Proactive analysis: ON — task prompts every 45s");
+}
+
+function stopProactiveTimer() {
+  if (proactiveTimer) { clearInterval(proactiveTimer); proactiveTimer = null; }
+}
   try { processor && processor.disconnect(); } catch {}
   try { sourceNode && sourceNode.disconnect(); } catch {}
   processor = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -1210,6 +1244,8 @@ function fmtMs(ms) {
 function stopAll() {
   if (frameTimer) clearInterval(frameTimer);
   frameTimer = null;
+  stopProactiveTimer();
+  proactiveOn = false;
   try { processor && processor.disconnect(); } catch {}
   try { sourceNode && sourceNode.disconnect(); } catch {}
   // Disconnect video processor but keep videoAudioCtx alive (owns videoMediaElNode)
@@ -1254,6 +1290,8 @@ function handleMsg(msg) {
     resetLiveUi();
     const tools = Array.isArray(msg.tools) ? msg.tools.join(",") : "";
     logAct("session", `Connected · ${sessionModel}` + (msg.scene_change ? " · scene_change on" : "") + (tools ? ` · tools=[${tools}]` : ""));
+    // Start proactive analysis timer if enabled and in video mode
+    if (proactiveOn && !isCamera) { startProactiveTimer(); }
   } else if (msg.type === "status") {
     const st = msg.state || "";
     if (st === "user_speaking") setStatus("user speaking", "speak");
