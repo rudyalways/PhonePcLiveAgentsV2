@@ -1474,6 +1474,19 @@ document.getElementById("connect-btn").onclick = async () => {
   const secret = document.getElementById("secret").value;
   const err = document.getElementById("login-error");
   err.textContent = "";
+
+  // Block video/file start when the core isn't ready — tasks would just pile up.
+  if (!isCamera && corePhase !== "ready" && corePhase !== "error") {
+    const hint = corePhase === "starting"
+      ? "Sutando core is still starting up. Wait for Core: ready before playing a video."
+      : "Sutando core is not running. Click Start (bottom right) to launch it, then connect.";
+    err.textContent = hint;
+    // Briefly highlight the core chip so the user knows where to look.
+    chipCore.style.outline = "2px solid #e94560";
+    setTimeout(() => { chipCore.style.outline = ""; }, 3000);
+    return;
+  }
+
   // Re-login always starts from a blank task list (drop stuck Tool/Task-file chips).
   if (ws) { try { ws.close(); } catch {} ws = null; }
   actBody.innerHTML = "";
