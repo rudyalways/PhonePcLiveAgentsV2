@@ -438,9 +438,8 @@ document.querySelectorAll(".src-btn").forEach((el) => {
       sourceUrl.style.display = "none";
       loopWrap.style.display = "none";
     }
-    // Auto-open native file picker immediately when File is selected.
-    // The label has for="source-file" so the browser handles the picker natively.
-    // No JS click() call needed (and it would cause a double-open).
+    // Open native file picker immediately on click — <button> gesture is trusted.
+    if (isFile) sourceFile.click();
     isCamera = inputMode === "live";
     connectLabel.textContent = inputMode === "live"
       ? "Start camera & connect"
@@ -1055,6 +1054,8 @@ function startProactiveTimer() {
 function stopProactiveTimer() {
   if (proactiveTimer) { clearInterval(proactiveTimer); proactiveTimer = null; }
 }
+
+function buildInputGraph() {
   try { processor && processor.disconnect(); } catch {}
   try { sourceNode && sourceNode.disconnect(); } catch {}
   processor = audioCtx.createScriptProcessor(4096, 1, 1);
