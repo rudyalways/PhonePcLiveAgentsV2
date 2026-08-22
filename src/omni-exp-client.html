@@ -316,10 +316,11 @@
   <input id="source-file" type="file" accept="video/*" style="display:none" />
   <button id="file-pick-btn" type="button" style="display:none">📁 Choose video file from Mac…</button>
   <div id="file-name-chip" style="display:none"></div>
+  <input id="file-path-input" type="text" placeholder="or paste path: /Users/you/Movies/podcast.mp4" style="display:none" autocomplete="off" />
   <input id="source-url" type="text" placeholder="Video URL (.mp4 / .m3u8)…" style="display:none" autocomplete="off" />
   <label id="loop-wrap" style="display:none"><input type="checkbox" id="source-loop" /> Loop</label>
-  <input id="user" type="text" placeholder="Username" autocomplete="username" />
-  <input id="secret" type="password" placeholder="Password" autocomplete="current-password" />
+  <input id="user" type="text" placeholder="Username (optional)" autocomplete="username" />
+  <input id="secret" type="password" placeholder="Password (optional)" autocomplete="current-password" />
   <button id="connect-btn" type="button">Start camera &amp; connect</button>
   <div id="login-error"></div>
 </div>
@@ -406,14 +407,17 @@ let isCamera = true;        // false when playing a file/url/stream/demo
 let videoAudioOn = true;    // for video modes: always true until user pauses the video
 
 // Source selector
+const filePathInput = document.getElementById("file-path-input");
 document.querySelectorAll(".src-btn").forEach((el) => {
   el.addEventListener("click", () => {
     document.querySelectorAll(".src-btn").forEach(b => b.classList.remove("on"));
     el.classList.add("on");
     inputMode = el.dataset.mode || "live";
     sourceMode.value = inputMode;
-    filePickBtn.style.display = inputMode === "file" ? "" : "none";
+    const isFile = inputMode === "file";
+    filePickBtn.style.display = isFile ? "" : "none";
     fileNameChip.style.display = "none";
+    filePathInput.style.display = isFile ? "" : "none";
     sourceUrl.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
     loopWrap.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
     if (inputMode === "demo" || inputMode === "demo-podcast" || inputMode === "demo-multi") {
@@ -426,6 +430,8 @@ document.querySelectorAll(".src-btn").forEach((el) => {
       sourceUrl.style.display = "none";
       loopWrap.style.display = "none";
     }
+    // Auto-open native file picker immediately when File is selected
+    if (isFile) { setTimeout(() => sourceFile.click(), 50); }
     isCamera = inputMode === "live";
     connectLabel.textContent = inputMode === "live"
       ? "Start camera & connect"
@@ -439,15 +445,28 @@ document.querySelectorAll(".src-btn").forEach((el) => {
   });
 });
 
-// File pick button — opens native file picker, shows selected name
+// File pick button — opens native file picker again after first pick
 filePickBtn.addEventListener("click", () => sourceFile.click());
 sourceFile.addEventListener("change", () => {
   const f = sourceFile.files?.[0];
   if (f) {
     fileNameChip.textContent = "✓ " + f.name;
     fileNameChip.style.display = "";
+    filePathInput.style.display = "none"; // hide path input once file is chosen
     filePickBtn.textContent = "📁 Change file…";
     connectLabel.textContent = "Start video & connect";
+  }
+});
+
+// File path input — allows pasting a full /path/to/video.mp4 instead of using picker
+filePathInput.addEventListener("input", () => {
+  const v = filePathInput.value.trim();
+  if (v) {
+    fileNameChip.textContent = "📄 " + v.split("/").pop();
+    fileNameChip.style.display = "";
+    connectLabel.textContent = "Start video & connect";
+  } else {
+    fileNameChip.style.display = "none";
   }
 });
 
@@ -932,13 +951,24 @@ async function startMedia() {
   } else {
     // ── file / url / stream / demo ──────────────────────────────────
     micBtnEl.style.display = "none";
-    const src = inputMode === "file" && sourceFile.files?.[0]
-      ? URL.createObjectURL(sourceFile.files[0])
-      : sourceUrl.value.trim();
+    let src;
+    if (inputMode === "file") {
+      const typedPath = document.getElementById("file-path-input").value.trim();
+      if (sourceFile.files?.[0]) {
+        src = URL.createObjectURL(sourceFile.files[0]);
+      } else if (typedPath) {
+        // Convert bare Mac path to a file:// URL so the video element can load it
+        src = typedPath.startsWith("file://") ? typedPath : "file://" + typedPath;
+      } else {
+        src = "";
+      }
+    } else {
+      src = sourceUrl.value.trim();
+    }
     cam.loop = !!sourceLoop.checked;
-    // CORS is required so toBlob() can read pixels from remote sources.
-    // File objects (blob: URLs) are same-origin and work without this.
-    cam.crossOrigin = (inputMode === "file" && sourceFile.files?.[0]) ? "" : "anonymous";
+    // Same-origin: blob: URLs (file picker) and file:// paths need no CORS header
+    const isSameOrigin = (inputMode === "file" && (sourceFile.files?.[0] || src.startsWith("file://")));
+    cam.crossOrigin = isSameOrigin ? "" : "anonymous";
     cam.src = src;
     cam.muted = true; // autoplay policy: audio captured via MediaElementSource
     await cam.play().catch(() => {});
