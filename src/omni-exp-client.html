@@ -402,7 +402,9 @@ let frameTimer = null;
 let playTime = 0;
 let sessionModel = "";
 let lastAsr = "";
-let videoMediaElNode = null; // createMediaElementSource node, built once in video modes
+let videoMediaElNode = null; // createMediaElementSource node, built once per page load
+let videoAudioCtx = null;   // persistent AudioContext for video — NEVER closed
+let videoProcessor = null;  // ScriptProcessor on videoAudioCtx, recreated each connect
 let isCamera = true;        // false when playing a file/url/stream/demo
 let videoAudioOn = true;    // for video modes: always true until user pauses the video
 
@@ -924,15 +926,21 @@ async function startMedia() {
   // Tear down prior state
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
+  // Disconnect the video processor (cheap to recreate) but do NOT close videoAudioCtx
+  // and do NOT null videoMediaElNode — createMediaElementSource is a one-time browser
+  // bind per <video> element; destroying its AudioContext makes it permanently unusable.
+  if (videoProcessor) { try { videoProcessor.disconnect(); } catch {} videoProcessor = null; }
   if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
-  processor = null; sourceNode = null; videoMediaElNode = null;
+  processor = null; sourceNode = null;
   cam.srcObject = null; cam.src = "";
   cam.classList.remove("mirror");
 
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
   if (isCamera) {
-    // ── camera mode ──────────────────────────────────────────────────
+    // Suspend the video audio context so it doesn't waste CPU while mic is active
+    if (videoAudioCtx && videoAudioCtx.state !== "closed") {
+      videoAudioCtx.suspend().catch(() => {});
+    }
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
       video: {
@@ -957,7 +965,6 @@ async function startMedia() {
       if (sourceFile.files?.[0]) {
         src = URL.createObjectURL(sourceFile.files[0]);
       } else if (typedPath) {
-        // Convert bare Mac path to a file:// URL so the video element can load it
         src = typedPath.startsWith("file://") ? typedPath : "file://" + typedPath;
       } else {
         src = "";
@@ -966,17 +973,46 @@ async function startMedia() {
       src = sourceUrl.value.trim();
     }
     cam.loop = !!sourceLoop.checked;
-    // Same-origin: blob: URLs (file picker) and file:// paths need no CORS header
     const isSameOrigin = (inputMode === "file" && (sourceFile.files?.[0] || src.startsWith("file://")));
     cam.crossOrigin = isSameOrigin ? "" : "anonymous";
     cam.src = src;
-    cam.muted = true; // autoplay policy: audio captured via MediaElementSource
+    cam.muted = true; // muted for speaker output; audio still flows through WebAudio graph
     await cam.play().catch(() => {});
     loadHlsIfNeeded(src);
-    // CreateMediaElementSource can only be called once per element
-    videoMediaElNode = videoMediaElNode || audioCtx.createMediaElementSource(cam);
-    sourceNode = videoMediaElNode;
-    buildInputGraph();
+
+    // Persistent video AudioContext — create once, resume on reconnect.
+    // NEVER close it: closing destroys videoMediaElNode which cannot be re-created.
+    if (!videoAudioCtx || videoAudioCtx.state === "closed") {
+      videoAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    await videoAudioCtx.resume();
+
+    // createMediaElementSource can only be called once per <video> element.
+    // videoMediaElNode survives across reconnects; it belongs to videoAudioCtx.
+    if (!videoMediaElNode) {
+      videoMediaElNode = videoAudioCtx.createMediaElementSource(cam);
+    }
+
+    // Fresh ScriptProcessor each connect (processors are cheap; they don't survive ctx closure)
+    videoProcessor = videoAudioCtx.createScriptProcessor(4096, 1, 1);
+    videoProcessor.onaudioprocess = (e) => {
+      if (!videoAudioOn || !ws || ws.readyState !== 1) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm = downsampleTo16k(input, videoAudioCtx.sampleRate);
+      ws.send(JSON.stringify({ type: "audio", format: "pcm16le_16k", data: b64FromInt16(pcm) }));
+    };
+    const silentGain = videoAudioCtx.createGain();
+    silentGain.gain.value = 0; // don't play through speakers; audio goes to WS
+    videoMediaElNode.connect(videoProcessor);
+    videoProcessor.connect(silentGain);
+    silentGain.connect(videoAudioCtx.destination);
+
+    // Keep mic button in sync with video play/pause state
+    cam.onplay  = () => { micBtnEl.textContent = "Pause"; videoAudioOn = true; };
+    cam.onpause = () => { micBtnEl.textContent = "Play"; videoAudioOn = false; };
+    micBtnEl.textContent = cam.paused ? "Play" : "Pause";
+    micBtnEl.style.display = "";
+
     setChip(chipVoice, "Mic: video", "on");
   }
   if (frameTimer) clearInterval(frameTimer);
@@ -1176,6 +1212,11 @@ function stopAll() {
   frameTimer = null;
   try { processor && processor.disconnect(); } catch {}
   try { sourceNode && sourceNode.disconnect(); } catch {}
+  // Disconnect video processor but keep videoAudioCtx alive (owns videoMediaElNode)
+  if (videoProcessor) { try { videoProcessor.disconnect(); } catch {} videoProcessor = null; }
+  if (videoAudioCtx && videoAudioCtx.state !== "closed") {
+    videoAudioCtx.suspend().catch(() => {});
+  }
   if (hlsInstance) { try { hlsInstance.destroy(); } catch {} hlsInstance = null; }
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
@@ -1184,6 +1225,7 @@ function stopAll() {
   if (ws) { try { ws.close(); } catch {} }
   ws = null;
   cam.pause(); cam.src = ""; cam.srcObject = null;
+  cam.onplay = null; cam.onpause = null;
   bar.style.display = "none";
   activity.style.display = "none";
   tasksEl.style.display = "none";
