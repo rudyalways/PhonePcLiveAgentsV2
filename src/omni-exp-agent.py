@@ -847,8 +847,13 @@ def start_sutando_core() -> dict[str, Any]:
         return {"ok": False, "started": False, "message": "start-cli.sh missing", **st}
     log_path = LOGS_DIR / "omni-start-core.log"
     try:
-        # Prefer --force-restart when a stale tmux session may be blocking a fresh start.
-        args = ["bash", str(START_CLI), "--force-restart"]
+        # Use --force-restart only when a session actually exists; on a cold start
+        # it just burns 3-6s in kill-wait loops before claude even starts.
+        session_exists = subprocess.run(
+            ["tmux", "-S", str(TMUX_SOCKET), "has-session", "-t", TMUX_SESSION],
+            capture_output=True, check=False, timeout=3,
+        ).returncode == 0
+        args = ["bash", str(START_CLI), "--force-restart" if session_exists else "--restart"]
         with open(log_path, "a", encoding="utf-8") as logf:
             logf.write(f"\n--- start {datetime.now(timezone.utc).isoformat()} ---\n")
             logf.flush()
@@ -867,8 +872,7 @@ def start_sutando_core() -> dict[str, Any]:
                 env=env,
             )
         _ensure_core_heartbeat()
-        # Give heartbeat a moment so the next probe can flip to UP.
-        time.sleep(1.5)
+        # Don't block here — the HUD poller will push the status update shortly.
         logger.info("Started sutando-core via %s pid=%s log=%s", args, proc.pid, log_path)
         st2 = probe_core_status()
         return {
@@ -2408,8 +2412,8 @@ async def result_poller(app: web.Application) -> None:
             except Exception as e:
                 logger.warning("completed-pair cleanup: %s", e)
         ticks += 1
-        # Push core liveness every ~4s (or on change) so the HUD stays honest.
-        if ticks % 8 == 0 and sessions:
+        # Push core status more frequently while booting (every ~1s instead of ~4s)
+        if ticks % 2 == 0 and sessions:
             try:
                 core = probe_core_status()
                 sig = (
