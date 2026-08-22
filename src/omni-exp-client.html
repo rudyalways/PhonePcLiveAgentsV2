@@ -107,8 +107,25 @@
   #source-select { display: flex; gap: 6px; margin: 14px 0 12px; flex-wrap: wrap; }
   .src-btn { font-size: 13px; padding: 5px 10px; border-radius: 6px; background: rgba(255,255,255,0.06); color: var(--muted); cursor: pointer; border: 1px solid transparent; }
   .src-btn.on { background: rgba(196,165,116,0.22); color: var(--ink); border-color: rgba(196,165,116,0.5); }
-  #source-url, #source-file, #loop-wrap { width: 100%; margin-bottom: 8px; color: var(--ink); font-size: 14px; }
+  #source-url, #loop-wrap { width: 100%; margin-bottom: 8px; color: var(--ink); font-size: 14px; }
   #loop-wrap { display: none; font-size: 13px; color: var(--muted); margin-top: 2px; }
+  /* File picker — styled button + filename chip, no raw input visible */
+  #source-file { display: none; }
+  #file-pick-btn {
+    display: none; width: 100%; margin-bottom: 8px;
+    background: rgba(255,255,255,0.07); color: var(--ink);
+    border: 1.5px dashed rgba(255,255,255,0.22); border-radius: 12px;
+    padding: 13px 16px; font-size: 15px; font-family: ui-sans-serif, system-ui, sans-serif;
+    cursor: pointer; text-align: left; transition: background 0.15s, border-color 0.15s;
+  }
+  #file-pick-btn:hover { background: rgba(255,255,255,0.12); border-color: rgba(196,165,116,0.5); }
+  #file-name-chip {
+    display: none; width: 100%; margin-bottom: 8px;
+    background: rgba(78,204,163,0.12); color: var(--ok);
+    border: 1px solid rgba(78,204,163,0.35); border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; font-family: ui-sans-serif, system-ui, sans-serif;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   #login-error { color: #ffb4a8; font-size: 13px; min-height: 1.2em; margin-top: 8px; }
   #bar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 3;
@@ -288,15 +305,17 @@
   <h1>Omni</h1>
   <p>Camera-first guide. Voice when you speak; scene changes can prompt quietly.</p>
   <div id="source-select">
-    <label class="src-btn on" data-mode="live">Live</label>
-    <label class="src-btn" data-mode="file">File</label>
-    <label class="src-btn" data-mode="url">URL</label>
-    <label class="src-btn" data-mode="stream">Stream</label>
-    <label class="src-btn" data-mode="demo">Demo reel</label>
-    <label class="src-btn" data-mode="demo-podcast">Podcast demo</label>
-    <label class="src-btn" data-mode="demo-multi">Multi-speaker demo</label>
+    <label class="src-btn on" data-mode="live">📷 Live</label>
+    <label class="src-btn" data-mode="file">📁 File</label>
+    <label class="src-btn" data-mode="url">🔗 URL</label>
+    <label class="src-btn" data-mode="stream">📡 Stream</label>
+    <label class="src-btn" data-mode="demo">🎬 Demo reel</label>
+    <label class="src-btn" data-mode="demo-podcast">🎙 Podcast demo</label>
+    <label class="src-btn" data-mode="demo-multi">👥 Multi-speaker demo</label>
   </div>
   <input id="source-file" type="file" accept="video/*" style="display:none" />
+  <button id="file-pick-btn" type="button" style="display:none">📁 Choose video file from Mac…</button>
+  <div id="file-name-chip" style="display:none"></div>
   <input id="source-url" type="text" placeholder="Video URL (.mp4 / .m3u8)…" style="display:none" autocomplete="off" />
   <label id="loop-wrap" style="display:none"><input type="checkbox" id="source-loop" /> Loop</label>
   <input id="user" type="text" placeholder="Username" autocomplete="username" />
@@ -323,13 +342,13 @@
   <div id="activity-body"></div>
 </div>
 <div id="bar">
-  <button type="button" id="audio-unlock">Enable sound</button>
-  <button type="button" id="mic-btn" class="on">Mic on</button>
-  <button type="button" id="flip-btn">Flip</button>
-  <button type="button" id="ask-btn">Ask view</button>
-  <button type="button" id="work-btn">Task…</button>
-  <button type="button" id="core-btn">Start</button>
-  <button type="button" id="disc-btn" class="danger">End</button>
+  <button type="button" id="audio-unlock" title="Unlock audio playback (required on iOS/Safari after page load)">🔊 Sound</button>
+  <button type="button" id="mic-btn" class="on" title="Toggle microphone on/off — voice input to Qwen">🎙 Mic</button>
+  <button type="button" id="flip-btn" title="Flip camera between front and rear (live camera mode only)">🔄 Flip</button>
+  <button type="button" id="ask-btn" title="Send the current video frame to Qwen and ask it to describe what it sees">👁 Ask</button>
+  <button type="button" id="work-btn" title="Type a task for Qwen to work on (delegates to sutando-core via the work tool)">📋 Task…</button>
+  <button type="button" id="core-btn" title="Start or stop the sutando-core session (required for 'work' tasks to complete)">Start</button>
+  <button type="button" id="disc-btn" class="danger" title="Disconnect and end the session">End</button>
 </div>
 <canvas id="snap"></canvas>
 
@@ -359,6 +378,8 @@ const sourceUrl = document.getElementById("source-url");
 const sourceLoop = document.getElementById("source-loop");
 const loopWrap = document.getElementById("loop-wrap");
 const connectLabel = document.getElementById("connect-btn");
+const filePickBtn = document.getElementById("file-pick-btn");
+const fileNameChip = document.getElementById("file-name-chip");
 const micBtnEl = document.getElementById("mic-btn");
 let inputMode = "live"; // live | file | url | stream | demo
 let hlsInstance = null;  // hls.js instance, created only when a live stream is played
@@ -391,7 +412,8 @@ document.querySelectorAll(".src-btn").forEach((el) => {
     el.classList.add("on");
     inputMode = el.dataset.mode || "live";
     sourceMode.value = inputMode;
-    sourceFile.style.display = inputMode === "file" ? "" : "none";
+    filePickBtn.style.display = inputMode === "file" ? "" : "none";
+    fileNameChip.style.display = "none";
     sourceUrl.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
     loopWrap.style.display = inputMode === "url" || inputMode === "stream" ? "" : "none";
     if (inputMode === "demo" || inputMode === "demo-podcast" || inputMode === "demo-multi") {
@@ -416,6 +438,19 @@ document.querySelectorAll(".src-btn").forEach((el) => {
             : "Connect";
   });
 });
+
+// File pick button — opens native file picker, shows selected name
+filePickBtn.addEventListener("click", () => sourceFile.click());
+sourceFile.addEventListener("change", () => {
+  const f = sourceFile.files?.[0];
+  if (f) {
+    fileNameChip.textContent = "✓ " + f.name;
+    fileNameChip.style.display = "";
+    filePickBtn.textContent = "📁 Change file…";
+    connectLabel.textContent = "Start video & connect";
+  }
+});
+
 // Live stream default: loop on
 sourceUrl.addEventListener("input", () => {
   const v = sourceUrl.value.trim().toLowerCase();
