@@ -309,7 +309,7 @@
   <p>Camera-first guide. Voice when you speak; scene changes can prompt quietly.</p>
   <div id="source-select">
     <label class="src-btn on" data-mode="live">📷 Live</label>
-    <label class="src-btn" data-mode="file">📁 File</label>
+    <button class="src-btn" type="button" data-mode="file">📁 File</button>
     <label class="src-btn" data-mode="url">🔗 URL</label>
     <label class="src-btn" data-mode="stream">📡 Stream</label>
     <label class="src-btn" data-mode="demo">🎬 Demo reel</label>
@@ -439,9 +439,8 @@ document.querySelectorAll(".src-btn").forEach((el) => {
       loopWrap.style.display = "none";
     }
     // Auto-open native file picker immediately when File is selected.
-    // Must be synchronous within the click handler — setTimeout breaks the
-    // browser's user-gesture security check and silently does nothing.
-    if (isFile) { sourceFile.click(); }
+    // The label has for="source-file" so the browser handles the picker natively.
+    // No JS click() call needed (and it would cause a double-open).
     isCamera = inputMode === "live";
     connectLabel.textContent = inputMode === "live"
       ? "Start camera & connect"
